@@ -81,6 +81,8 @@ def main() -> int:
     render = [*common, "--tiers", args.tiers, *(["--skip-t3-gate"] if args.skip_t3_gate else [])]
     for script, arguments in (
         ("extract_blocks.py", extract),
+        # Pick the pages to look at beside their text; the model's answers come in on the next run.
+        ("page_check.py", ["plan", *sources, *common]),
         ("guard_blocks.py", [*repeat("--text-dir", args.text_dir), *common]),
         ("render_kb.py", render),
         ("curate.py", ["prepare", *common]),

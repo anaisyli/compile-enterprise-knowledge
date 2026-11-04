@@ -66,6 +66,12 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - Token 报错时按输出的 `next_action` 处理；没设置过时，让用户自己运行 `scripts/setup_mineru.cmd`。Token 不要经过对话。
    - **MinerU 用不了**（没批准、Token 过期、没额度）时，用 AI 读图补：运行 `ai_read.py export --out <运行目录> --package <初筛包>`，按 `04_知识库构建/ai-read/README.md` 的规则逐张看图、逐字转写，写 `answer-*.jsonl`；再运行 `ai_read.py collect --out <运行目录>`，重跑第 2 步。图片多时可以分给子 Agent，每个拿一部分 `todo.jsonl`。转写的内容会标 ⚠“AI 读图，待核对”，登记 ANM。告诉用户哪些页是 AI 读的，以后有 MinerU 再识别会替换。
 
+4.5 **看图核对**（净化原文要和原件一致，这一步不能跳过）：
+   - 流水线会自动挑出要对照原图看的页，写进 `04_知识库构建/page-check/todo.jsonl`：画册、PPT、公司简介这类 T1/T2 资料里图多字少的页、产品图比找到的款号多的页、文字里有乱码的页、Word 里嵌的图片，再加一成随机抽查。完全没字的页不在这里，归 MinerU 或 AI 读图。
+   - 按 `page-check/README.md` 逐张看图，对照同一行里提取的文字，写 `answer-*.jsonl`：漏掉的字逐字补上，提取错了的地方写清楚，一页多款时写款号对应；原件本身看不出对应的标 `unclear`。页多时分给子 Agent，每个拿一部分。
+   - 运行 `page_check.py collect --out <运行目录>`，再重跑第 2 步。补上的字标 ⚠“AI 看图补充”；文字有误的页标 ⚠“以原图为准”并登记 MAT；对应不清楚的页登记 CUS 问客户，整理页不要自己配对。
+   - 做了一部分就停下，校验不通过；一页都没做时只提醒。确实不做，在配置里写 `"page_check": {"skip": "理由"}`。核对结果存进知识库，重建时不用再看。
+
 5. **写整理页：**
    - 运行 `curate.py prepare --out <运行目录> --config <kb-config.json>`，每个主题在 `04_知识库构建/curation/<主题>/` 里有 `input.md`（去重后的原文块）和 `README.md`（写作规则）。
    - 按规则写 `page.md`：每条标 `{{src:块编号}}`；数字、款号、年份要能在引用的原文里找到；引用了 ⚠ 原文的那一条也写 ⚠；说法冲突时并列写出，标“需核实”。

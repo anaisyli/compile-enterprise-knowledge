@@ -206,7 +206,7 @@ def build(
                     unverified[term].add(link(doc))
             elif flag["type"] == "report_page":
                 reports.add(link(doc, block["group"]))
-            elif flag["type"] == "ai_read":
+            elif flag["type"] in {"ai_read", "ai_added"}:
                 ai_pages.add(link(doc, block["group"]))
             elif flag["type"] == "reference_draft":
                 references.add(link(doc))
@@ -219,7 +219,7 @@ def build(
              "- 怎么关闭：请公司确认里面哪些是自己的；确认是公司原始资料的，在 kb-config.json 的 doc_roles 里写 \"original\"。", ""]
             + [f"- {page}" for page in sorted(references)])
     if ai_pages:
-        anm_ids["ai_read"] = add("ANM", "ai_read", f"{len(ai_pages)} 页文字是 AI 看图转写的", f"{len(ai_pages)} 页", "待核对",
+        anm_ids["ai_read"] = add("ANM", "ai_read", f"{len(ai_pages)} 页有 AI 看图转写或补充的文字", f"{len(ai_pages)} 页", "待核对",
                                  "知识库专员",
                                  ["- 为什么有风险：图片页没有文字层，MinerU 没有识别，文字由 AI 看图转写，可能看错款号或数字。",
                                   "- 现在怎么处理：已入库并标 ⚠；整理页引用时必须带 ⚠。",
@@ -259,6 +259,27 @@ def build(
     mat("no_header", "找不到表头的工作表", no_header, "张", "待知识库专员判断", "在 header_map 或模板判断里补列含义", "表格更新时")
     mat("style_column", "款号列疑似放错的产品表", [f"“{short(e['style'], 40)}”（{'、'.join(e['sources'][:2])}）" for e in odd_styles],
         "处", "待知识库专员判断", "在产品表模板判断里改正款号列", "表格更新时")
+    # What looking at the pages found: broken text to re-read, and pairings only the client can settle.
+    checks_path = build_dir / "page-check" / "results.json"
+    checks = list(load_json(checks_path).values()) if checks_path.is_file() else []
+    heading = lambda r: {"slide": f"第 {r['page']} 张幻灯片", "image": f"图片 {r['page']}"}.get(r["unit"], f"第 {r['page']} 页")
+    broken = [f"{link(by_item[r['item_id']], heading(r))}：{r['text_errors']}" for r in checks
+              if r.get("text_errors") and r["item_id"] in by_item]
+    mat_ids: dict[str, str] = {}
+    if broken:
+        mat_ids["text_errors"] = add("MAT", "text_errors", "提取文字和原图不一致的页", f"{len(broken)} 页", "等待材料或工具",
+                                     "用 MinerU 重新识别这些页",
+                                     ["- 下一步：用 MinerU 重新识别这些页（要批准上传）；识别后重跑，页面上的提示会消失。",
+                                      "- 现在怎么处理：原文照留，页面上标 ⚠“以原图为准”。", ""] + [f"- {b}" for b in sorted(broken)])
+    unclear = [r for r in checks if r.get("unclear") and r["item_id"] in by_item]
+    cus_ids: dict[str, str] = {}
+    if unclear:
+        items = [{"key": f"{r['item_id']}|{r['unit']} {r['page']}", "item_id": r["item_id"], "location": heading(r),
+                  "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}上有几款产品，看不出各自的款号，请标出每款的款号"}
+                 for r in unclear]
+        cus_ids["pairing"] = add("CUS", "pairing", f"{len(unclear)} 页款号和产品对应不清楚", f"{len(unclear)} 页", "等待客户回复",
+                                 "内容运营 → 客户", ["- 原件上没写清楚哪个款号对应哪款，整理页不要自行配对。", ""]
+                                 + [f"- {link(by_item[r['item_id']], heading(r))}" for r in unclear], items)
     # Rules that remove a fifth of a brochure have probably removed something they should not.
     shares: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for block in blocks:
@@ -304,7 +325,7 @@ def build(
                 route = routes.get(item["item_id"], {})
                 writer.writerow([item["sub_id"], item["question"], route.get("display_name") or "", route.get("path") or "", ""])
     write_json(build_dir / "governance.json", {kind: [{k: v for k, v in r.items() if k != "details"} for r in rs] for kind, rs in records.items()})
-    return {"anm_ids": anm_ids, "cus_items": {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]},
+    return {"anm_ids": anm_ids, "mat_ids": mat_ids, "cus_ids": cus_ids, "cus_items": {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]},
             "counts": {kind: len(rs) for kind, rs in records.items()}}
 
 

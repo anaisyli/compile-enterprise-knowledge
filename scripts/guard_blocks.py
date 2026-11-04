@@ -530,7 +530,7 @@ def main() -> int:
                 block["flags"].append({"type": "reference_draft", "terms": []})
             if block.get("ai_read") and not trusted:
                 # The model read it from a picture; nobody has compared it with the page yet.
-                block["flags"].append({"type": "ai_read", "terms": []})
+                block["flags"].append({"type": "ai_added" if block.get("ai_checked") else "ai_read", "terms": []})
             if block.get("client_hold"):
                 block["status"] = "pending_client"
             else:

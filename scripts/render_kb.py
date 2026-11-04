@@ -127,15 +127,19 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
             notes.append("⚠ 隐去了含品牌词的格（可能是客户品牌，词在待判断清单里）")
         elif flag["type"] == "reference_draft":
             continue  # Said once on the card; repeating it on every paragraph buries the text.
+        elif flag["type"] == "ai_added":
+            notes.append(f"⚠ AI 看图补充：提取的文字里没有、图上有的内容，待对照原图核对（{anm_ids.get('ai_read', '')}）")
         elif flag["type"] == "ai_read":
             notes.append(f"⚠ AI 读图转写，待对照原图核对（{anm}）")
     return "；".join(notes)
 
 
 def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, card: list[str],
-               anm_ids: dict[str, str], cus_ids: dict[str, str], pictures: dict[str, str] | None = None) -> str:
-    """pictures: page heading -> picture of that page, for pages nothing was removed from."""
-    pictures = pictures or {}
+               anm_ids: dict[str, str], cus_ids: dict[str, str], pictures: dict[str, str] | None = None,
+               page_notes: dict[str, list[str]] | None = None) -> str:
+    """pictures: page heading -> picture of that page, for pages nothing was removed from.
+    page_notes: page heading -> what the page check found there."""
+    pictures, page_notes = pictures or {}, page_notes or {}
     tier = TIERS[doc["tier"]]
     fields = {
         "doc_id": doc["doc_id"], "title": doc["title"], "layer": "来源层", "tier": doc["tier"], "tier_label": tier["label"],
@@ -151,6 +155,8 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
                 parts.extend([f"![[{pictures[current]}|{PAGE_PICTURE_WIDTH}]]", ""])
+            for note in page_notes.get(current, []):
+                parts.extend([f"> {note}", ""])
             table_columns = []
         if block["status"] == "pending_client" and (block["group"], block["client_hold"]) not in pending_marked:
             pending_marked.add((block["group"], block["client_hold"]))
@@ -362,6 +368,27 @@ def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str
     write_text(build / "vault" / REGISTER, "\n".join(lines) + "\n")
 
 
+def check_group(result: dict[str, Any]) -> str:
+    """The heading a page-check result belongs under, the same one extract_blocks gives the page."""
+    unit, number = result["unit"], result["page"]
+    return {"slide": f"第 {number} 张幻灯片", "image": f"图片 {number}"}.get(unit, f"第 {number} 页")
+
+
+def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """item -> page heading -> notes from looking at the page next to its extracted text."""
+    path = build / "page-check" / "results.json"
+    notes: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for result in (load_json(path).values() if path.is_file() else []):
+        page = notes[result["item_id"]][check_group(result)]
+        if result.get("text_errors"):
+            page.append(f"⚠ 看图核对：提取的文字和原图不一致，以原图为准（{result['text_errors']}）{gov['mat_ids'].get('text_errors', '')}")
+        if result.get("unclear"):
+            page.append(f"⚠ 看图核对：原件上看不出款号和产品的对应，不要自行配对 {gov['cus_ids'].get('pairing', '')}")
+        elif result.get("pairing"):
+            page.append(f"看图核对：{result['pairing']}")
+    return notes
+
+
 def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
                     statuses: dict[str, str], same_content: dict[str, str]) -> None:
     """Write, into each package's audit folder, which knowledge-base name each file got.
@@ -502,6 +529,7 @@ def main() -> int:
     for item_key, record_id in gov["cus_items"].items():
         if record_id not in issues[item_key.split(":")[0]]:
             issues[item_key.split(":")[0]].append(record_id)
+    checks = page_check_notes(build, gov)
     published, statuses = {}, {}
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
@@ -512,7 +540,8 @@ def main() -> int:
         card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""))
         pictures = {f"第 {page} 页": name for page, name in status_info.get(doc["item_id"], {}).get("page_images", {}).items()
                     if (doc_id, f"第 {page} 页") not in unsafe and (build / "assets" / name).is_file()}
-        write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures))
+        write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
+                                                     checks.get(doc["item_id"], {})))
         published[doc_id], statuses[doc_id] = doc_path(doc), status
 
     write_table_summary(clean, visible, docs, statuses)

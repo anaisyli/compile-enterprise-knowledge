@@ -397,9 +397,12 @@ def group_for(unit: dict[str, str], heading: str) -> str:
     match = re.fullmatch(r"page (\d+)(?: col \d+)?(?: ocr)?", locator)
     if match:
         return f"第 {match.group(1)} 页"
-    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?", locator)
+    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?(?: ocr)?", locator)
     if match:
         return f"第 {match.group(2)} 张幻灯片" + ("备注" if match.group(1) == "notes" else "")
+    match = re.fullmatch(r"image (\d+)(?: ocr)?", locator)
+    if match:
+        return f"图片 {match.group(1)}"  # A picture inside a Word document, read by MinerU or the model.
     match = SHEET_UNIT.match(locator)
     if match:
         return f"表 {match.group('name')}"
@@ -473,6 +476,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                 "ocr": unit["locator"].endswith(OCR_SUFFIX),
                 # Read by the model from a picture, not by MinerU: published with a mark.
                 "ai_read": unit.get("engine") == "ai",
+                "ai_checked": bool(unit.get("checked")),  # Added on a page check, beside a text layer.
             }
         )
     return blocks

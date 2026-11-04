@@ -127,7 +127,7 @@ def remaining_ocr_pages(build: Path, item_id: str, pages: list[int]) -> list[int
     units = load_json(path).get("units", []) if path.is_file() else []
     covered = set()
     for unit in units:
-        match = re.search(r"\bpage\s+(\d+)\b", unit.get("locator", ""), re.IGNORECASE)
+        match = re.search(r"\b(?:page|slide)\s+(\d+)\b", unit.get("locator", ""), re.IGNORECASE)
         # A page someone looked at and found no words on is done too.
         if match and (unit.get("text", "").strip() or unit.get("empty")):
             covered.add(int(match.group(1)))

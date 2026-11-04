@@ -233,6 +233,21 @@ def main() -> int:
         if idle:
             warnings.append(f"{len(idle)} 份有效资料没有被任何整理页引用：{'、'.join(idle[:8])}{' 等' if len(idle) > 8 else ''}")
 
+    # Pages picked for a look beside their text: started and left half done is not finished.
+    plan_path = build / "page-check" / "plan.json"
+    check_plan = load_json(plan_path) if plan_path.is_file() else {}
+    checked = load_json(build / "page-check" / "results.json") if (build / "page-check" / "results.json").is_file() else {}
+    waiting = check_plan.get("to_check", 0)
+    skip = config.get("page_check", {}).get("skip") if isinstance(config.get("page_check"), dict) else None
+    if check_plan.get("ok") is False:
+        warnings.append(f"没做看图核对：{check_plan.get('reason')}")
+    elif waiting and not skip:
+        if checked:
+            errors.append(f"看图核对没做完：还有 {waiting} 页（04_知识库构建/page-check/todo.jsonl）。看完运行 page_check.py collect 再重跑；"
+                          "确实不做，在 kb-config.json 的 page_check 里写 {\"skip\": \"理由\"}")
+        else:
+            warnings.append(f"还没做看图核对：{waiting} 页等 AI 对照原图看（04_知识库构建/page-check/README.md）")
+
     # A website that was asked for but not read leaves a hole nobody would notice.
     if config.get("websites") and not any(d.get("origin") == "website" for d in docs.values()):
         fetch = build / "website" / "fetch-report.json"

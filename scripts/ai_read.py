@@ -94,6 +94,8 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
         if source is None:
             skipped.append(f"{name}：没装 LibreOffice，幻灯片没法画成图")
             continue
+        # Slides keep their own locator, so what was read lands under the right slide.
+        unit = "slide" if asset["file"].suffix.casefold() in {".pptx", ".ppt"} else "page"
         with pymupdf.open(long_path(source)) as document:
             for page in pages:
                 if page > document.page_count:
@@ -101,7 +103,7 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
                 target = pictures / f"{item_id}-p{page}.png"
                 if not target.is_file():
                     document[page - 1].get_pixmap(dpi=DPI).save(str(target))
-                todo.append({"key": f"{item_id}|{page}", "item_id": item_id, "page": page, "name": name, "image": str(target)})
+                todo.append({"key": f"{item_id}|{page}", "item_id": item_id, "page": page, "unit": unit, "name": name, "image": str(target)})
     with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -122,23 +124,27 @@ def collect(build: Path) -> dict[str, Any]:
     by_item: dict[str, list[dict[str, Any]]] = {}
     for key, record in answers.items():
         entry = todo[key]
-        unit = {"locator": f"page {entry['page']} ocr", "text": record["text"].strip(), "engine": "ai"}
+        unit = {"locator": f"{entry.get('unit', 'page')} {entry['page']} ocr", "text": record["text"].strip(), "engine": "ai"}
         if not unit["text"]:
             unit["empty"] = True  # Looked at and found no words: no longer waiting.
         by_item.setdefault(entry["item_id"], []).append(unit)
+    store_ai_units(build, by_item)
+    return {"collected": len(answers), "files": len(by_item), "rejected": rejected, "left": len(set(todo) - set(answers))}
+
+
+def store_ai_units(build: Path, by_item: dict[str, list[dict[str, Any]]]) -> None:
+    """Put what the model read beside MinerU's results; MinerU's reading of a page wins."""
     routes = load_json(build / "routes.json")
     for item_id, units in by_item.items():
         path = build / OCR_DIRECTORY / f"{item_id}.json"
         record = load_json(path) if path.is_file() else {"item_id": item_id, "source": "ai",
                                                          "source_hash": routes.get(item_id, {}).get("source_hash", "")}
-        # MinerU's reading of a page is kept over the model's.
         taken = {u["locator"] for u in record.get("units", []) if u.get("engine") != "ai"}
         kept = [u for u in record.get("units", []) if u.get("engine") != "ai" or u["locator"] not in {n["locator"] for n in units}]
         record["units"] = sorted(kept + [u for u in units if u["locator"] not in taken],
                                  key=lambda u: int(u["locator"].split()[1]) if u["locator"].split()[1].isdigit() else 0)
         record["ai_read_at"] = date.today().isoformat()
         write_json(path, record)
-    return {"collected": len(answers), "files": len(by_item), "rejected": rejected, "left": len(set(todo) - set(answers))}
 
 
 def main() -> int:
