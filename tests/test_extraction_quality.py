@@ -63,6 +63,23 @@ class SlideTests(unittest.TestCase):
         self.assertEqual(facts["ocr_pages"], [2])
 
 
+class OfficeTests(unittest.TestCase):
+    def test_a_converted_copy_is_reused_without_starting_libreoffice(self) -> None:
+        import tempfile
+        from office import convert_office
+        with tempfile.TemporaryDirectory() as folder:
+            done = Path(folder) / "k1.xlsx"
+            done.write_bytes(b"converted earlier")
+            self.assertEqual(convert_office(Path(folder) / "missing.xls", "xlsx", Path(folder), "k1", 5), done)
+
+    def test_a_real_conversion_survives_libreoffice_still_holding_its_profile(self) -> None:
+        from office import find_converter
+        if not find_converter():
+            self.skipTest("LibreOffice is not installed")
+        result = run("check_tools.py")
+        self.assertTrue(json.loads(result.stdout)["libreoffice"]["ok"], result.stdout)
+
+
 class QualityTests(Base):
     def setUp(self) -> None:
         super().setUp()

@@ -24,6 +24,7 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from fetch_website import module_for as web_module, page_kind as web_kind
+from office import convert_office
 from collections import Counter, defaultdict
 from kb_common import (
     RESOURCE_LABELS,
@@ -584,29 +585,9 @@ def workbook_images(path: Path, assets: Path, max_bytes: int) -> dict[str, dict[
     return result
 
 
-def find_converter() -> str | None:
-    found = shutil.which("soffice") or shutil.which("libreoffice")
-    if found:
-        return found
-    default = Path(r"C:\Program Files\LibreOffice\program\soffice.exe")
-    return str(default) if default.is_file() else None
-
-
-def legacy_images(path: Path, assets: Path, max_bytes: int, work: Path, timeout: int) -> dict[str, dict[int, list[str]]]:
-    converter = find_converter()
-    if not converter:
-        raise LookupError("no_office_converter")
-    with tempfile.TemporaryDirectory(dir=work) as folder:
-        profile = (Path(folder) / "profile").resolve().as_uri()
-        subprocess.run(
-            [converter, f"-env:UserInstallation={profile}", "--headless", "--convert-to", "xlsx",
-             "--outdir", folder, long_path(path)],
-            check=True, capture_output=True, timeout=timeout,
-        )
-        produced = list(Path(folder).glob("*.xlsx"))
-        if not produced:
-            raise LookupError("conversion_failed")
-        return workbook_images(produced[0], assets, max_bytes)
+def legacy_images(path: Path, assets: Path, max_bytes: int, converted: Path, timeout: int, key: str) -> dict[str, dict[int, list[str]]]:
+    # The same converted copy the text step uses, so each old workbook is converted once.
+    return workbook_images(convert_office(path, "xlsx", converted, key, timeout), assets, max_bytes)
 
 
 def collect_images(
@@ -639,10 +620,11 @@ def collect_images(
             if path.suffix.casefold() == ".xlsx":
                 return item_id, workbook_images(path, assets, max_bytes)
             if convert_legacy:
-                return item_id, legacy_images(path, assets, max_bytes, work, timeout)
+                return item_id, legacy_images(path, assets, max_bytes, build / "converted", timeout,
+                                              hashes.get(item_id, "")[:16] or short_hash(str(path), 16))
             failures[item_id] = "legacy_not_converted"
         except Exception as exc:  # A broken workbook loses its pictures, never the run.
-            failures[item_id] = type(exc).__name__
+            failures[item_id] = f"{type(exc).__name__}: {str(exc)[:160]}"
         return item_id, {}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

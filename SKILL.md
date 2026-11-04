@@ -24,6 +24,8 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 ## 先确认输入
 
+- 每台电脑第一次用、或换了运行环境（比如在 Codex 的沙盒里）时，先运行 `python scripts/check_tools.py`。它会真的用 LibreOffice 转换一个小表格，看 pypdf、PyMuPDF 在不在，按输出里的 `fix` 处理。LibreOffice 在沙盒里转不了时，用不受沙盒限制的方式运行提取这一步；实在不行，把 .xls/.doc/.ppt 另存为 .xlsx/.docx/.pptx 再放进初筛包。
+
 - 输入只需要 `verify_package.py` 通过的初筛包。流水线会自己从包里提取文字，并先核对哈希。读 PDF 建议 `python -m pip install pymupdf pypdf`：有 PyMuPDF 时画册和 PPT 按版面分栏读，款号不会跑到别款旁边，每页还附原页图；只有 pypdf 时按存储顺序读，卡片上会提示可能错位。读 `.xls`/`.doc`/`.ppt` 需要 LibreOffice。手上有 `_working/text` 时，可以用 `--text-dir` 复用。
 - 用户给的是没筛选过的文件夹时，不要绕过筛选：装了 prepare-seo-knowledge-materials 就先用它筛，没装就告诉用户要先筛。流水线也会拒绝非初筛包。后来补充的资料同样先筛成小初筛包，再叠加 `--package`。
 - 长期只保存初筛包和知识库，运行目录随时可以删。配置、各种判断、台账编号、整理页原稿、MinerU 结果、官网快照，发布时都写进知识库；之后重跑加 `--vault <项目目录>`，就能从知识库恢复。详见合同“长期保存什么”。

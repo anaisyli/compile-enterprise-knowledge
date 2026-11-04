@@ -26,6 +26,7 @@ from xml.etree import ElementTree as ET
 
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, sha256_file, short_hash, write_json
 from layout import ordered_text
+from office import ConversionError, convert_office
 
 
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -212,35 +213,9 @@ def pdf_units(path: Path, thumbnails: Path | None = None, key: str = "") -> tupl
     return units, {"pages": len(reader.pages), "ocr_pages": ocr_pages, "layout": "stored_order"}
 
 
-def find_converter() -> str | None:
-    found = shutil.which("soffice") or shutil.which("libreoffice")
-    if found:
-        return found
-    for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
-        candidate = Path(root or "") / "LibreOffice" / "program" / "soffice.exe"
-        if root and candidate.is_file():
-            return str(candidate)
-    return None
-
-
 def convert(path: Path, target: str, cache: Path, key: str, timeout: int) -> Path:
     """Convert an old Office file once; the image step reuses the same copy."""
-    cached = cache / f"{key}.{target}"
-    if cached.is_file():
-        return cached
-    converter = find_converter()
-    if not converter:
-        raise LookupError("needs_libreoffice")
-    cache.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=cache) as folder:
-        profile = (Path(folder) / "profile").resolve().as_uri()
-        subprocess.run([converter, f"-env:UserInstallation={profile}", "--headless", "--convert-to", target,
-                        "--outdir", folder, long_path(path)], check=True, capture_output=True, timeout=timeout)
-        produced = list(Path(folder).glob(f"*.{target}"))
-        if not produced:
-            raise LookupError("conversion_failed")
-        shutil.move(str(produced[0]), cached)
-    return cached
+    return convert_office(path, target, cache, key, timeout)
 
 
 def read_item(path: Path, extension: str, cache: Path, key: str, timeout: int) -> dict[str, Any]:
@@ -316,6 +291,8 @@ def main() -> int:
             return asset["item_id"], {**base, "status": str(exc.args[0]), "characters": 0}
         except subprocess.TimeoutExpired:
             return asset["item_id"], {**base, "status": "failed", "error": "conversion_timeout", "characters": 0}
+        except ConversionError as exc:
+            return asset["item_id"], {**base, "status": "failed", "error": f"conversion_failed: {exc}", "characters": 0}
         except Exception as exc:  # A damaged file is reported, never stops the run.
             return asset["item_id"], {**base, "status": "failed", "error": type(exc).__name__, "characters": 0}
         units = result.pop("units", [])

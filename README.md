@@ -76,8 +76,18 @@
 
 1. 把整个文件夹放进 AI 工具的 skills 目录。
 2. 需要 Python 3.10 以上，再运行一次 `python -m pip install pymupdf pypdf`。PyMuPDF 让画册按版面分栏读、附原页图，AI 读图也要用它；不装也能跑，但一页多款的画册款号可能错位。
-3. 要处理 `.xls`、`.doc`、`.ppt`，需要装 LibreOffice。
+3. 要处理 `.xls`、`.doc`、`.ppt`，需要装 LibreOffice。装在别的位置时，设置环境变量 `LIBREOFFICE_PATH` 指向 `soffice.exe`。
 4. 要用 MinerU，每台电脑做一次下面的设置。
+5. 装好后运行一次 `python scripts/check_tools.py`，确认 LibreOffice 真能转换、pypdf 和 PyMuPDF 都在。
+
+**LibreOffice 转换失败怎么办：**
+
+| 现象 | 原因和做法 |
+|---|---|
+| 以前报“目录不是空的”，或第一次跑失败、第二次又好了 | LibreOffice 退出后还在写临时配置文件，旧版本删不掉就把整份文件记成失败。现在固定用一个配置目录，转换一个接一个地做，不再删正在用的目录 |
+| `check_tools.py` 在 Codex 里失败、在本机终端里正常 | 沙盒挡住了 LibreOffice。让 Codex 用不受沙盒限制的方式运行提取，或者先在本机终端运行 `run_pipeline.py`，再回到 Codex 继续 |
+| 找不到 LibreOffice | 安装 LibreOffice，或设置 `LIBREOFFICE_PATH` |
+| 还是不行 | 把 .xls/.doc/.ppt 另存为 .xlsx/.docx/.pptx，放进初筛包再跑 |
 
 ## MinerU 首次设置（每台电脑一次）
 
