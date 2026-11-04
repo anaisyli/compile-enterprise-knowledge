@@ -1,0 +1,51 @@
+{
+  "_说明": "每个大块下的小板块。keywords 不分大小写，命中任一个就算属于这个小板块；一段原文可以属于几个小板块。how 是缺口页里“怎么补”的建议。客户自己的增删改写在 kb-config.json 的 sections 里，同名小板块整体替换。",
+  "company": [
+    {"name": "公司介绍", "keywords": ["公司简介", "关于我们", "about us", "who we are", "company profile", "我们是", "公司位于", "located in", "headquarter"], "how": "看官网 About 页或公司简介 PPT"},
+    {"name": "发展历程", "keywords": ["成立", "创立", "创建于", "founded", "established", "since 19", "since 20", "history", "历程", "里程碑", "milestone"], "how": "向客户确认成立年份和大事记"},
+    {"name": "主要业务", "keywords": ["主营", "主要业务", "主要产品", "专业生产", "专注于", "specializ", "we make", "we produce", "main products", "our business", "manufacturer of"], "how": "看公司简介或官网首页"},
+    {"name": "公司能力", "keywords": ["产能", "capacity", "员工", "employees", "workers", "staff", "面积", "square meter", "平方米", "㎡", "生产线", "production line", "monthly output", "年产", "月产", "pcs per"], "how": "向客户要产能、员工、厂房面积"},
+    {"name": "公司优势", "keywords": ["优势", "advantage", "why choose", "为什么选择", "strength", "competitive", "one-stop", "一站式", "快速", "fast delivery", "low moq", "小单"], "how": "看官网 Why Choose Us，或向客户要卖点"},
+    {"name": "生产设备与工艺", "keywords": ["设备", "机器", "machine", "equipment", "织机", "loom", "车间", "workshop", "流水线", "生产流程", "production process", "cutting", "sewing", "裁剪", "缝制", "印花", "printing", "embroider", "绣花"], "how": "向客户要车间、设备照片和工序说明"},
+    {"name": "质量保证", "keywords": ["质量", "品质", "quality", "qc", "检验", "检测", "inspection", "inspect", "test", "测试", "质检", "aql"], "how": "向客户要质检流程和检测项目"},
+    {"name": "资质认证", "keywords": ["认证", "证书", "certif", "bsci", "oeko", "sedex", "wrap", "gots", "grs", "iso 9001", "iso9001", "sgs", "intertek", "验厂", "audit", "专利", "patent"], "how": "向客户要证书扫描件或审核报告"},
+    {"name": "销售市场", "keywords": ["出口", "export", "市场", "market", "国家", "countries", "欧美", "europe", "america", "北美", "欧洲", "日本", "japan", "australia", "middle east", "客户遍布"], "how": "向客户确认主要出口国家和客户类型"}
+  ],
+  "product": [
+    {"name": "产品介绍", "keywords": ["series", "系列", "collection", "款式", "style", "design", "产品"], "how": "看画册和官网产品页"},
+    {"name": "特性和优势", "keywords": ["特点", "特性", "优势", "feature", "advantage", "soft", "柔软", "保暖", "warm", "透气", "breathable", "耐用", "durable", "washable", "可水洗", "舒适", "comfortable", "lightweight", "轻便", "轻薄"], "how": "看画册卖点页，或向客户要产品卖点"},
+    {"name": "参数", "keywords": ["gsm", "克重", "成分", "composition", "fabric", "面料", "material", "%", "size", "尺码", "尺寸", "cm", "inch", "颜色", "color", "colour", "weight", "规格", "spec", "moq"], "how": "看产品表；产品表过逐格判断后才算有效"},
+    {"name": "应用", "keywords": ["适用", "适合", "用于", "suitable", "perfect for", "ideal for", "occasion", "场合", "户外", "outdoor", "家居", "home", "办公", "office", "旅行", "travel", "gift", "礼品", "retail", "零售"], "how": "看官网产品页的用途说明，或向客户确认目标场景"}
+  ],
+  "solution": [
+    {"name": "应用场景", "keywords": ["场景", "scenario", "application", "适用于", "用于", "brand", "品牌商", "retailer", "零售商", "超市", "supermarket", "电商", "e-commerce", "amazon", "promotion", "促销"], "how": "向客户确认常服务哪类买家和用途"},
+    {"name": "行业解决方案", "keywords": ["解决方案", "solution", "方案", "行业", "industry", "for brands", "for retailers", "private label", "自有品牌"], "how": "看官网 Solution 页，或向客户要典型合作模式"},
+    {"name": "定制服务类型", "keywords": ["oem", "odm", "定制", "custom", "打样", "sample", "设计", "design", "logo", "label", "吊牌", "hangtag", "包装定制", "packaging", "一站式", "one-stop", "流程", "process", "moq", "起订"], "how": "向客户要定制流程、打样周期和可定制项"}
+  ],
+  "case": [
+    {"name": "客户案例", "keywords": ["案例", "case", "合作", "cooperat", "partner", "client"], "how": "案例要客户确认能公开后才写"},
+    {"name": "项目案例", "keywords": ["项目", "project", "订单", "program"], "how": "案例要客户确认能公开后才写"},
+    {"name": "用户评价", "keywords": ["评价", "review", "testimonial", "feedback", "好评", "反馈"], "how": "向客户要可公开的买家评价"},
+    {"name": "订单成果", "keywords": ["成果", "销量", "sold", "pieces shipped", "复购", "repeat order", "长期合作"], "how": "向客户确认可公开的合作数据"}
+  ],
+  "industry": [
+    {"name": "行业介绍", "keywords": ["行业", "industry", "纺织", "textile", "服装业", "apparel industry", "garment industry", "产业集群", "产业带"], "how": "向客户要行业介绍资料，或另行调研后补"},
+    {"name": "产业链", "keywords": ["产业链", "上游", "下游", "供应链", "supply chain", "纱线", "yarn", "织造", "weaving", "染整", "dyeing", "成衣", "garment"], "how": "向客户确认从纱线到成衣哪些环节自己做"},
+    {"name": "专业术语", "keywords": ["术语", "是指", "指的是", "means", "refers to", "what is", "定义", "definition", "又称", "也叫", "also called"], "how": "从面料、工艺资料里整理常用词"},
+    {"name": "技术知识", "keywords": ["面料", "fabric", "gsm", "克重", "polyester", "涤纶", "cotton", "棉", "wool", "羊毛", "cashmere", "羊绒", "jacquard", "提花", "fleece", "摇粒绒", "sherpa", "羊羔", "woven", "梭织", "knit", "针织", "工艺", "craft", "tapestry", "挂毯", "yarn-dyed", "色织", "洗涤", "care"], "how": "看面料工艺资料和画册参数页"},
+    {"name": "市场趋势", "keywords": ["趋势", "trend", "流行", "popular", "fashion", "潮流", "新款", "new arrival", "2026", "2027", "season", "季"], "how": "看新品画册，或向客户确认今年主推"}
+  ],
+  "faq": [
+    {"name": "产品问题", "keywords": ["产品", "product", "面料", "fabric", "尺码", "size", "颜色", "color"], "how": "从邮件要点和官网 FAQ 收集"},
+    {"name": "定制与打样", "keywords": ["定制", "custom", "oem", "odm", "logo", "打样", "sample", "设计", "design"], "how": "从邮件要点和官网 FAQ 收集"},
+    {"name": "生产与交期", "keywords": ["交期", "lead time", "delivery", "生产周期", "production time", "多久", "how long", "moq", "起订"], "how": "向客户确认常规交期"},
+    {"name": "质量与认证", "keywords": ["质量", "quality", "认证", "certif", "检测", "test"], "how": "向客户确认质检和认证情况"},
+    {"name": "包装与运输", "keywords": ["包装", "packing", "package", "运输", "shipping", "物流", "海运", "空运", "express"], "how": "向客户确认包装和发货方式"}
+  ],
+  "other": [
+    {"name": "服务政策", "keywords": ["售后", "after-sales", "after sales", "保修", "warranty", "退换", "return", "refund", "售后服务", "服务承诺", "guarantee"], "how": "向客户确认售后政策"},
+    {"name": "包装运输", "keywords": ["包装", "packing", "packaging", "装箱", "carton", "运输", "shipping", "物流", "logistics", "海运", "空运", "express", "交货"], "how": "向客户确认包装规格和发货方式"},
+    {"name": "安装维护", "keywords": ["安装", "install", "维护", "maintenance", "保养", "care instruction", "洗涤说明", "清洗", "wash", "保存"], "how": "看产品洗护标签说明，或向客户要"},
+    {"name": "资料下载", "keywords": ["下载", "download", "资料索取", "索取画册", "request a catalog", "request catalog", "get catalog", "brochure"], "how": "整理可公开下载的画册清单"}
+  ]
+}

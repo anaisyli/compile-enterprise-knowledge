@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Extract text from the files inside a preparation package, so nothing else is needed.
+
+The screening step keeps its extracted text in a working folder that colleagues rarely
+hand over. Every file is in the package anyway, with its hash, so this reads them again.
+Locators match prepare-seo-knowledge-materials exactly ("sheet Sheet1 (visible)",
+"page 3", "para 12"), because the cleanup locations recorded at screening refer to them.
+Each file's hash is checked first: a copy that changed is not read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, sha256_file, short_hash, write_json
+from layout import ordered_text
+
+
+WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+DRAWING = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+PRESENTATION = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+SHEET = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+RELATIONSHIP = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+TEXT_EXTENSIONS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".xml"}
+LEGACY_OFFICE = {".xls": "xlsx", ".doc": "docx", ".ppt": "pptx"}
+MIN_PAGE_CHARACTERS = 20
+MAX_ROWS_PER_SHEET = 2000
+TEXT_DIRECTORY = "package-text"
+CONVERTED_DIRECTORY = "converted"
+# Excluded emails are read only to learn customer names; excluded spreadsheets and PDFs
+# are mostly finance and quotations, and are skipped to save time.
+EXCLUDED_READ = {".md", ".txt", ".eml"}
+# Page pictures let a reader check a catalog page against its text; long files are skipped.
+MAX_THUMBNAIL_PAGES = 80
+THUMBNAIL_DPI = 45
+ASSETS_DIRECTORY = "assets"
+# Raised when the way files are read changes, so files read the old way are read again.
+EXTRACTOR_VERSION = 2
+
+
+def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    units = []
+    with zipfile.ZipFile(long_path(path)) as archive:
+        body = ET.fromstring(archive.read("word/document.xml")).find(f"{WORD}body")
+        for index, child in enumerate(body if body is not None else [], start=1):
+            if child.tag == f"{WORD}p":
+                text = "".join(node.text or "" for node in child.iter(f"{WORD}t")).strip()
+                if text:
+                    units.append({"locator": f"para {index}", "text": text})
+            elif child.tag == f"{WORD}tbl":
+                rows = [
+                    " | ".join("".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip() for cell in row.findall(f"{WORD}tc"))
+                    for row in child.findall(f"{WORD}tr")
+                ]
+                units.append({"locator": f"table at {index}", "text": "\n".join(rows)})
+    return units, {}
+
+
+def slide_boxes(root: ET.Element) -> list[dict[str, Any]]:
+    """Text boxes and tables of a slide with where they sit. Boxes without a position go last."""
+    boxes = []
+    for shape in root.iter():
+        if shape.tag not in {f"{PRESENTATION}sp", f"{PRESENTATION}graphicFrame"}:
+            continue
+        lines = ["".join(node.text or "" for node in paragraph.iter(f"{DRAWING}t")) for paragraph in shape.iter(f"{DRAWING}p")]
+        text = "\n".join(line for line in lines if line.strip())
+        if not text:
+            continue
+        offset = next(shape.iter(f"{DRAWING}off"), None)
+        extent = next(shape.iter(f"{DRAWING}ext"), None)
+        if offset is None or extent is None:
+            x, y, cx, cy = 0.0, 1e12, 0.0, 0.0
+        else:
+            x, y = float(offset.get("x", 0)), float(offset.get("y", 0))
+            cx, cy = float(extent.get("cx", 0)), float(extent.get("cy", 0))
+        boxes.append({"x0": x, "y0": y, "x1": x + cx, "y1": y + cy, "text": text})
+    return boxes
+
+
+def pptx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    units, image_only = [], []
+    with zipfile.ZipFile(long_path(path)) as archive:
+        names = set(archive.namelist())
+        size = ET.fromstring(archive.read("ppt/presentation.xml")).find(f"{PRESENTATION}sldSz") if "ppt/presentation.xml" in names else None
+        width = float(size.get("cx", 0)) if size is not None else 0.0
+        slides = []
+        for name in names:
+            match = re.fullmatch(r"ppt/(slides/slide|notesSlides/notesSlide)(\d+)\.xml", name)
+            if match:
+                slides.append(("notes" in name, int(match.group(2)), name))
+        for is_notes, number, name in sorted(slides):
+            root = ET.fromstring(archive.read(name))
+            if is_notes:
+                # Speaker notes are the presenter's words, kept apart from the slide.
+                text = "\n".join(node.text for node in root.iter(f"{DRAWING}t") if node.text and not node.text.strip().isdigit())
+                if text.strip():
+                    units.append({"locator": f"notes {number}", "text": text})
+                continue
+            parts = ordered_text(slide_boxes(root), width)
+            if len("".join(parts).strip()) < MIN_PAGE_CHARACTERS and any(n.tag.endswith("}pic") for n in root.iter()):
+                image_only.append(number)
+            units.extend(column_units("slide", number, parts))
+    facts: dict[str, Any] = {"pages": len([s for s in slides if not s[0]]), "layout": "columns"}
+    if image_only:
+        facts["ocr_pages"] = image_only
+    return units, facts
+
+
+def xlsx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    units = []
+    with zipfile.ZipFile(long_path(path)) as archive:
+        names = set(archive.namelist())
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in names:
+            for entry in ET.fromstring(archive.read("xl/sharedStrings.xml")).findall(f"{SHEET}si"):
+                shared.append("".join(node.text or "" for node in entry.iter(f"{SHEET}t")))
+        targets = {}
+        if "xl/_rels/workbook.xml.rels" in names:
+            for relation in ET.fromstring(archive.read("xl/_rels/workbook.xml.rels")):
+                targets[relation.get("Id")] = relation.get("Target", "").lstrip("/")
+        for sheet in ET.fromstring(archive.read("xl/workbook.xml")).iter(f"{SHEET}sheet"):
+            state = sheet.get("state") or "visible"
+            target = targets.get(sheet.get(f"{RELATIONSHIP}id"), "")
+            target = target if target.startswith("xl/") else f"xl/{target}"
+            if target not in names:
+                continue
+            rows = []
+            for row in ET.fromstring(archive.read(target)).iter(f"{SHEET}row"):
+                cells = []
+                for cell in row.findall(f"{SHEET}c"):
+                    value, inline = cell.find(f"{SHEET}v"), cell.find(f"{SHEET}is")
+                    if cell.get("t") == "s" and value is not None and value.text:
+                        position = int(value.text)
+                        text = shared[position] if position < len(shared) else ""
+                    elif inline is not None:
+                        text = "".join(node.text or "" for node in inline.iter(f"{SHEET}t"))
+                    else:
+                        text = value.text if value is not None and value.text else ""
+                    if text.strip():
+                        cells.append(f"{cell.get('r')}={text.strip()}")
+                if cells:
+                    rows.append("; ".join(cells))
+            if rows:
+                units.append({"locator": f"sheet {sheet.get('name')} ({state})", "text": "\n".join(rows[:MAX_ROWS_PER_SHEET])})
+    return units, {}
+
+
+def column_units(prefix: str, number: int, parts: list[str]) -> list[dict[str, str]]:
+    """The first column keeps the plain locator the screening step used; the others add "col N"."""
+    return [{"locator": f"{prefix} {number}" + (f" col {index}" if index > 1 else ""), "text": part}
+            for index, part in enumerate(parts, start=1) if part.strip()]
+
+
+def pdf_units_by_layout(path: Path, pymupdf: Any, thumbnails: Path | None, key: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """With PyMuPDF the boxes keep their positions, so side-by-side products stay apart."""
+    units, ocr_pages, images = [], [], {}
+    with pymupdf.open(long_path(path)) as document:
+        for number, page in enumerate(document, start=1):
+            # Lines, not PyMuPDF's blocks: a block can join a product name on the left with a
+            # code printed far to the right on the same baseline.
+            boxes = [{"x0": line["bbox"][0], "y0": line["bbox"][1], "x1": line["bbox"][2], "y1": line["bbox"][3],
+                      "text": "".join(span["text"] for span in line["spans"])}
+                     for block in page.get_text("dict")["blocks"] if block.get("type") == 0 for line in block["lines"]]
+            parts = ordered_text(boxes, page.rect.width)
+            if len("".join(parts).strip()) < MIN_PAGE_CHARACTERS:
+                ocr_pages.append(number)
+            units.extend(column_units("page", number, parts))
+            if thumbnails is not None and document.page_count <= MAX_THUMBNAIL_PAGES:
+                name = f"img-{short_hash(f'{key}|page {number}', 16)}.png"
+                if not (thumbnails / name).is_file():
+                    thumbnails.mkdir(parents=True, exist_ok=True)
+                    page.get_pixmap(dpi=THUMBNAIL_DPI).save(str(thumbnails / name))
+                images[str(number)] = name
+        pages = document.page_count
+    return units, {"pages": pages, "ocr_pages": ocr_pages, "layout": "columns", "page_images": images}
+
+
+def pdf_units(path: Path, thumbnails: Path | None = None, key: str = "") -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Read the text layer. Pages without one are reported for MinerU, not guessed at."""
+    try:
+        import pymupdf  # type: ignore[import-not-found]
+    except ImportError:
+        pymupdf = None
+    if pymupdf is not None:
+        return pdf_units_by_layout(path, pymupdf, thumbnails, key)
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise LookupError("needs_pdf_reader") from exc
+    reader = PdfReader(long_path(path))
+    units, ocr_pages = [], []
+    for number, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if len(text) < MIN_PAGE_CHARACTERS:
+            ocr_pages.append(number)
+        if text:
+            units.append({"locator": f"page {number}", "text": text})
+    # Without PyMuPDF the text comes in stored order; products side by side may run together.
+    return units, {"pages": len(reader.pages), "ocr_pages": ocr_pages, "layout": "stored_order"}
+
+
+def find_converter() -> str | None:
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+    for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+        candidate = Path(root or "") / "LibreOffice" / "program" / "soffice.exe"
+        if root and candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def convert(path: Path, target: str, cache: Path, key: str, timeout: int) -> Path:
+    """Convert an old Office file once; the image step reuses the same copy."""
+    cached = cache / f"{key}.{target}"
+    if cached.is_file():
+        return cached
+    converter = find_converter()
+    if not converter:
+        raise LookupError("needs_libreoffice")
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=cache) as folder:
+        profile = (Path(folder) / "profile").resolve().as_uri()
+        subprocess.run([converter, f"-env:UserInstallation={profile}", "--headless", "--convert-to", target,
+                        "--outdir", folder, long_path(path)], check=True, capture_output=True, timeout=timeout)
+        produced = list(Path(folder).glob(f"*.{target}"))
+        if not produced:
+            raise LookupError("conversion_failed")
+        shutil.move(str(produced[0]), cached)
+    return cached
+
+
+def read_item(path: Path, extension: str, cache: Path, key: str, timeout: int) -> dict[str, Any]:
+    if extension in LEGACY_OFFICE:
+        path, extension = convert(path, LEGACY_OFFICE[extension], cache, key, timeout), f".{LEGACY_OFFICE[extension]}"
+    if extension == ".docx":
+        units, facts = docx_units(path)
+    elif extension == ".pptx":
+        units, facts = pptx_units(path)
+    elif extension == ".xlsx":
+        units, facts = xlsx_units(path)
+    elif extension == ".pdf":
+        units, facts = pdf_units(path, cache.parent / ASSETS_DIRECTORY, key)
+    elif extension in TEXT_EXTENSIONS or extension == ".eml":
+        units, facts = [{"locator": "file", "text": path.read_text(encoding="utf-8", errors="replace")}], {}
+    else:
+        return {"status": "unsupported", "characters": 0}
+    characters = sum(len(unit["text"]) for unit in units)
+    status = "read_ok"
+    if facts.get("ocr_pages"):
+        status = "needs_ocr" if characters < MIN_PAGE_CHARACTERS else "partial"
+    return {"status": status, "characters": characters, **facts, "units": units}
+
+
+def wanted(asset: dict[str, Any]) -> bool:
+    if asset.get("copy_status") != "copied" or not asset.get("path") or asset.get("asset_kind", "document") != "document":
+        return False
+    if asset.get("decision") == "E":
+        return Path(asset.get("display_name") or "").suffix.casefold() in EXCLUDED_READ
+    return asset.get("decision") in {"A", "B", "C", "D"}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract text from the files inside preparation packages.")
+    parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat")
+    parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--timeout", type=int, default=600, help="Seconds per old-format conversion")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    build = Path(args.out).resolve() / BUILD_DIRECTORY
+    text_dir, cache = build / TEXT_DIRECTORY, build / CONVERTED_DIRECTORY
+    text_dir.mkdir(parents=True, exist_ok=True)
+    status_path = text_dir / "extract-status.json"
+    statuses: dict[str, Any] = load_json(status_path).get("items", {}) if status_path.is_file() else {}
+
+    jobs = []
+    for raw in args.package:
+        package = Path(raw).resolve()
+        for asset in load_json(package / MANIFEST_NAME)["assets"]:
+            if not wanted(asset):
+                continue
+            previous = statuses.get(asset["item_id"], {})
+            done = previous.get("source_hash") == asset["source_hash"] and previous.get("extractor") == EXTRACTOR_VERSION \
+                and previous.get("status") in {"read_ok", "partial", "needs_ocr", "unsupported"}
+            if done and (previous.get("status") == "unsupported" or (text_dir / f"{asset['item_id']}.json").is_file()):
+                continue  # Same bytes as last time: nothing to redo.
+            jobs.append((asset, package / asset["path"]))
+
+    def one(job: tuple[dict[str, Any], Path]) -> tuple[str, dict[str, Any]]:
+        asset, path = job
+        base = {"display_name": asset.get("display_name"), "source_hash": asset["source_hash"], "extractor": EXTRACTOR_VERSION}
+        try:
+            if not Path(long_path(path)).is_file():
+                return asset["item_id"], {**base, "status": "missing_file", "characters": 0}
+            if sha256_file(path) != asset["source_hash"]:
+                return asset["item_id"], {**base, "status": "hash_mismatch", "characters": 0}
+            result = read_item(path, Path(asset.get("display_name") or path.name).suffix.casefold(), cache, asset["source_hash"][:16], args.timeout)
+        except LookupError as exc:
+            return asset["item_id"], {**base, "status": str(exc.args[0]), "characters": 0}
+        except subprocess.TimeoutExpired:
+            return asset["item_id"], {**base, "status": "failed", "error": "conversion_timeout", "characters": 0}
+        except Exception as exc:  # A damaged file is reported, never stops the run.
+            return asset["item_id"], {**base, "status": "failed", "error": type(exc).__name__, "characters": 0}
+        units = result.pop("units", [])
+        if units:
+            write_json(text_dir / f"{asset['item_id']}.json", {"item_id": asset["item_id"], "units": units})
+        return asset["item_id"], {**base, **result}
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for item_id, status in pool.map(one, jobs):
+            statuses[item_id] = status
+    write_json(status_path, {"items": statuses})
+    counts: dict[str, int] = {}
+    for status in statuses.values():
+        counts[status["status"]] = counts.get(status["status"], 0) + 1
+    print(json.dumps({"read_now": len(jobs), "files": len(statuses), "status": counts}, ensure_ascii=False))
+    if counts.get("needs_pdf_reader"):
+        print("有 PDF 没读：先运行 python -m pip install pypdf 再重跑；不装的话，这些 PDF 只能交给 MinerU。")
+    if counts.get("needs_libreoffice"):
+        print("有 .xls/.doc/.ppt 没读：需要安装 LibreOffice。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

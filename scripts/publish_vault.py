@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Publish a verified build into a project vault made by kb_project.py.
+
+Files written here are listed in a receipt, so a rerun replaces only its own output. A
+file that changes is archived first. A content change a person made stops the publish, but
+the spacing Obsidian's table formatter adds does not. Ledgers are merged, keeping what
+people wrote in them. Pictures and 已失效 records stay for good. The state a rebuild needs
+is saved into the vault, so the run folder can be deleted afterwards.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+
+from governance import merge_ledger
+from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
+from kb_index import build as build_index
+from kb_state import save as save_state
+
+
+SOURCE = Path("02_源资料/10_净化原文")
+ASSETS = Path("03_正式知识/90_素材")
+ARCHIVE = Path("05_数据与审核/60_版本归档/10_正式知识历史")
+RECEIPT = Path("05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json")
+RUN_LOG = Path("05_数据与审核/50_运行记录/知识库构建记录.jsonl")
+PROJECT_INFO = Path("01_工作台/10_项目基础信息.md")
+OLD_TODO = Path("01_工作台/20_当前待办.md")
+OLD_REGISTER = Path("02_源资料/知识库资料台账.md")
+MARKER = "<!-- compile-enterprise-knowledge -->"
+LEDGER_ROOT = "05_数据与审核/30_异常与待决定/"
+IMAGE_LINK = re.compile(r"!\[\[(img-[0-9a-f]+\.[a-z]+)")
+TABLE_RULE = re.compile(r"^:?-{3,}:?$")
+HASH_MODE = "normalized-v1"
+# More 已失效 records than this in one publish usually means missing input, not retired documents.
+WITHDRAW_LIMIT = 5
+WITHDRAW_SHARE = 0.2
+
+
+def normalized_hash(path: Path) -> str:
+    """Hash of the content, ignoring spacing, blank lines, and table alignment."""
+    data = path.read_bytes()
+    if path.suffix not in {".md", ".json", ".jsonl", ".csv"}:
+        return hashlib.sha256(data).hexdigest()
+    lines = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            stripped = "|" + "|".join("---" if TABLE_RULE.match(cell) else cell for cell in cells) + "|"
+        else:
+            stripped = re.sub(r"\s+", " ", stripped)
+        if stripped:
+            lines.append(stripped)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def planned_files(run: Path) -> dict[str, Path]:
+    build, clean = run / BUILD_DIRECTORY, run / CLEAN_DIRECTORY
+    files: dict[str, Path] = {}
+    for path in sorted(p for p in clean.rglob("*") if p.is_file()):
+        files[(SOURCE / path.relative_to(clean)).as_posix()] = path
+    vault = build / "vault"
+    for path in sorted(p for p in vault.rglob("*") if p.is_file()):
+        files[path.relative_to(vault).as_posix()] = path
+    body = "\n".join(p.read_text(encoding="utf-8") for p in clean.rglob("*.md"))
+    # Images of removed rows were extracted too; only referenced ones may leave.
+    for name in sorted(set(IMAGE_LINK.findall(body))):
+        if (build / "assets" / name).is_file():
+            files[(ASSETS / name).as_posix()] = build / "assets" / name
+    return files
+
+
+def ours(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    return "本 Skill 自动登记" in text or "compile-enterprise-knowledge 自动登记" in text
+
+
+def side_by_side(key: str) -> str:
+    path = Path(key)
+    return (path.parent / f"02_知识库构建_{path.name.split('_', 1)[-1]}").as_posix()
+
+
+def tombstone(old_text: str, stamp: str) -> str:
+    fields = parse_frontmatter(old_text)
+    keep = {key: fields.get(key, "") for key in ("doc_id", "title", "tier", "module", "source_item_id")}
+    keep.update(layer="来源层", visibility="withdrawn", uses=[], status="已失效", withdrawn_at=stamp,
+                generated_by=f"compile-enterprise-knowledge {SKILL_VERSION}")
+    return "\n".join([frontmatter(keep), "", f"# {keep['title']}", "",
+                      "> 本资料在最近一次构建中不再出现（来源被移除、合并为同一份，或没有可入库的内容）。",
+                      "> 内容不再使用，旧版本见 05_数据与审核/60_版本归档。", ""])
+
+
+def archive(vault: Path, key: str, stamp: str, archived: list[str], move: bool = False) -> None:
+    target, backup = vault / key, vault / ARCHIVE / stamp / key
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    (shutil.move if move else shutil.copy2)(str(target), backup)
+    archived.append(key)
+
+
+def update_project_info(vault: Path, packages: list[str]) -> None:
+    """Point at what is kept long term: the package, and the cleaned text inside the vault."""
+    path = vault / PROJECT_INFO
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    source = "；".join(packages) if packages else "（未记录）"
+    text = re.sub(r"(?m)^- 客户原始资料路径：.*$", lambda _: f"- 客户原始资料路径：{source}", text)
+    if "- 净化原文：" not in text:
+        text = re.sub(r"(?m)^(- 客户原始资料路径：.*)$", lambda m: m.group(1) + "\n- 净化原文：库内 `02_源资料/10_净化原文`", text, count=1)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def run_manage(scripts: Path, project: Path) -> dict[str, int]:
+    results = {}
+    for name, extra in (("build_source_index.py", ["--allow-removed"]), ("validate_v06_project.py", ["--all"])):
+        result = subprocess.run([sys.executable, str(scripts / name), "--project", str(project), *extra],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+        results[name] = result.returncode
+        if result.returncode:
+            print((result.stdout + result.stderr)[-1200:])
+    return results
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Publish a verified build into a project vault.")
+    parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--vault", required=True, help="Project folder made by kb_project.py")
+    parser.add_argument("--manage-skill", help="Optional manage-article-knowledge directory")
+    parser.add_argument("--allow-withdraw", action="store_true", help="Publish even when many documents would become 已失效")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    run, vault = Path(args.out).resolve(), Path(args.vault).resolve()
+    build = run / BUILD_DIRECTORY
+    report = load_json(build / "校验结果.json")
+    if report.get("verified") is not True:
+        raise SystemExit("这次构建没有通过校验。先运行 verify_kb.py 并修好报告的问题。")
+    if not (vault / "01_工作台").is_dir():
+        raise SystemExit("知识库项目还不存在。先运行 kb_project.py，用户确认建库后再发布。")
+
+    receipt_path = vault / RECEIPT
+    receipt = load_json(receipt_path) if receipt_path.is_file() else {}
+    previous: dict[str, str] = receipt.get("files", {})
+    legacy = receipt.get("hash_mode") != HASH_MODE
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archived: list[str] = []
+    warnings: list[str] = []
+    unsure = 0
+    for key, digest in previous.items():
+        target = vault / key
+        if not target.is_file() or key.startswith(LEDGER_ROOT) or normalized_hash(target) == digest:
+            continue
+        if legacy:
+            # Old receipts hashed raw bytes, so any spacing looks like an edit. Whatever is replaced
+            # below is archived first anyway, so only count it.
+            unsure += 1
+        else:
+            raise SystemExit(f"这个已发布文件的内容被人改过，先把改动移到单独的补充文件再发布：{key}")
+    if unsure:
+        warnings.append(f"旧版发布记录无法分辨格式调整和人工修改：{unsure} 个文件按新内容发布，被替换的旧版都在本次归档里")
+
+    planned = planned_files(run)
+    # A document whose path changed is the same document, not a withdrawn one.
+    new_paths = {parse_frontmatter(path.read_text(encoding="utf-8")).get("doc_id"): key
+                 for key, path in planned.items() if key.startswith(SOURCE.as_posix()) and path.suffix == ".md"}
+    leaving = []
+    for key in sorted(set(previous) - set(planned)):
+        target = vault / key
+        if key.startswith(SOURCE.as_posix()) and target.suffix == ".md" and target.is_file():
+            fields = parse_frontmatter(target.read_text(encoding="utf-8"))
+            if fields.get("doc_id") and fields.get("status") != "已失效" and fields["doc_id"] not in new_paths:
+                leaving.append(key)
+    live = sum(1 for key in previous if key.startswith(SOURCE.as_posix()) and key.endswith(".md"))
+    if len(leaving) > max(WITHDRAW_LIMIT, live * WITHDRAW_SHARE) and not args.allow_withdraw:
+        folders = Counter(Path(key).relative_to(SOURCE).parts[0] for key in leaving)
+        raise SystemExit(f"这次发布会让 {len(leaving)} / {live} 份资料变成已失效（{'、'.join(f'{f} {n}' for f, n in folders.most_common())}）。"
+                         "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
+    written: dict[str, str] = {}
+    for key, source in list(planned.items()):
+        target = vault / key
+        if key.startswith(LEDGER_ROOT) and (vault / side_by_side(key)).exists() or (
+                key.startswith(LEDGER_ROOT) and target.exists() and not ours(target)):
+            # manage-article-knowledge keeps its own ledgers here; ours go beside them.
+            del planned[key]
+            key = side_by_side(key)
+            planned[key] = source
+            target = vault / key
+        if key.startswith(LEDGER_ROOT) and target.is_file():
+            # People fill in stages, owners, and notes; merge instead of overwriting.
+            current = target.read_text(encoding="utf-8")
+            merged = merge_ledger(current, source.read_text(encoding="utf-8"))
+            if merged.rstrip() != current.rstrip():
+                archive(vault, key, stamp, archived)
+                write_text(target, merged)
+            written[key] = normalized_hash(target)
+            continue
+        if target.exists() and key not in previous:
+            raise SystemExit(f"目标位置已有不是本 Skill 写的文件，不覆盖：{key}")
+        if target.exists() and normalized_hash(target) != normalized_hash(source):
+            archive(vault, key, stamp, archived)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        written[key] = normalized_hash(target)
+
+    withdrawn = 0
+    renamed: list[str] = []
+    for key in sorted(set(previous) - set(planned)):
+        target = vault / key
+        if not target.is_file():
+            continue
+        if key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT):
+            written[key] = normalized_hash(target)  # Pictures and ledgers are never removed.
+            continue
+        old = target.read_text(encoding="utf-8") if target.suffix == ".md" else ""
+        if parse_frontmatter(old).get("doc_id") in new_paths and key.startswith(SOURCE.as_posix()):
+            archive(vault, key, stamp, archived, move=True)
+            renamed.append(f"{key} → {new_paths[parse_frontmatter(old)['doc_id']]}")
+        elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id"):
+            # Only documents this vault really published leave a 已失效 record.
+            if parse_frontmatter(old).get("status") != "已失效":
+                archive(vault, key, stamp, archived)
+                write_text(target, tombstone(old, stamp))
+                withdrawn += 1
+            written[key] = normalized_hash(target)
+        else:
+            archive(vault, key, stamp, archived, move=True)
+    for old_page in (OLD_TODO, OLD_REGISTER):
+        path = vault / old_page
+        # Pages earlier versions of this skill wrote, now replaced by the overview and the register.
+        if path.is_file() and (MARKER in path.read_text(encoding="utf-8") or path.read_text(encoding="utf-8").startswith("# 知识库资料台账")):
+            archive(vault, old_page.as_posix(), stamp, archived, move=True)
+    if archived:
+        lines = [f"# 版本说明 {stamp}", "", f"由 compile-enterprise-knowledge {SKILL_VERSION} 发布时归档，共 {len(set(archived))} 个文件。", ""]
+        if renamed:
+            lines.extend(["## 改名（同一份资料换了标题或目录）", "", *(f"- {entry}" for entry in renamed), "", "## 归档的旧版", ""])
+        lines.extend(f"- {key}" for key in sorted(set(archived)))
+        write_text(vault / ARCHIVE / stamp / "00_版本说明.md", "\n".join(lines) + "\n")
+
+    run_info = load_json(build / "run-info.json") if (build / "run-info.json").is_file() else {}
+    update_project_info(vault, run_info.get("packages", []))
+    state = save_state(run, vault)
+    warnings += [f"知识库里的版本比运行目录新，已保留：{path}" for path in state["kept_newer_in_vault"]]
+    write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
+                              "hash_mode": HASH_MODE, "files": written})
+    index = build_index(vault)
+    entry = {"published_at": stamp, "version": SKILL_VERSION, "documents": report.get("documents"),
+             "blocks": report.get("blocks_kept"), "withdrawn": withdrawn, "renamed": len(renamed), "files": len(written),
+             "archived": len(set(archived)), "state_saved": state["saved"], "run": str(run)}
+    with (vault / RUN_LOG).open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    subprocess.run([sys.executable, str(Path(__file__).with_name("kb_status.py")), "--out", str(run), "--vault", str(vault)],
+                   capture_output=True)
+    manage = run_manage(Path(args.manage_skill).resolve() / "scripts", vault) if args.manage_skill else {}
+    print(json.dumps({**entry, "index_chunks": index["chunks"], "manage": manage, "warnings": warnings}, ensure_ascii=False))
+    return 1 if any(manage.values()) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

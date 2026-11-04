@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Shared rules and file helpers for the knowledge-base pipeline."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, Iterable
+
+
+SKILL_VERSION = "0.1.0"
+
+MODULES = {
+    "company": "10_公司概述",
+    "product": "20_产品介绍",
+    "solution": "30_解决方案",
+    "case": "40_合作案例",
+    "industry": "50_行业知识与洞察/10_企业提供",
+    "faq": "60_FAQ",
+    "other": "70_其他",
+}
+
+# Tier replaces per-claim evidence: it says how far a source can be trusted, and
+# so which downstream use may read it without another check.
+TIERS = {
+    "T1": {"label": "官方发布物", "visibility": "public", "uses": ["article", "website", "crm", "agent"]},
+    "T2": {"label": "公司自建文档", "visibility": "internal", "uses": ["article", "crm", "agent"]},
+    "T3": {"label": "产品表字段", "visibility": "internal", "uses": ["crm", "agent"]},
+    "T4": {"label": "单次沟通要点", "visibility": "internal", "uses": ["agent"]},
+}
+
+# Same labels as prepare-seo-knowledge-materials uses for resource_type.
+RESOURCE_LABELS = {
+    "marketing": "营销宣传",
+    "business_scenario": "业务场景",
+    "product": "产品资料",
+    "competitor": "竞对资料",
+    "seo_ops": "SEO运营资料",
+    "transaction": "交易往来",
+    "pricing": "价格",
+    "finance": "财务",
+    "noise": "无知识价值",
+    "website": "客户官网",
+    "unknown": "未归类",
+}
+
+ROLE_LABELS = {
+    "style": "款号",
+    "name": "品名",
+    "description": "描述",
+    "fabric": "面料",
+    "size": "尺码",
+}
+ROLE_ORDER = ["style", "name", "description", "fabric", "size"]
+
+WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
+}
+MAX_NAME_LENGTH = 90
+PACKAGE_PREFIXES = re.compile(r"^(?:E-排除__05-其他__|发送优化师__A类-官方宣传材料__|A-原文保留__)+")
+
+MANIFEST_NAME = "审计记录/package-manifest.json"
+TRIAGE_NAME = "审计记录/triage-results.json"
+POINTS_NAME = "C-知识点/knowledge-points.jsonl"
+
+CLEAN_DIRECTORY = "03_净化md"
+BUILD_DIRECTORY = "04_知识库构建"
+
+
+def long_path(path: Path | str) -> str:
+    """Return a path that survives the Windows 260-character limit."""
+    text = os.path.abspath(str(path))
+    if os.name == "nt" and len(text) >= 240 and not text.startswith("\\\\?\\"):
+        return "\\\\?\\" + text
+    return text
+
+
+def sha256_file(path: Path | str) -> str:
+    digest = hashlib.sha256()
+    with open(long_path(path), "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def short_hash(text: str, length: int = 12) -> str:
+    return sha256_text(text)[:length]
+
+
+def safe_name(name: str, fallback: str = "file") -> str:
+    """Turn an untrusted name into one safe path component."""
+    leaf = re.split(r"[\\/]", name)[-1]
+    leaf = re.sub(r'[<>:"|?*#^\[\]\x00-\x1f]', "_", leaf).strip(" .")
+    leaf = re.sub(r"\s+", " ", leaf) or fallback
+    if leaf.split(".")[0].upper() in WINDOWS_RESERVED:
+        leaf = f"_{leaf}"
+    return leaf[:MAX_NAME_LENGTH].rstrip(" .")
+
+
+def source_stem(display_name: str) -> str:
+    """Drop the packaging prefixes earlier runs left on file names."""
+    return Path(PACKAGE_PREFIXES.sub("", display_name)).stem
+
+
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text.replace(" ", " ")).strip()
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def remaining_ocr_pages(build: Path, item_id: str, pages: list[int]) -> list[int]:
+    path = build / "mineru-units" / f"{item_id}.json"
+    units = load_json(path).get("units", []) if path.is_file() else []
+    covered = set()
+    for unit in units:
+        match = re.search(r"\bpage\s+(\d+)\b", unit.get("locator", ""), re.IGNORECASE)
+        # A page someone looked at and found no words on is done too.
+        if match and (unit.get("text", "").strip() or unit.get("empty")):
+            covered.add(int(match.group(1)))
+    return [page for page in pages if page not in covered]
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(long_path(path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
+def load_config(path: Path | None) -> dict[str, Any]:
+    config = load_json(path) if path else {}
+    if not isinstance(config, dict):
+        raise ValueError("kb-config.json must contain a JSON object")
+    for key in ("own_terms", "own_domains", "own_contacts", "deny_terms"):
+        config.setdefault(key, [])
+    config.setdefault("header_map", {})
+    config.setdefault("vocabularies", [])
+    config.setdefault("client_answers", {})
+    config.setdefault("company", "")
+    return config
+
+
+EXCEL_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def clean_text(text: str) -> str:
+    """Decode Office's _xHHHH_ escapes and drop control characters."""
+    return CONTROL.sub("", EXCEL_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text))
+
+
+def load_units(text_dirs: list[Path], item_id: str) -> list[dict[str, str]]:
+    """Read extracted text, later directories replacing earlier ones per locator.
+
+    OCR output uses the same file format, so it fills pages the text layer missed.
+    """
+    merged: dict[str, dict[str, str]] = {}
+    for directory in text_dirs:
+        path = directory / f"{item_id}.json"
+        if path.is_file():
+            for unit in load_json(path).get("units", []):
+                merged[unit["locator"]] = {**unit, "text": clean_text(unit["text"])}
+    return list(merged.values())
+
+
+def yaml_scalar(value: Any) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(yaml_scalar(entry) for entry in value) + "]"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def frontmatter(fields: dict[str, Any]) -> str:
+    lines = ["---"]
+    lines.extend(f"{key}: {yaml_scalar(value)}" for key, value in fields.items())
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def parse_frontmatter(text: str) -> dict[str, str]:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end < 0:
+        return {}
+    fields = {}
+    for line in text[4:end].splitlines():
+        if ": " in line:
+            key, value = line.split(": ", 1)
+            fields[key] = value.strip().strip('"')
+    return fields
