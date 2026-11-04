@@ -297,10 +297,12 @@ def build(
     # One row per answerable item, so a grouped entry still gets a separate answer for each file.
     with (build_dir / "客户确认表.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["编号", "要确认的问题", "回答（保留 / 不用 / 文字）"])
+        # The client knows their files by the original names; this table goes to them, not into the vault.
+        writer.writerow(["编号", "要确认的问题", "原文件名", "在初筛包里的位置", "回答（保留 / 不用 / 文字）"])
         for record in sorted(records["CUS"], key=lambda r: r["id"]):
             for item in record["items"]:
-                writer.writerow([item["sub_id"], item["question"], ""])
+                route = routes.get(item["item_id"], {})
+                writer.writerow([item["sub_id"], item["question"], route.get("display_name") or "", route.get("path") or "", ""])
     write_json(build_dir / "governance.json", {kind: [{k: v for k, v in r.items() if k != "details"} for r in rs] for kind, rs in records.items()})
     return {"anm_ids": anm_ids, "cus_items": {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]},
             "counts": {kind: len(rs) for kind, rs in records.items()}}

@@ -35,9 +35,12 @@ class LayerTests(Base):
     def test_titles_say_what_a_file_is_and_cards_say_where_it_came_from(self) -> None:
         self.assertEqual(self.pipeline().returncode, 0)
         page = next(self.clean.rglob("产品画册-Catalog.md")).read_text(encoding="utf-8")
-        self.assertIn("原标题 / 原文件名：Catalog.pdf", page)
-        self.assertIn("→ `A/Catalog.pdf`", page)
+        # The vault never prints original names; the package's map pairs the two.
+        self.assertIn("原名和位置见初筛包的 `审计记录/知识库文件对照.md`", page)
+        self.assertNotIn("Catalog.pdf", page)
         self.assertIn("资料编号：`a1`", page)
+        name_map = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
+        self.assertIn("| 产品画册-Catalog | 02_源资料/10_净化原文/产品画册/产品画册-Catalog.md | A/Catalog.pdf | A | 已入库，有效 |", name_map)
         self.assertIn("只说明来源，不等于每句都已核实", page)
 
     def test_conflicting_founding_years_are_recorded_for_the_client(self) -> None:

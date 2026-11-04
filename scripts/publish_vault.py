@@ -116,6 +116,10 @@ def update_project_info(vault: Path, packages: list[str]) -> None:
     text = re.sub(r"(?m)^- 客户原始资料路径：.*$", lambda _: f"- 客户原始资料路径：{source}", text)
     if "- 净化原文：" not in text:
         text = re.sub(r"(?m)^(- 客户原始资料路径：.*)$", lambda m: m.group(1) + "\n- 净化原文：库内 `02_源资料/10_净化原文`", text, count=1)
+    if "- 原名对照：" not in text:
+        # The vault uses new names only; the package keeps which original each one is.
+        text = re.sub(r"(?m)^(- 净化原文：.*)$", lambda m: m.group(1) + "\n- 原名对照：初筛包里的 `审计记录/知识库文件对照.md`，"
+                      "知识库名字和原文件名一一对应", text, count=1)
     path.write_text(text, encoding="utf-8", newline="\n")
 
 

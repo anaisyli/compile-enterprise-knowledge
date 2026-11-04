@@ -99,11 +99,14 @@ class MaintenanceTests(Base):
     def test_customer_names_in_file_names_are_masked_and_the_file_can_be_found(self) -> None:
         self.pipeline("--tiers", "T1,T2,T3", "--skip-t3-gate")
         page = next(self.clean.rglob("报价单*.md")).read_text(encoding="utf-8")
-        # A quotation's name is the customer's name, known to the dictionary or not.
-        self.assertIn("已隐去；用资料编号查原件", page)
+        # A quotation's name is the customer's name: the vault has the new name only.
         self.assertNotIn("Acme Fashion", page)
-        found = json.loads(run("find_source.py", "--package", str(self.package), "--id", "b1").stdout)
+        self.assertNotIn("Acme Fashion", "\n".join(p.read_text(encoding="utf-8") for p in (self.build / "vault").rglob("*.md")))
+        found = json.loads(run("find_source.py", "--package", str(self.package), "--id", "报价单-b1b1b1b1").stdout)
         self.assertEqual(found["original_name"], "Acme Fashion报价单.xlsx")
+        # The client gets their own file names back, to recognise what they are asked about.
+        table = (self.build / "客户确认表.csv").read_text(encoding="utf-8-sig")
+        self.assertIn("原文件名", table)
 
     def test_project_page_points_at_the_package_not_the_run_folder(self) -> None:
         self.pipeline()

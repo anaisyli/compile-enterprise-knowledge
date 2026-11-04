@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Find the real file behind a source document, for a person who wants to check it.
 
-The vault only shows masked names, so this looks the item up in the package's own audit
-records. The real path is printed to the terminal and never written into the vault.
+The vault uses new names only, so this looks the item up in the package's own audit
+records: the name map first (知识库文件对照.csv), then the manifest. The real path is
+printed to the terminal and never written into the vault.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -16,6 +18,7 @@ from kb_common import MANIFEST_NAME, load_json, parse_frontmatter, sha256_file
 
 
 SOURCE = Path("02_源资料/10_净化原文")
+NAME_MAP = "审计记录/知识库文件对照.csv"
 
 
 def item_from_vault(vault: Path, wanted: str) -> str | None:
@@ -27,6 +30,19 @@ def item_from_vault(vault: Path, wanted: str) -> str | None:
     return None
 
 
+def item_from_map(packages: list[Path], wanted: str) -> str | None:
+    """The knowledge-base name as written in the package's name map."""
+    for package in packages:
+        path = package / NAME_MAP
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                if wanted in {row.get("知识库名字"), Path(row.get("知识库位置") or "").name}:
+                    return row.get("资料编号")
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Print the real file behind a source document.")
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat")
@@ -35,8 +51,9 @@ def main() -> int:
     args = parser.parse_args()
 
     item_id = args.id
-    if args.vault and not args.id.startswith(("local-", "web-")):
-        item_id = item_from_vault(Path(args.vault), args.id) or args.id
+    if not args.id.startswith(("local-", "web-")):
+        item_id = item_from_map([Path(p) for p in args.package], args.id) or (
+            item_from_vault(Path(args.vault), args.id) if args.vault else None) or args.id
     for raw in args.package:
         package = Path(raw)
         for asset in load_json(package / MANIFEST_NAME)["assets"]:

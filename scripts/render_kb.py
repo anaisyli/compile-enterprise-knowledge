@@ -54,9 +54,9 @@ REASON_LABELS = {
     "website_needs_browser": "要用浏览器读取",
 }
 VISIBLE = {"kept", "flagged", "pending_client"}
-MASK = "〔客户〕"
-HIDDEN_NAME = "〔文件名可能含客户名，已隐去；用资料编号查原件〕"
-QUOTE_NAME = re.compile(r"(?i)报价|quot|quat|offer|\bpi\b|proforma|invoice|订单|order|客户|客人|\bfor\b")
+# Inside each package: the knowledge base's name for every file beside its original name.
+NAME_MAP_PAGE = "审计记录/知识库文件对照.md"
+NAME_MAP_CSV = "审计记录/知识库文件对照.csv"
 ASSET_INDEX = "03_正式知识/90_素材/00_素材索引.md"
 SEARCH_STATE = {"read_ok": "全文文字可搜索", "partial": "部分内容可搜索", "needs_ocr": "未建立正文索引"}
 
@@ -80,54 +80,20 @@ def doc_status(doc: dict[str, Any], blocks: list[dict[str, Any]], effective: set
     return "部分待客户确认" if pending else "有效"
 
 
-def masker(pattern: re.Pattern[str] | None) -> Callable[[str], str]:
-    """Replace customer names with 〔客户〕 and keep the rest, so the file can still be found."""
-    def mask(text: str) -> str:
-        if not pattern or not text:
-            return text or ""
-        # Only the name is masked; the extension and the folders stay, so the file can be found.
-        parts = []
-        for part in text.split("/"):
-            suffix = Path(part).suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,5}", Path(part).suffix or "") else ""
-            stem = part[: len(part) - len(suffix)] if suffix else part
-            parts.append(pattern.sub(MASK, stem) + suffix)
-        return "/".join(parts)
-    return mask
-
-
-def hides_name(name: str, tier: str = "") -> bool:
-    """Quotations are named after the customer they went to, and the dictionary cannot know
-    every customer. Product tables, and anything named like a quote or an order, hide the name."""
-    return tier == "T3" or Path(name).suffix.casefold() in {".xls", ".xlsx", ".csv"} or bool(QUOTE_NAME.search(Path(name).stem))
-
-
-def shown_name(name: str, mask: Callable[[str], str], tier: str = "") -> str:
-    if not name or not hides_name(name, tier):
-        return mask(name)
-    return f"{HIDDEN_NAME}{Path(name).suffix}"
-
-
-def shown_path(path: str, mask: Callable[[str], str], tier: str = "") -> str:
-    if not path or path.startswith("http"):
-        return path
-    folder, _, name = path.rpartition("/")
-    return "/".join(part for part in (mask(folder), shown_name(name, mask, tier)) if part)
-
-
-def source_card(doc: dict[str, Any], status: str, mask: Callable[[str], str], issue_links: list[str], layout: str = "") -> list[str]:
+def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout: str = "") -> list[str]:
+    """Where a document came from. Original file names are not printed: they often name the
+    customer a quote went to. The package's name map pairs each name here with the original."""
     tier = TIERS[doc["tier"]]
     origin = doc.get("package_path") or ""
+    rows = [f"> **来源**：{doc.get('source_label', '')}"]
     if origin.startswith("http"):
-        location = f"[{origin}]({origin})"
+        rows += [f"> - 原标题：{doc.get('original_name') or ''}", f"> - 原始位置：[{origin}]({origin})"]
+    elif doc.get("origin") == "points":
+        rows.append(f"> - 原始位置：初筛包 `{doc.get('package_name') or '初筛包'}` → `{origin}`")
     else:
-        package = doc.get("package_name") or "初筛包"
-        location = f"初筛包 `{package}` → `{shown_path(origin, mask, doc['tier'])}`" if origin else f"初筛包 `{package}`"
-    rows = [
-        f"> **来源**：{doc.get('source_label', '')}",
-        f"> - 原标题 / 原文件名：{shown_name(doc.get('original_name') or '', mask, doc['tier'])}",
-        f"> - 原始位置：{location}",
-        f"> - 资料编号：`{doc['item_id']}`（找原件：查原件 {doc['title']}）",
-    ]
+        rows.append(f"> - 原文件：在初筛包 `{doc.get('package_name') or '初筛包'}` 里；原名和位置见初筛包的 `{NAME_MAP_PAGE}`，"
+                    f"按本页名字“{doc['title']}”查")
+    rows.append(f"> - 资料编号：`{doc['item_id']}`")
     if doc.get("pages"):
         rows.append(f"> - 页数：{doc['pages']}")
     if doc.get("fetched_at"):
@@ -357,14 +323,15 @@ def package_reconciliation(build: Path, routes: dict[str, Any], docs: dict[str, 
 
 
 def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
-                   statuses: dict[str, str], status_info: dict[str, Any], mask: Callable[[str], str], issues: dict[str, list[str]],
+                   statuses: dict[str, str], status_info: dict[str, Any], issues: dict[str, list[str]],
                    counts: dict[str, Counter] | None = None) -> None:
     """One row per document that entered; excluded material is only counted, never listed by name."""
     counts = counts or {"kept": Counter(), "removed": Counter()}
-    columns = ["资料ID", "新标题", "原名称", "来源类型", "原始位置", "格式", "SHA-256", "可检索状态", "页数", "待识别页",
+    columns = ["资料ID", "知识库名字", "来源类型", "原始位置", "格式", "SHA-256", "可检索状态", "页数", "待识别页",
                "规则删掉", "处理去向", "来源级别", "关联事项"]
     lines = ["# 源资料与可检索性台账", "", f"- 净化原文目录：`{SOURCE_ROOT}`", "- 机器索引：`02_源资料/knowledge-index.sqlite`",
-             "- 说明：原文件留在初筛包或客户官网；这里登记每份资料的身份、能否检索、提取到什么程度和去向。", "",
+             "- 说明：原文件留在初筛包或客户官网；这里登记每份资料的身份、能否检索、提取到什么程度和去向。",
+             f"- 原文件名：知识库里只用改过的名字。原名和在初筛包里的位置见初筛包的 `{NAME_MAP_PAGE}`，按“知识库名字”一列查。", "",
              *package_reconciliation(build, routes, docs, published, statuses, status_info),
              "## 已入库资料", "",
              "“待识别页”是没有文字层、MinerU 和 AI 读图都还没读过的页；“规则删掉”是按价格、客户信息等规则删掉的段落数和占比。", "",
@@ -380,19 +347,69 @@ def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str
         kept, removed = counts["kept"].get(doc_id, 0), counts["removed"].get(doc_id, 0)
         share = f"{removed} 段（{removed * 100 // (kept + removed)}%）" if removed else "0"
         pages = f"第 {'、'.join(map(str, waiting[:8]))}{' 等' if len(waiting) > 8 else ''} 页（共 {len(waiting)} 页）" if waiting else ""
-        row = [doc["doc_id"], f"[[{Path(doc['file_name']).stem}]]", shown_name(doc.get("original_name", ""), mask, doc["tier"]),
-               doc.get("source_label", ""), shown_path(origin, mask, doc["tier"]),
+        place = origin if origin.startswith("http") else f"初筛包 `{doc.get('package_name') or ''}`（见对照表）"
+        row = [doc["doc_id"], f"[[{Path(doc['file_name']).stem}]]", doc.get("source_label", ""), place,
                Path(doc.get("original_name") or "").suffix.lstrip(".") or ("网页" if origin.startswith("http") else ""),
                doc["source_sha256"][:12], state, str(info.get("pages") or ""), pages, share,
                statuses.get(doc_id, ""), doc["tier"], "、".join(issues.get(doc["item_id"], []))]
         lines.append("| " + " | ".join(escape_cell(c) for c in row) + " |")
-    held = [r for r in routes.values() if r["route"] == "hold"]
-    lines.extend(["", "## 暂缓的资料", "", "| 原名称 | 原因 |", "| --- | --- |"])
-    lines.extend(f"| {escape_cell(shown_name(r['display_name'], mask))} | {reason_label(r['reason'])} |" for r in held)
+    held = [(item, r) for item, r in routes.items() if r["route"] == "hold"]
+    lines.extend(["", "## 暂缓的资料", "", "原名见初筛包的对照表，按资料编号查。", "", "| 资料编号 | 类别 | 原因 |", "| --- | --- | --- |"])
+    lines.extend(f"| `{item}` | {r.get('decision') or ''} | {reason_label(r['reason'])} |" for item, r in held)
     skipped = Counter(reason_label(r["reason"]) for r in routes.values() if r["route"] == "skip")
     lines.extend(["", "## 不入库的资料（只计数）", "", "| 原因 | 数量 |", "| --- | ---: |"])
     lines.extend(f"| {reason} | {count} |" for reason, count in skipped.most_common())
     write_text(build / "vault" / REGISTER, "\n".join(lines) + "\n")
+
+
+def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
+                    statuses: dict[str, str], same_content: dict[str, str]) -> None:
+    """Write, into each package's audit folder, which knowledge-base name each file got.
+
+    The vault only uses the new names, because original names often name a customer.
+    This map is the one place that pairs them, kept with the originals it points to."""
+    by_item = {d["item_id"]: d for d in docs.values() if d["doc_id"] in published}
+    points = next((d for d in docs.values() if d.get("origin") == "points" and d["doc_id"] in published), None)
+    per_package: dict[str, list[list[str]]] = defaultdict(list)
+    excluded: Counter = Counter()
+    for item_id, route in sorted(routes.items(), key=lambda kv: (kv[1].get("decision") or "", kv[1].get("path") or "")):
+        package = route.get("package")
+        if not package:
+            continue  # Website pages have no file in a package.
+        if route.get("decision") == "E":
+            excluded[package] += 1
+            continue
+        doc = by_item.get(item_id) or (by_item.get(same_content[item_id]) if item_id in same_content else None)
+        if route["route"] == "points" and points:
+            doc, fate = points, "汇总进业务要点"
+        elif item_id in same_content and doc:
+            fate = "内容和另一份相同，只发布了一份"
+        elif doc:
+            fate = f"已入库，{statuses[doc['doc_id']]}"
+        else:
+            fate = f"{'暂缓' if route['route'] == 'hold' else '不入库'}：{reason_label(route['reason'])}"
+        per_package[package].append([
+            Path(doc["file_name"]).stem if doc else "", f"{SOURCE_ROOT}/{published[doc['doc_id']]}" if doc else "",
+            route.get("path") or "", route.get("decision") or "", fate, item_id])
+    columns = ["知识库名字", "知识库位置", "初筛包里的位置（原名）", "初筛类别", "去向", "资料编号"]
+    for package, rows in per_package.items():
+        root = Path(package)
+        if not (root / "审计记录").is_dir():
+            continue
+        lines = ["# 知识库文件对照", "",
+                 "知识库（Obsidian）里只用改过的名字，比如“产品画册-2027TAPESTRY产品系列”“报价单-0a663a2b”，因为原文件名里常有客户的买家名。"
+                 "这张表把两边对上：按“知识库名字”找到初筛包里的原文件，或者按原文件名找到它在知识库里叫什么。", "",
+                 "- 由 compile-enterprise-knowledge 每次建库时自动更新，不要手改；改了下次会被覆盖。",
+                 "- 重建、更新知识库，或者给客户看原文件时，先读这张表。名字两边不一样是正常的，不算错误。",
+                 "- 这张表只放在初筛包里，不放进知识库。",
+                 f"- E 类（排除）的 {excluded[package]} 份不进知识库，没有列出。" if excluded[package] else "", "",
+                 "| " + " | ".join(columns) + " |", "|" + " --- |" * len(columns)]
+        lines.extend("| " + " | ".join(escape_cell(cell) for cell in row) + " |" for row in rows)
+        write_text(root / NAME_MAP_PAGE, "\n".join(line for line in lines) + "\n")
+        with (root / NAME_MAP_CSV).open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(columns)
+            writer.writerows(rows)
 
 
 def write_exports(build: Path, visible: list[dict[str, Any]], docs: dict[str, dict[str, Any]], styles: list[dict[str, Any]],
@@ -470,12 +487,16 @@ def main() -> int:
     styles = product_master([b for b in visible if b["status"] != "pending_client"], docs)
     status_path = build / "package-text" / "extract-status.json"
     status_info = load_json(status_path)["items"] if status_path.is_file() else {}
-    terms = load_json(build / "guard-terms.json")
-    mask = masker(compile_terms(terms["soft"] + terms["hard"] + config["deny_terms"]))
+    # Ledgers name a file by its knowledge-base name, or by its number when it has none;
+    # the original name, often a customer's, stays in the package's name map.
+    by_name = {}
+    for item_id, route in routes.items():
+        doc = next((docs[d] for d in order if docs[d]["item_id"] == item_id), None)
+        by_name.setdefault(route.get("display_name") or "", doc["title"] if doc else f"资料编号 {item_id}")
     gov = build_governance(config.get("project_id", "P-000"), build, routes, docs, blocks, styles,
                            load_json(build / "sheet-report.json"), load_jsonl(build / "review-queue.jsonl"),
                            status_info, (passed or args.skip_t3_gate, reason), progress_of(run), effective,
-                           show=lambda name: shown_name(name, mask))
+                           show=lambda name: by_name.get(name, "（原名见初筛包对照表）"))
     cleanup_record(build, blocks, docs)
     issues: dict[str, list[str]] = defaultdict(list)
     for item_key, record_id in gov["cus_items"].items():
@@ -488,7 +509,7 @@ def main() -> int:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
-        card = source_card(doc, status, mask, links, status_info.get(doc["item_id"], {}).get("layout", ""))
+        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""))
         pictures = {f"第 {page} 页": name for page, name in status_info.get(doc["item_id"], {}).get("page_images", {}).items()
                     if (doc_id, f"第 {page} 页") not in unsafe and (build / "assets" / name).is_file()}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures))
@@ -496,7 +517,8 @@ def main() -> int:
 
     write_table_summary(clean, visible, docs, statuses)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
-    write_register(build, routes, docs, published, statuses, status_info, mask, issues, counts)
+    write_register(build, routes, docs, published, statuses, status_info, issues, counts)
+    write_name_maps(routes, docs, published, statuses, same_content)
     write_asset_index(build, visible, docs, published)
     write_exports(build, visible, docs, styles, statuses)
     write_jsonl(build / "docs.jsonl", docs.values())

@@ -888,6 +888,9 @@ def main() -> int:
         {
             item_id: {
                 "display_name": route["asset"].get("display_name"),
+                # Where the file sits in its package, for the name map and the client's table.
+                "path": route["asset"].get("path"),
+                "package": str(package_of[item_id].resolve()) if item_id in package_of else None,
                 "decision": route["asset"].get("decision"),
                 "resource_type": route["asset"].get("resource_type"),
                 "source_hash": route["asset"].get("source_hash", ""),
