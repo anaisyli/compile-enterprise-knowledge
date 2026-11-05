@@ -132,6 +132,20 @@ class QualityTests(Base):
         self.assertIn("| E 排除 | 1 | 0 |", register)
         self.assertIn("初筛排除", register)
 
+    def test_knowledge_points_register_shows_the_package_path_and_jsonl_type(self) -> None:
+        from render_kb import write_register
+
+        doc = {"doc_id": "DOC-POINTS", "item_id": "knowledge-points", "file_name": "业务要点-邮件摘录.md",
+               "original_name": "初筛知识点（knowledge-points.jsonl）", "package_path": "C-知识点/knowledge-points.jsonl",
+               "origin": "points", "source_sha256": "", "tier": "T4"}
+        write_register(self.build, {}, {"DOC-POINTS": doc}, {"DOC-POINTS": "业务要点/业务要点-邮件摘录.md"},
+                       {"DOC-POINTS": "待审"}, {}, {})
+        register = (self.build / "vault/02_源资料/源资料与可检索性台账.md").read_text(encoding="utf-8")
+        row = next(line for line in register.splitlines() if line.startswith("| DOC-POINTS |"))
+        self.assertIn("`C-知识点/knowledge-points.jsonl`", row)
+        self.assertIn("| jsonl |", row)
+        self.assertNotIn("jsonl）", row)
+
     def test_a_document_the_rules_cut_heavily_is_listed(self) -> None:
         units = [{"locator": f"para {i}", "text": f"款式 {i} 单价 USD{i}.5"} for i in range(1, 6)]
         units.append({"locator": "para 9", "text": "我们有自有工厂。"})

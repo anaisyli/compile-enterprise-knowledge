@@ -39,7 +39,8 @@ RECORD_HEADING = "#### 处理记录"
 SOLVED_STAGE = "系统已解决，待确认"
 CLOSED_STAGES = {"已完成", "已关闭", "已解决", "无需询问", SOLVED_STAGE}
 FOUNDED = re.compile(r"(?i)(?:成立于|始建于|创立于|创建于|建厂于|established(?:\s+in)?|founded(?:\s+in)?)\s*[:：]?\s*((?:19|20)\d{2})"
-                     r"|((?:19|20)\d{2})\s*年\s*(?:成立|创立|创建|建厂)")
+                     r"|((?:19|20)\d{2})\s*年\s*(?:成立|创立|创建|建厂)"
+                     r"|((?:19|20)\d{2})\s+(?:[A-Z][A-Za-z]+\s+)?estab[-\s]?lished\b")
 STAFF = re.compile(r"(?i)(?:员工|工人|employees|workers)\s*[:：]?\s*(?:约|超过|逾|over|about|more than)?\s*(\d{2,5})"
                    r"|(\d{2,5})\s*(?:\+\s*)?(?:名员工|名工人|余名员工|多名员工|employees|workers)")
 MAX_CELL = 80
@@ -71,6 +72,9 @@ class Registry:
 
 
 def link(doc: dict[str, Any], group: str | None = None) -> str:
+    if doc.get("unpublished"):
+        # There is no page to link to; a link would be dead.
+        return f"《{doc['title']}》（{doc['unpublished']}）"
     stem = Path(doc["file_name"]).stem
     return f"[[{stem}#{group}|{doc['title']} · {group}]]" if group else f"[[{stem}]]"
 
@@ -274,11 +278,21 @@ def build(
     unclear = [r for r in checks if r.get("unclear") and r["item_id"] in by_item]
     cus_ids: dict[str, str] = {}
     if unclear:
-        items = [{"key": f"{r['item_id']}|{r['unit']} {r['page']}", "item_id": r["item_id"], "location": heading(r),
-                  "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}上有几款产品，看不出各自的款号，请标出每款的款号"}
-                 for r in unclear]
-        cus_ids["pairing"] = add("CUS", "pairing", f"{len(unclear)} 页款号和产品对应不清楚", f"{len(unclear)} 页", "等待客户回复",
-                                 "内容运营 → 客户", ["- 原件上没写清楚哪个款号对应哪款，整理页不要自行配对。", ""]
+        feature_attribution = all("共用 FEATURES" in r.get("pairing", "") for r in unclear)
+        if feature_attribution:
+            title = f"{len(unclear)} 页共用特征的款号归属待确认"
+            instruction = "- 款号与图片位置清楚；原图中的 FEATURES 为共用区，无法确认各列文字对应哪款。请客户确认两列特征是分别对应款号还是共用于两款。"
+            items = [{"key": f"{r['item_id']}|{r['unit']} {r['page']}", "item_id": r["item_id"], "location": heading(r),
+                      "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}的共用 FEATURES 区分两列文字，左列和右列是否分别对应页面左、右款号，还是两款共用？"}
+                     for r in unclear]
+        else:
+            title = f"{len(unclear)} 页款号和产品对应不清楚"
+            instruction = "- 原件上没写清楚哪个款号对应哪款，整理页不要自行配对。"
+            items = [{"key": f"{r['item_id']}|{r['unit']} {r['page']}", "item_id": r["item_id"], "location": heading(r),
+                      "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}上有几款产品，看不出各自的款号，请标出每款的款号"}
+                     for r in unclear]
+        cus_ids["pairing"] = add("CUS", "pairing", title, f"{len(unclear)} 页", "等待客户回复",
+                                 "内容运营 → 客户", [instruction, ""]
                                  + [f"- {link(by_item[r['item_id']], heading(r))}" for r in unclear], items)
     # Rules that remove a fifth of a brochure have probably removed something they should not.
     shares: dict[str, list[int]] = defaultdict(lambda: [0, 0])

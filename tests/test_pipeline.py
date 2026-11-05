@@ -363,6 +363,26 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(contact_hits("Whatsapp:86- spec 350 gsm 2026 style 100234", set(), []), [])
         self.assertEqual(contact_hits("Tel: 0575-8551 6777", set(), []), ["phone"])
 
+    def test_quote_rows_drop_accessory_counts_and_size_chart_caption_style(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        from guard_blocks import ROW_PATTERNS, scan_block
+
+        for text in ("7个/条", "5副/件", "11颗/件", "4副/件"):
+            self.assertIsNotNone(ROW_PATTERNS["quantity"].search(text))
+        row = {"group": "", "text": "尺寸表如下", "unjudged_text": "尺寸表如下",
+               "kind": "row", "cells": {"style": "尺寸表如下"}, "doc_id": "DOC-test"}
+        hard, _, _ = scan_block(row, None, None, set(), [], set())
+        self.assertIn("invalid_style_label", hard)
+
+    def test_company_year_review_finds_split_established_timeline_entry(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        from governance import company_facts
+
+        blocks = [{"doc_id": "DOC-test", "tier": "T1", "status": "kept", "group": "第 8 页",
+                   "text": "2003\nAnisen estab-lished\nand set up our own factory in Shaoxing City"}]
+        docs = {"DOC-test": {"tier": "T1", "file_name": "company.pdf", "title": "公司资料-公司简介"}}
+        self.assertIn("2003", company_facts(blocks, docs)["成立年份"])
+
     def test_a_package_item_with_no_route_fails_verification(self) -> None:
         self.assertEqual(self.run_pipeline().returncode, 0)
         path = self.build / "routes.json"

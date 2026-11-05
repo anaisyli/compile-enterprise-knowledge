@@ -92,6 +92,7 @@ CELL_ERROR = re.compile(r"^(?:#[A-Z/0!?]+!?|=DISPIMG\(.*)$")
 SHORT_TITLE = 20
 SAMPLE_ROWS = 4
 SERIAL = re.compile(r"\d{1,3}")
+PICTURE_FILES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 SCREENING_REASONS = {"price_columns": "价格列", "quantity_columns": "数量列", "customer_block": "客户和业务员信息",
                      "customer_columns": "客户列", "cost_columns": "成本列", "notes_columns": "备注列"}
 # Phrases a compiled reference document uses about itself.
@@ -172,6 +173,9 @@ def package_title(asset: dict[str, Any], tier: str, overrides: dict[str, str]) -
     if tier == "T3":
         return f"产品表-{asset['source_hash'][:8]}", FOLDERS["T3"]
     name = clean_name(source_stem(asset.get("display_name") or asset["item_id"]))
+    if asset.get("asset_kind") == "image" or extension_of(asset.get("display_name") or "") in PICTURE_FILES:
+        # A picture read by MinerU or the model is a picture, not a company document.
+        return f"图片-{name}", "图片资料"
     if COMPANY_NAME.search(name):
         return f"公司资料-{name}", "公司资料"
     if tier == "T1":

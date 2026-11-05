@@ -270,7 +270,8 @@ def write_asset_index(build: Path, visible: list[dict[str, Any]], docs: dict[str
         doc = docs[block["doc_id"]]
         if doc["doc_id"] not in published:
             continue
-        for name in block.get("images", []):
+        # Only the pictures a page shows are published, so only those are indexed.
+        for name in block.get("images", [])[:MAX_STYLE_IMAGES]:
             uses.setdefault(name, {}).setdefault(doc["doc_id"], (block["group"], block["locator"]))
     rows = []
     for name, by_doc in sorted(uses.items()):
@@ -394,10 +395,13 @@ def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str
         share = f"{removed} 段（{removed * 100 // (kept + removed)}%）" if removed else "0"
         pages = f"第 {'、'.join(map(str, waiting[:8]))}{' 等' if len(waiting) > 8 else ''} 页（共 {len(waiting)} 页）" if waiting else ""
         place = origin if origin.startswith("http") else (f"[打开原件]({(originals or {})[doc_id]})" if doc_id in (originals or {})
+                                                          else f"初筛包 `{origin}`" if doc.get("origin") == "points" and origin
                                                           else f"初筛包 `{doc.get('package_name') or ''}`（见对照表）")
+        file_format = "jsonl" if doc.get("origin") == "points" else Path(doc.get("original_name") or "").suffix.lstrip(".")
+        if not file_format and origin.startswith("http"):
+            file_format = "网页"
         row = [doc["doc_id"], f"[[{Path(doc['file_name']).stem}]]", doc.get("source_label", ""), place,
-               Path(doc.get("original_name") or "").suffix.lstrip(".") or ("网页" if origin.startswith("http") else ""),
-               doc["source_sha256"][:12], state, str(info.get("pages") or ""), pages, share,
+               file_format, doc["source_sha256"][:12], state, str(info.get("pages") or ""), pages, share,
                statuses.get(doc_id, ""), doc["tier"], "、".join(issues.get(doc["item_id"], []))]
         lines.append("| " + " | ".join(escape_cell(c) for c in row) + " |")
     held = [(item, r) for item, r in routes.items() if r["route"] == "hold"]
@@ -426,7 +430,10 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
         if result.get("unclear"):
             # Say what is unclear, so a reader knows which products the code may not cover.
             detail = f"{result['pairing']}。" if result.get("pairing") else ""
-            page.append(f"⚠ 看图核对：{detail}原件上看不出款号和产品的对应，不要自行配对（{gov['cus_ids'].get('pairing', '')}）")
+            if "不作分配" in detail or "归属不清" in detail:
+                page.append(f"⚠ 看图核对：{detail}款号位置已确认，但特征归属不清；保留原图共用文字，不自行分配（{gov['cus_ids'].get('pairing', '')}）")
+            else:
+                page.append(f"⚠ 看图核对：{detail}原件上看不出款号和产品的对应，不要自行配对（{gov['cus_ids'].get('pairing', '')}）")
         elif result.get("pairing"):
             page.append(f"看图核对：{result['pairing']}")
         if result.get("structured"):
@@ -653,6 +660,11 @@ def main() -> int:
         order.append(doc_id)
 
     visible = [b for doc_id in order for b in by_doc[doc_id]]
+    published_ids = set(order)
+    for doc_id, doc in docs.items():
+        # Ledgers then name it instead of linking a page that is not there.
+        doc["unpublished"] = "" if doc_id in published_ids else (
+            "和另一份内容相同，只发布了一份" if doc["item_id"] in same_content else "全部内容按规则删除，没有入库")
     styles = product_master([b for b in visible if b["status"] != "pending_client"], docs)
     status_path = build / "package-text" / "extract-status.json"
     status_info = load_json(status_path)["items"] if status_path.is_file() else {}

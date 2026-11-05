@@ -50,7 +50,11 @@ HARD_PATTERNS = {
 }
 # Salespeople write notes into product columns, so table cells get stricter rules.
 ROW_PATTERNS = {
-    "quantity": re.compile(r"(?i)\d\s*(?:pcs?\b|sets?\b|套|箱)|数量|外箱|内盒|/\s*ctn|\bcarton|五层|无订"),
+    "quantity": re.compile(
+        r"(?i)\d+\s*(?:pcs?\b|sets?\b|套|箱)|"
+        r"\d+\s*(?:副|颗|个|条|粒|枚|双|根|片)\s*/\s*(?:件|条|个|双|套)|"
+        r"数量|外箱|内盒|/\s*ctn|\bcarton|五层|无订"
+    ),
     # In a quotation these were offered to one customer.
     "quoted_terms": re.compile(r"(?i)(?<![a-z])(?:moq|fob|cif|exw|ddp)(?![a-z])|起订量?|交期|交货期|lead\s*time|价格|报价(?!单)|单价"),
     # These words are ordinary in company prose ("控制成本"), so they only apply to cells.
@@ -230,7 +234,8 @@ def load_vocabulary(config: dict[str, Any], decisions: dict[str, Any]) -> set[st
     for name in config.get("vocabularies", []):
         path = VOCABULARY_DIRECTORY / f"vocabulary-{name}.txt"
         words.update(line.strip().casefold() for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    for term in list(decisions.get("allow_terms", [])) + list(config["own_terms"]):
+    # The company's own style prefixes (ANST in ANST-001) are its words, not unknown names.
+    for term in list(decisions.get("allow_terms", [])) + list(config["own_terms"]) + list(config.get("style_prefixes", [])):
         words.add(term.casefold())
         words.update(word.casefold() for word in WORD.findall(term))
     return words
@@ -428,6 +433,9 @@ def scan_block(
     unjudged = block.get("unjudged_text", block["text"])
     hard = hard_hits(text, hard_terms, own_domains, own_contacts)
     if block["kind"] == "row":
+        style = normalize_space(block.get("cells", {}).get("style", ""))
+        if style.casefold() in {"尺寸表如下", "尺码表如下", "size chart as below", "size chart as follows"}:
+            hard.append("invalid_style_label")
         hard.extend(name for name, pattern in ROW_PATTERNS.items() if pattern.search(unjudged))
     customers = sorted({normalize_space(m.group(0)) for m in soft_terms.finditer(text)}) if soft_terms else []
     unvetted: list[str] = []

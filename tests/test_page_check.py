@@ -80,6 +80,21 @@ class PageCheckTests(Base):
         self.assertEqual(result.returncode, 1)
         self.assertIn("看图核对没做完", result.stdout)
 
+    def test_unchecked_ocr_page_still_requires_visual_review(self) -> None:
+        self.clear_catalog_pending()
+        ocr = self.build / "mineru-units"
+        ocr.mkdir(parents=True)
+        unit_path = ocr / "a1.json"
+        unit_path.write_text(json.dumps({"units": [{"locator": "page 1 ocr", "text": "SHERPA JACKET"}]}), encoding="utf-8")
+
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual([entry["key"] for entry in self.todo()], ["a1|page 1"])
+
+        unit_path.write_text(json.dumps({"units": [{"locator": "page 1 ocr", "text": "SHERPA JACKET", "checked": True}]}),
+                             encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual(self.todo(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
