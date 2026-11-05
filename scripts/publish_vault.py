@@ -85,6 +85,11 @@ def ours(path: Path) -> bool:
     return "本 Skill 自动登记" in text or "compile-enterprise-knowledge 自动登记" in text
 
 
+def empty_ledger(path: Path) -> bool:
+    """Another tool's ledger template with no entries in it yet."""
+    return not re.search(r"(?m)^\|\s*(?:P-\d+-)?[A-Z]{2,5}-\d+", path.read_text(encoding="utf-8"))
+
+
 def side_by_side(key: str) -> str:
     path = Path(key)
     return (path.parent / f"02_知识库构建_{path.name.split('_', 1)[-1]}").as_posix()
@@ -216,11 +221,21 @@ def main() -> int:
         raise SystemExit(f"这次发布会让 {len(leaving)} / {live} 份资料变成已失效（{'、'.join(f'{f} {n}' for f, n in folders.most_common())}）。"
                          "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
     written: dict[str, str] = {}
+    renamed: list[str] = []
     for key, source in list(planned.items()):
         target = vault / key
+        if key.startswith(LEDGER_ROOT):
+            side = vault / side_by_side(key)
+            if target.exists() and not ours(target) and empty_ledger(target):
+                # This skill keeps the ledgers; another tool's empty template would only be a second copy.
+                archive(vault, key, stamp, archived, move=True)
+            if side.exists() and not target.exists():
+                # Written beside a template that is gone now: back to the plain name, people's notes kept.
+                shutil.move(str(side), target)
+                renamed.append(f"{side_by_side(key)} → {key}")
         if key.startswith(LEDGER_ROOT) and (vault / side_by_side(key)).exists() or (
                 key.startswith(LEDGER_ROOT) and target.exists() and not ours(target)):
-            # manage-article-knowledge keeps its own ledgers here; ours go beside them.
+            # Another tool keeps a ledger with real entries here; ours goes beside it, nothing is lost.
             del planned[key]
             key = side_by_side(key)
             planned[key] = source
@@ -258,7 +273,6 @@ def main() -> int:
         written[key] = normalized_hash(target)
 
     withdrawn = 0
-    renamed: list[str] = []
     for key in sorted(set(previous) - set(planned)):
         target = vault / key
         if not target.is_file():

@@ -392,7 +392,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.verify().returncode, 1)
 
     @unittest.skipUnless(MANAGE_SKILL.is_dir(), "manage-article-knowledge not installed here")
-    def test_publish_also_passes_manage_validator_when_it_is_installed(self) -> None:
+    def test_a_vault_made_by_manage_gets_one_set_of_ledgers(self) -> None:
+        # This skill is the builder: manage's empty ledger templates give way to its ledgers.
         self.assertEqual(self.run_pipeline("--tiers", "T1,T2").returncode, 0)
         vault = self.root / "vaults" / "P-999_测试知识库"
         # With manage installed, its own initializer goes first and owns the workbench files.
@@ -404,10 +405,12 @@ class PipelineTests(unittest.TestCase):
                    "--project-id", "P-999", "--name", "测试", "--website", "https://example.com", "--owner", "测试",
                    "--source-root", str(self.clean), "--confirm"]
         self.assertEqual(subprocess.run(project, capture_output=True).returncode, 0)
-        publish = [sys.executable, str(SCRIPTS / "publish_vault.py"), "--out", str(self.out), "--vault", str(vault),
-                   "--manage-skill", str(MANAGE_SKILL)]
+        publish = [sys.executable, str(SCRIPTS / "publish_vault.py"), "--out", str(self.out), "--vault", str(vault)]
         result = subprocess.run(publish, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ledgers = vault / "05_数据与审核/30_异常与待决定"
+        self.assertFalse(list(ledgers.rglob("02_知识库构建_*.md")))
+        self.assertIn("本 Skill 自动登记", (ledgers / "10_待客户补充/01_待客户补充事项.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
