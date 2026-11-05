@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ from xml.etree import ElementTree as ET
 
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, sha256_file, short_hash, write_json
 from layout import ordered_text
-from office import ConversionError, convert_office
+from office import ConversionError, convert_office, disable as disable_office, self_test as office_self_test
 
 
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -48,8 +49,13 @@ EXCLUDED_READ = {".md", ".txt", ".eml"}
 MAX_THUMBNAIL_PAGES = 80
 THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
-# Raised when the way files are read changes, so files read the old way are read again.
-EXTRACTOR_VERSION = 3
+# Raised when the way a kind of file is read changes, so only those files are read again:
+# a change to PDF reading must not send every old workbook back through LibreOffice.
+READER_VERSIONS = {".pdf": 3, ".pptx": 3, ".ppt": 3, ".docx": 3, ".doc": 3}
+
+
+def reader_version(name: str) -> int:
+    return READER_VERSIONS.get(Path(name).suffix.casefold(), 1)
 TABLE_MIN_ROWS = 2
 TABLE_FILL = 0.5
 
@@ -288,7 +294,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat")
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--workers", type=int, default=3)
-    parser.add_argument("--timeout", type=int, default=600, help="Seconds per old-format conversion")
+    parser.add_argument("--timeout", type=int, default=120, help="Seconds per old-format conversion; a hang is killed after this")
     return parser.parse_args()
 
 
@@ -307,15 +313,38 @@ def main() -> int:
             if not wanted(asset):
                 continue
             previous = statuses.get(asset["item_id"], {})
-            done = previous.get("source_hash") == asset["source_hash"] and previous.get("extractor") == EXTRACTOR_VERSION \
+            needed = reader_version(asset.get("display_name") or asset["path"])
+            done = previous.get("source_hash") == asset["source_hash"] and int(previous.get("extractor") or 1) >= needed \
                 and previous.get("status") in {"read_ok", "partial", "needs_ocr", "unsupported"}
             if done and (previous.get("status") == "unsupported" or (text_dir / f"{asset['item_id']}.json").is_file()):
-                continue  # Same bytes as last time: nothing to redo.
+                continue  # Same bytes, read the same way as last time: nothing to redo.
             jobs.append((asset, package / asset["path"]))
 
+    # Try LibreOffice once on a tiny file before old Office files wait on it one by one.
+    legacy = [a for a, _ in jobs if Path(a.get("display_name") or a["path"]).suffix.casefold() in LEGACY_OFFICE
+              and not (cache / f"{a['source_hash'][:16]}.{LEGACY_OFFICE[Path(a.get('display_name') or a['path']).suffix.casefold()]}").is_file()]
+    if legacy:
+        problem = office_self_test(cache / "self-test")
+        if problem:
+            disable_office(problem)
+            print(f"LibreOffice 在这里转换不了（{problem}）：{len(legacy)} 个 .xls/.doc/.ppt 先不读，标为 needs_libreoffice。"
+                  "在沙盒里运行时，用不受沙盒限制的方式重跑这一步，或在本机终端运行；也可以把它们另存为 .xlsx/.docx/.pptx。", flush=True)
+    progress = {"done": 0}
+    progress_lock = threading.Lock()
+
     def one(job: tuple[dict[str, Any], Path]) -> tuple[str, dict[str, Any]]:
+        item_id, status = read_one(job)
+        if Path(job[0].get("display_name") or "").suffix.casefold() in LEGACY_OFFICE:
+            with progress_lock:
+                progress["done"] += 1
+                # Old files go through LibreOffice one at a time; a line each shows the run is moving.
+                print(f"[{progress['done']}/{len(legacy)}] {status['status']}  {job[0].get('display_name')}", flush=True)
+        return item_id, status
+
+    def read_one(job: tuple[dict[str, Any], Path]) -> tuple[str, dict[str, Any]]:
         asset, path = job
-        base = {"display_name": asset.get("display_name"), "source_hash": asset["source_hash"], "extractor": EXTRACTOR_VERSION}
+        base = {"display_name": asset.get("display_name"), "source_hash": asset["source_hash"],
+                "extractor": reader_version(asset.get("display_name") or asset["path"])}
         try:
             if not Path(long_path(path)).is_file():
                 return asset["item_id"], {**base, "status": "missing_file", "characters": 0}
@@ -338,6 +367,9 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for item_id, status in pool.map(one, jobs):
             statuses[item_id] = status
+    # Folders an older version left behind when LibreOffice still held them.
+    for leftover in cache.glob("lo-*") if cache.is_dir() else []:
+        shutil.rmtree(leftover, ignore_errors=True)
     write_json(status_path, {"items": statuses})
     counts: dict[str, int] = {}
     for status in statuses.values():
@@ -346,7 +378,7 @@ def main() -> int:
     if counts.get("needs_pdf_reader"):
         print("有 PDF 没读：先运行 python -m pip install pypdf 再重跑；不装的话，这些 PDF 只能交给 MinerU。")
     if counts.get("needs_libreoffice"):
-        print("有 .xls/.doc/.ppt 没读：需要安装 LibreOffice。")
+        print("有 .xls/.doc/.ppt 没读：要装 LibreOffice，或者 LibreOffice 在这里转换不了（运行 check_tools.py 看原因）。")
     return 0
 
 

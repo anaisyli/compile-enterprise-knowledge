@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Convert old Office files (.xls, .doc, .ppt) with LibreOffice, reliably on Windows.
+"""Convert old Office files (.xls, .doc, .ppt) with LibreOffice, without ever hanging a run.
 
-LibreOffice keeps writing to its profile for a moment after it exits, so deleting a
-fresh profile right away fails ("目录不是空的") even though the file was converted.
-Here one profile is kept and reused, conversions run one at a time (two instances on
-one profile hand work to each other and produce nothing), the profile lives on a short
-ASCII path, and an empty result is retried once.
+- Each conversion gets a fresh LibreOffice profile on a short ASCII path, so one crash
+  cannot poison the conversions after it. LibreOffice keeps writing to a profile for a
+  moment after it exits; a profile that cannot be deleted yet is left, never an error.
+- A conversion that takes too long is killed with its whole process tree.
+- After a few failures in a row (a sandbox that forbids LibreOffice to write, a broken
+  install), the rest are not tried: they are reported at once instead of each waiting.
+- Conversions run one at a time; two LibreOffice instances started together can hand
+  work to each other and both produce nothing.
 """
 
 from __future__ import annotations
@@ -22,11 +25,18 @@ from kb_common import long_path
 
 
 LOCK = threading.Lock()
-RETRY_WAIT = 3
+TIMEOUT = 120
+RETRY_WAIT = 2
+GIVE_UP_AFTER = 3
 
 
 class ConversionError(Exception):
     """LibreOffice ran but produced nothing; the message carries what it printed."""
+
+
+class _State:
+    failures = 0
+    disabled: str | None = None
 
 
 def find_converter() -> str | None:
@@ -48,48 +58,107 @@ def find_converter() -> str | None:
     return None
 
 
-def profile_dir(fallback: Path) -> Path:
-    """A short ASCII path: LibreOffice can trip over long or non-ASCII profile paths."""
+def disable(reason: str) -> None:
+    """Stop trying LibreOffice in this run; every later conversion reports the reason at once."""
+    _State.disabled = reason
+
+
+def disabled() -> str | None:
+    return _State.disabled
+
+
+def short_temp(fallback: Path) -> Path:
+    """A writable folder on a short ASCII path: LibreOffice trips over long or non-ASCII ones."""
     for base in (os.environ.get("TEMP"), os.environ.get("TMP"), tempfile.gettempdir(), str(fallback)):
-        if not base:
-            continue
-        candidate = Path(base) / "cek-libreoffice-profile"
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            probe = candidate / ".write-test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink()
-            return candidate
-        except OSError:
-            continue
-    return fallback / "libreoffice-profile"
+        if base and base.isascii():
+            try:
+                Path(base).mkdir(parents=True, exist_ok=True)
+                return Path(tempfile.mkdtemp(prefix="cek-lo-", dir=base))
+            except OSError:
+                continue
+    fallback.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="cek-lo-", dir=fallback))
 
 
-def convert_office(path: Path, target: str, out: Path, name: str, timeout: int) -> Path:
+def kill_tree(process: subprocess.Popen) -> None:
+    """soffice.exe starts soffice.bin; killing only the first leaves the second running."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run_once(converter: str, path: Path, target: str, work: Path, timeout: int) -> tuple[Path | None, str]:
+    profile, outdir = work / "profile", work / "out"
+    outdir.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen([converter, f"-env:UserInstallation={profile.resolve().as_uri()}", "--headless", "--norestore",
+                                "--nologo", "--nodefault", "--convert-to", target, "--outdir", str(outdir), long_path(path)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(process)
+        raise
+    produced = sorted(outdir.glob(f"*.{target}"))
+    message = (err or out or b"").decode("utf-8", errors="replace").strip()[-300:]
+    return (produced[0] if produced else None), message
+
+
+def convert_office(path: Path, target: str, out: Path, name: str, timeout: int = TIMEOUT) -> Path:
     """Write <out>/<name>.<target> and return it; an existing result is reused."""
     result = out / f"{name}.{target}"
     if result.is_file():
         return result
+    if _State.disabled:
+        raise LookupError("needs_libreoffice")
     converter = find_converter()
     if not converter:
         raise LookupError("needs_libreoffice")
     out.mkdir(parents=True, exist_ok=True)
-    profile = profile_dir(out).resolve().as_uri()
-    last = ""
+    timeout = min(timeout, TIMEOUT)
     with LOCK:
+        last = ""
         for attempt in range(2):
-            folder = Path(tempfile.mkdtemp(prefix="lo-", dir=out))
+            work = short_temp(out)
             try:
-                done = subprocess.run([converter, f"-env:UserInstallation={profile}", "--headless", "--norestore",
-                                       "--convert-to", target, "--outdir", str(folder), long_path(path)],
-                                      capture_output=True, timeout=timeout)
-                produced = sorted(folder.glob(f"*.{target}"))
+                produced, last = run_once(converter, path, target, work, timeout)
                 if produced:
-                    shutil.move(str(produced[0]), result)
+                    shutil.move(str(produced), result)
+                    _State.failures = 0
                     return result
-                last = (done.stderr or done.stdout or b"").decode("utf-8", errors="replace").strip()[-300:]
+            except subprocess.TimeoutExpired:
+                last = f"超过 {timeout} 秒没有转完，已结束 LibreOffice"
+                break  # A hang is not worth a second wait.
             finally:
-                # A leftover temp folder is harmless; a failed cleanup must not undo a good conversion.
-                shutil.rmtree(folder, ignore_errors=True)
-            time.sleep(RETRY_WAIT * (attempt + 1))
+                shutil.rmtree(work, ignore_errors=True)
+            time.sleep(RETRY_WAIT)
+        _State.failures += 1
+        if _State.failures >= GIVE_UP_AFTER:
+            disable(f"连续 {_State.failures} 个文件转换失败，最后一次：{last}")
     raise ConversionError(last or "LibreOffice 没有生成文件")
+
+
+def self_test(work: Path) -> str | None:
+    """Convert a tiny workbook; return why it failed, or None when LibreOffice works here."""
+    from check_tools import WORKBOOK
+    import zipfile
+    work.mkdir(parents=True, exist_ok=True)
+    source = work / "cek-self-test.xlsx"
+    with zipfile.ZipFile(source, "w") as archive:
+        for member, text in WORKBOOK.items():
+            archive.writestr(member, text)
+    target = work / "cek-self-test.ods"
+    try:
+        target.unlink(missing_ok=True)
+        convert_office(source, "ods", work, "cek-self-test", 60)
+        return None
+    except (LookupError, ConversionError, OSError) as exc:
+        return str(exc) or type(exc).__name__
+    finally:
+        source.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        _State.failures = 0

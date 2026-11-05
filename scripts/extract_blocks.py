@@ -730,6 +730,9 @@ def main() -> int:
             path = route["asset"].get("path")
             extension = extension_of(route["asset"].get("display_name") or "")
             wanted = {".xlsx"} if args.images == "xlsx" else {".xlsx", ".xls"}
+            # A workbook LibreOffice already failed on is not sent through it again for its pictures.
+            if status.get(item_id, {}).get("status") in {"failed", "needs_libreoffice"}:
+                continue
             if route["route"] == "kb" and path and extension in wanted and extension in SPREADSHEET:
                 jobs.append((item_id, package_of[item_id] / path))
     image_maps, image_failures = collect_images(
