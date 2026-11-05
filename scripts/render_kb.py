@@ -383,7 +383,9 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
         if result.get("text_errors"):
             page.append(f"⚠ 看图核对：提取的文字和原图不一致，以原图为准（{result['text_errors']}）{gov['mat_ids'].get('text_errors', '')}")
         if result.get("unclear"):
-            page.append(f"⚠ 看图核对：原件上看不出款号和产品的对应，不要自行配对 {gov['cus_ids'].get('pairing', '')}")
+            # Say what is unclear, so a reader knows which products the code may not cover.
+            detail = f"{result['pairing']}。" if result.get("pairing") else ""
+            page.append(f"⚠ 看图核对：{detail}原件上看不出款号和产品的对应，不要自行配对（{gov['cus_ids'].get('pairing', '')}）")
         elif result.get("pairing"):
             page.append(f"看图核对：{result['pairing']}")
     return notes

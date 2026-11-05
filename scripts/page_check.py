@@ -141,6 +141,11 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
             continue
         unit = "slide" if suffix in {".pptx", ".ppt"} else "page"
         waiting = set(remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []))
+        # A page MinerU or the model already read as a picture has been looked at.
+        read_path = build / "mineru-units" / f"{item_id}.json"
+        read = {int(m.group(1)) for u in (load_json(read_path).get("units", []) if read_path.is_file() else [])
+                if not u.get("checked") and (m := re.match(r"(?:page|slide) (\d+)", u.get("locator", "")))}
+        waiting |= read
         with pymupdf.open(long_path(source)) as document:
             chosen = []
             for number, page in enumerate(document, start=1):

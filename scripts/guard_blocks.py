@@ -88,6 +88,7 @@ GENERIC_WORDS = set(
     spring fall autumn version update updated final customer client sample samples program rfq factory
     single format foreign linking updating suppliers clients product products details design designs
     tech pack hoodie shirt fishing page xlsx xls csv pdf docx doc pptx ppt png jpg jpeg zip rar
+    mail web http https www phone whatsapp wechat
     """.split()
 )
 SKIP_TERM = re.compile(r"^[\d\s.,:/\-+#()%]+$")
