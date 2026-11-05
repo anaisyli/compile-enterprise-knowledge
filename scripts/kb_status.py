@@ -66,6 +66,7 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
         "topics_skipped": [(t["topic"], t["skipped"]) for t in topics if t.get("blocks") and t["slug"] not in written and t.get("skipped")],
         "warnings": read(build / "校验结果.json", {}).get("warnings", []),
         "sections": section_rows(run),
+        "build": str(build),
         "ledgers": read(build / "governance-summary.json", {}),
         "terms_to_review": len(load_jsonl(build / "review-queue.jsonl")),
         "cells": progress_of(run), "t3": "可发布" if passed else reason, "ocr": ocr,
@@ -128,7 +129,10 @@ def overview(state: dict[str, Any]) -> list[str]:
         gaps.append(f"- 官网最早一页抓取于 {state['website_oldest']}，建议重新读取")
     lines.extend(gaps or ["- 暂无"])
 
+    waiting = read(Path(state["build"]) / "samples-waiting.json", []) if state.get("build") else []
     lines.extend(["", "## 资料从哪里来", "", "- 每份资料的身份、能否检索、去向：[[源资料与可检索性台账]]",
+                  "- 每类资料怎么处理、样例和确认状态：[[处理计划与样例]]"
+                  + (f"（还有 {len(waiting)} 类没确认样例）" if waiting else ""),
                   f"- 官网：{state['website_pages']} 页" + (f"，最早抓取 {state['website_oldest']}" if state["website_oldest"] else ""),
                   "", "## 来源级别", ""])
     lines.extend(f"- {tier}：{info['label']}" for tier, info in TIERS.items())

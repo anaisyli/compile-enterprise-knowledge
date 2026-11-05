@@ -361,7 +361,7 @@ def strip_repeated_lines(blocks: list[dict[str, Any]]) -> int:
         # A page read in columns has several blocks; the share is of pages, not of blocks.
         lines_by_page: dict[str, set[str]] = {}
         for member in members:
-            page = member["locator"].split(" col ")[0]
+            page = re.split(r" (?:col|table) ", member["locator"])[0]
             lines_by_page.setdefault(page, set()).update(normalize_space(raw) for raw in member["text"].splitlines())
         if len(lines_by_page) < MIN_REPEAT_PAGES:
             continue

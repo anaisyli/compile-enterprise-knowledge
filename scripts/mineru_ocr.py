@@ -9,6 +9,7 @@ uploads or pays twice.
 from __future__ import annotations
 
 import argparse
+import html
 from datetime import date
 import json
 import re
@@ -18,6 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from extract_package_text import markdown_table
 from kb_common import BUILD_DIRECTORY, load_config, load_json, normalize_space, write_json, write_text
 from mineru_client import MinerUError, client_from_env, extract, failure_report, probe
 
@@ -61,6 +63,18 @@ def approved(config: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def html_table(body: str) -> str:
+    """MinerU returns tables as HTML; keep them as tables, cell by cell, words unchanged."""
+    rows = []
+    for row in re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", body):
+        cells = [html.unescape(re.sub(r"<[^>]+>", " ", cell)) for cell in re.findall(r"(?is)<t[dh][^>]*>(.*?)</t[dh]>", row)]
+        if any(cell.strip() for cell in cells):
+            rows.append(cells)
+    if not rows:
+        return re.sub(r"<[^>]+>", " ", body)
+    return markdown_table(rows)
+
+
 def page_units(result: Path) -> list[dict[str, str]]:
     """Turn MinerU's content list into one unit per page; fall back to the whole Markdown."""
     lists = sorted(result.rglob("*content_list*.json"))
@@ -69,7 +83,7 @@ def page_units(result: Path) -> list[dict[str, str]]:
         for entry in load_json(lists[0]):
             text = entry.get("text") or ""
             if entry.get("type") == "table":
-                text = re.sub(r"<[^>]+>", " ", entry.get("table_body") or "")
+                text = html_table(entry.get("table_body") or "")
             elif entry.get("type") == "image":
                 # MinerU's current schema puts style labels in image_footnote.
                 # Keep the older img_* aliases too; captions are not the only text.

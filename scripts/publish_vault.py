@@ -25,6 +25,7 @@ from governance import merge_ledger
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
 from kb_index import build as build_index
 from kb_state import save as save_state
+from samples import PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, save_decisions
 
 
 SOURCE = Path("02_源资料/10_净化原文")
@@ -123,6 +124,30 @@ def update_project_info(vault: Path, packages: list[str]) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def merge_plan(current: str, new: str) -> tuple[str, dict[str, str]]:
+    """Keep the 确认状态 a person wrote in the plan page; return (page, {kind or structure key: status})."""
+    labels = {label: key for key, (label, _) in TYPES.items()}
+
+    def status_cells(text: str) -> dict[str, str]:
+        found = {}
+        for line in text.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 5 and not set(cells[0]) <= set("-: ") and cells[0] not in {"类型", "结构", "初筛类别"}:
+                found[cells[0]] = cells[-1]
+        return found
+
+    people = {label: status for label, status in status_cells(current).items() if status and status != PENDING}
+    answers = {labels.get(label, f"{STRUCTURE_PREFIX}{label}"): status for label, status in people.items()}
+    lines = []
+    for line in new.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) >= 5 and cells[0] in people:
+            cells[-1] = people[cells[0]]
+            line = "| " + " | ".join(cells) + " |"
+        lines.append(line)
+    return "\n".join(lines) + "\n", answers
+
+
 def run_manage(scripts: Path, project: Path) -> dict[str, int]:
     results = {}
     for name, extra in (("build_source_index.py", ["--allow-removed"]), ("validate_v06_project.py", ["--all"])):
@@ -163,7 +188,7 @@ def main() -> int:
     unsure = 0
     for key, digest in previous.items():
         target = vault / key
-        if not target.is_file() or key.startswith(LEDGER_ROOT) or normalized_hash(target) == digest:
+        if not target.is_file() or key.startswith(LEDGER_ROOT) or key == PLAN_PAGE or normalized_hash(target) == digest:
             continue
         if legacy:
             # Old receipts hashed raw bytes, so any spacing looks like an edit. Whatever is replaced
@@ -200,6 +225,21 @@ def main() -> int:
             key = side_by_side(key)
             planned[key] = source
             target = vault / key
+        if key == PLAN_PAGE and target.is_file():
+            # People confirm samples in this page; their answers stay and steer the next build.
+            current = target.read_text(encoding="utf-8")
+            merged, answers = merge_plan(current, source.read_text(encoding="utf-8"))
+            if answers:
+                decisions = load_decisions(build)
+                for answer_key, status in answers.items():
+                    if (decisions.get(answer_key) or {}).get("status") != status:
+                        decisions[answer_key] = {"status": status, "at": stamp[:8]}
+                save_decisions(build, decisions)
+            if merged.rstrip() != current.rstrip():
+                archive(vault, key, stamp, archived)
+                write_text(target, merged)
+            written[key] = normalized_hash(target)
+            continue
         if key.startswith(LEDGER_ROOT) and target.is_file():
             # People fill in stages, owners, and notes; merge instead of overwriting.
             current = target.read_text(encoding="utf-8")

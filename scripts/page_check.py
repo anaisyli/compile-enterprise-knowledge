@@ -30,6 +30,7 @@ from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, remaining_ocr_pages, write_json, write_text
 from office import convert_office
+from samples import choose_samples, doc_type, is_confirmed, load_decisions
 
 
 FOLDER = "page-check"
@@ -44,6 +45,9 @@ FEW_WORDS = 400
 SAMPLE_SHARE = 0.1
 MIN_PICTURE_BYTES = 15_000
 GENERIC_CODE = re.compile(r"\b[A-Z]{2,5}[\s-]?[A-Z]?-?\d{2,5}\b")
+STRUCTURES = {"表格", "流程图", "时间轴", "地图", "图表"}
+LIST_MARK = re.compile(r"^\s*(?:\d+[.、)）]|[-*•])\s*")
+TABLE_RULE = re.compile(r"\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{0,}:?\s*")
 ODD = re.compile(r"[�-]|[À-ÿ]{3,}")
 RULES = """# 看图核对规则
 
@@ -55,12 +59,20 @@ RULES = """# 看图核对规则
 2. text_errors：提取的文字和图上不一样的地方（乱码、错字、缺字），简单写哪里不对。没有就写空字符串。
 3. pairing：这一页有几款产品时，写清楚每个款号对应哪款（比如“左：没写款号；中：没写款号；右：ANS S-002”）。
    原图本身看不出对应关系的，unclear 写 true。只有一款或没有产品的，pairing 写空字符串。
+4. structure：这一页（或这张图）主要是什么结构：表格、流程图、时间轴、地图、图表；都不是写空字符串。
+5. structured：structure 不为空时，把图上的字按原结构排好：
+   - 表格：写成 Markdown 表，第一行是表头，每格照抄图上的字。
+   - 流程图：按箭头顺序写成编号列表“1. …”，每步照抄图上的字；有分支的写清楚从哪一步分出去。
+   - 时间轴：按时间先后写成编号列表，年份和事件照抄。
+   - 地图、图表：列出图上标注的字和它们的关系（比如“柱状图：2023 年 120，2024 年 150”），只写图上有的。
+   只能用图上看得到的字，不加说明、不补数字、不翻译；脚本会检查每个词都在这一页的文字里，有不在的就不收。
 
 价格、客户名也照抄，后面的规则会删掉，不要自己判断删哪些。
 
 每张图写一行 JSON，存成本目录下的 answer-001.jsonl（可以分几个文件，可以分给几个子 Agent）：
 
-    {"key": "<todo.jsonl 里的 key>", "missing": "", "text_errors": "", "pairing": "", "unclear": false}
+    {"key": "<todo.jsonl 里的 key>", "missing": "", "text_errors": "", "pairing": "", "unclear": false,
+     "structure": "", "structured": ""}
 
 写完运行 `page_check.py collect --out <运行目录>`，再重跑流水线。补进去的字会标 ⚠“AI 看图补充，待核对”。
 """
@@ -113,9 +125,19 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     codes = code_pattern(config.get("style_prefixes", []))
     rng = random.Random(20261105)
     todo, skipped = [], []
+    # Until a kind of file is confirmed on its example, only the example is looked at page by page.
+    docs = load_jsonl(build / "docs.jsonl")
+    by_item = {d["item_id"]: d for d in docs}
+    samples = set(choose_samples(docs, config).values())
+    decisions = load_decisions(build)
+    deferred: dict[str, int] = {}
     for item_id, route in sorted(routes.items()):
         asset = files.get(item_id)
         if route.get("route") != "kb" or route.get("tier") not in CHECKED_TIERS or not asset or not Path(long_path(asset["file"])).is_file():
+            continue
+        doc = by_item.get(item_id)
+        if doc and doc["doc_id"] not in samples and not is_confirmed(doc_type(doc), decisions, config):
+            deferred[doc_type(doc)] = deferred.get(doc_type(doc), 0) + int(doc.get("pages") or 1)
             continue
         suffix = asset["file"].suffix.casefold()
         units = load_units(text_dirs, item_id)
@@ -146,7 +168,12 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         read = {int(m.group(1)) for u in (load_json(read_path).get("units", []) if read_path.is_file() else [])
                 if not u.get("checked") and (m := re.match(r"(?:page|slide) (\d+)", u.get("locator", "")))}
         waiting |= read
-        with pymupdf.open(long_path(source)) as document:
+        try:
+            document = pymupdf.open(long_path(source))
+        except Exception as exc:  # A damaged file is reported, it does not stop the run.
+            skipped.append(f"{name}：打不开（{type(exc).__name__}）")
+            continue
+        with document:
             chosen = []
             for number, page in enumerate(document, start=1):
                 if number in waiting:
@@ -170,7 +197,8 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     write_text(folder / "README.md", RULES)
-    report = {"ok": True, "to_check": len(todo), "checked": len(done), "files": len({t["item_id"] for t in todo}), "skipped": skipped}
+    report = {"ok": True, "to_check": len(todo), "checked": len(done), "files": len({t["item_id"] for t in todo}), "skipped": skipped,
+              "deferred": deferred}
     write_json(folder / "plan.json", report)
     return report
 
@@ -179,6 +207,27 @@ def clean_note(text: str) -> str:
     """A note the model writes about a page must not carry what the rules remove."""
     text = re.sub(r"\s+", " ", text or "").strip()[:300]
     return "" if any(pattern.search(text) for pattern in HARD_PATTERNS.values()) else text
+
+
+def laid_out(text: str, source: str) -> tuple[str, list[str]]:
+    """Accept a table or ordered list only if every word in it is on the page already.
+
+    Returns the text, or "" with the pieces that were not found: laying words out may not add any."""
+    if not text.strip():
+        return "", []
+    known = re.sub(r"\s+", "", source).casefold()
+    refused = []
+    for line in text.splitlines():
+        body = LIST_MARK.sub("", line)
+        if TABLE_RULE.fullmatch(body.strip()):
+            continue
+        for piece in re.split(r"\||→|->|=>|；|;|：|:", body):
+            word = re.sub(r"\s+", "", piece).casefold()
+            if word and word not in known:
+                refused.append(piece.strip())
+    if refused or any(pattern.search(text) for pattern in HARD_PATTERNS.values()):
+        return "", refused[:5]
+    return text.strip(), []
 
 
 def collect(build: Path) -> dict[str, Any]:
@@ -193,10 +242,14 @@ def collect(build: Path) -> dict[str, Any]:
                 rejected.append(record.get("key") or "（没有 key）")
                 continue
             missing = (record.get("missing") or "").strip()
+            structure = (record.get("structure") or "").strip()
+            structured, refused = laid_out(record.get("structured") or "", entry.get("text", "") + "\n" + missing)
             results[entry["key"]] = {"item_id": entry["item_id"], "unit": entry["unit"], "page": entry["page"],
                                      "reasons": entry["reasons"], "added": bool(missing),
                                      "text_errors": clean_note(record.get("text_errors", "")),
-                                     "pairing": clean_note(record.get("pairing", "")), "unclear": bool(record.get("unclear"))}
+                                     "pairing": clean_note(record.get("pairing", "")), "unclear": bool(record.get("unclear")),
+                                     "structure": structure if structure in STRUCTURES else "",
+                                     "structured": structured if structure in STRUCTURES else "", "structured_refused": refused}
             if missing:
                 by_item.setdefault(entry["item_id"], []).append(
                     {"locator": f"{entry['unit']} {entry['page']} ocr", "text": missing, "engine": "ai", "checked": True})

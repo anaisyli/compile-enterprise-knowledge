@@ -394,7 +394,7 @@ def sheet_blocks(
 def group_for(unit: dict[str, str], heading: str) -> str:
     locator = unit["locator"]
     # Columns of one page ("page 3 col 2") stay under that page's heading.
-    match = re.fullmatch(r"page (\d+)(?: col \d+)?(?: ocr)?", locator)
+    match = re.fullmatch(r"page (\d+)(?: col \d+| table \d+)?(?: ocr)?", locator)
     if match:
         return f"第 {match.group(1)} 页"
     match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?(?: ocr)?", locator)
@@ -427,7 +427,7 @@ def ocr_additions(units: list[dict[str, str]]) -> list[dict[str, str]]:
     for unit in units:
         if not unit["locator"].endswith(OCR_SUFFIX):
             # Every column of a page counts as what the text layer already has.
-            native[re.sub(r" col \d+$", "", unit["locator"])] += comparable(unit["text"])
+            native[re.sub(r" (?:col|table) \d+$", "", unit["locator"])] += comparable(unit["text"])
     result = []
     for unit in units:
         if not unit["locator"].endswith(OCR_SUFFIX):

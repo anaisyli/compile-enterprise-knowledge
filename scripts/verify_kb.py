@@ -53,8 +53,11 @@ def ocr_format_key(text: str) -> str:
 
 
 def scan_text(
-    text: str, terms: re.Pattern[str] | None, own_domains: set[str], own_contacts: list[str], keep_texts: set[str]
+    text: str, terms: re.Pattern[str] | None, own_domains: set[str], own_contacts: list[str], keep_texts: set[str],
+    product_rows: bool = True,
 ) -> list[str]:
+    """product_rows: table lines are product-table rows, held to the stricter row rules. A table
+    inside a brochure or a Word file is ordinary text laid out in cells."""
     hits = []
     for paragraph in text.split("\n"):
         if squeeze(paragraph) in keep_texts:
@@ -62,7 +65,7 @@ def scan_text(
         for name, pattern in HARD_PATTERNS.items():
             if pattern.search(paragraph):
                 hits.append(name)
-        if paragraph.startswith("|"):
+        if paragraph.startswith("|") and product_rows:
             hits.extend(name for name, pattern in ROW_PATTERNS.items() if pattern.search(paragraph))
         for match in EMAIL.finditer(paragraph):
             if match.group(1).casefold() not in own_domains:
@@ -191,10 +194,12 @@ def main() -> int:
     knowledge = build / "vault" / "03_正式知识"
     pages = list(clean.rglob("*.md")) + list(knowledge.rglob("*.md"))
     for path in pages:
-        body = path.read_text(encoding="utf-8").split("\n---\n", 1)[-1]
+        raw = path.read_text(encoding="utf-8")
+        product_rows = parse_frontmatter(raw).get("tier") == "T3"
+        body = raw.split("\n---\n", 1)[-1]
         body = "\n".join(line for line in body.splitlines() if not BOILERPLATE.match(line))
         body = IMAGE_LINK.sub(" ", body)
-        for hit in sorted(set(scan_text(body, pattern, own_domains, config["own_contacts"], keep_texts))):
+        for hit in sorted(set(scan_text(body, pattern, own_domains, config["own_contacts"], keep_texts, product_rows))):
             errors.append(f"{path.name}: forbidden content ({hit})")
 
     # File names travel with the content, so they are checked too.
@@ -247,6 +252,12 @@ def main() -> int:
                           "确实不做，在 kb-config.json 的 page_check 里写 {\"skip\": \"理由\"}")
         else:
             warnings.append(f"还没做看图核对：{waiting} 页等 AI 对照原图看（04_知识库构建/page-check/README.md）")
+
+    # Kinds of material nobody has looked at an example of yet.
+    waiting_path = build / "samples-waiting.json"
+    unconfirmed = load_json(waiting_path) if waiting_path.is_file() else []
+    if unconfirmed:
+        warnings.append(f"{len(unconfirmed)} 类资料还没确认样例（{'、'.join(unconfirmed[:6])}）：看《处理计划与样例》，确认后再统一处理同类")
 
     # A website that was asked for but not read leaves a hole nobody would notice.
     if config.get("websites") and not any(d.get("origin") == "website" for d in docs.values()):

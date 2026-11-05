@@ -49,7 +49,9 @@ MAX_THUMBNAIL_PAGES = 80
 THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way files are read changes, so files read the old way are read again.
-EXTRACTOR_VERSION = 2
+EXTRACTOR_VERSION = 3
+TABLE_MIN_ROWS = 2
+TABLE_FILL = 0.5
 
 
 def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
@@ -62,11 +64,11 @@ def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
                 if text:
                     units.append({"locator": f"para {index}", "text": text})
             elif child.tag == f"{WORD}tbl":
-                rows = [
-                    " | ".join("".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip() for cell in row.findall(f"{WORD}tc"))
-                    for row in child.findall(f"{WORD}tr")
-                ]
-                units.append({"locator": f"table at {index}", "text": "\n".join(rows)})
+                rows = [["".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip() for cell in row.findall(f"{WORD}tc")]
+                        for row in child.findall(f"{WORD}tr")]
+                rows = [row for row in rows if any(row)]
+                if rows:
+                    units.append({"locator": f"table at {index}", "text": markdown_table(rows)})
     return units, {}
 
 
@@ -165,6 +167,35 @@ def column_units(prefix: str, number: int, parts: list[str]) -> list[dict[str, s
             for index, part in enumerate(parts, start=1) if part.strip()]
 
 
+def markdown_table(rows: list[list[str]]) -> str:
+    """Rows of cell text as a Markdown table, the first row as its header. Words are not changed."""
+    width = max(len(row) for row in rows)
+    cells = [[re.sub(r"\s+", " ", cell or "").strip().replace("|", "／") for cell in row] + [""] * (width - len(row)) for row in rows]
+    lines = ["| " + " | ".join(cells[0]) + " |", "|" + " --- |" * width]
+    lines += ["| " + " | ".join(row) + " |" for row in cells[1:]]
+    return "\n".join(lines)
+
+
+def page_tables(page: Any) -> list[tuple[tuple[float, float, float, float], str]]:
+    """Real tables only: ruled layouts on catalog pages are not tables unless most cells hold text."""
+    found = []
+    try:
+        tables = page.find_tables().tables
+    except Exception:  # An older PyMuPDF without table finding reads the page as before.
+        return []
+    for table in tables:
+        rows = [row for row in table.extract() if any((cell or "").strip() for cell in row)]
+        filled = sum(1 for row in rows for cell in row if (cell or "").strip())
+        if len(rows) >= TABLE_MIN_ROWS and table.col_count >= 2 and filled >= TABLE_FILL * len(rows) * table.col_count:
+            found.append((tuple(table.bbox), markdown_table(rows)))
+    return found
+
+
+def inside(box: dict[str, Any], area: tuple[float, float, float, float]) -> bool:
+    x, y = (box["x0"] + box["x1"]) / 2, (box["y0"] + box["y1"]) / 2
+    return area[0] <= x <= area[2] and area[1] <= y <= area[3]
+
+
 def pdf_units_by_layout(path: Path, pymupdf: Any, thumbnails: Path | None, key: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """With PyMuPDF the boxes keep their positions, so side-by-side products stay apart."""
     units, ocr_pages, images = [], [], {}
@@ -175,10 +206,14 @@ def pdf_units_by_layout(path: Path, pymupdf: Any, thumbnails: Path | None, key: 
             boxes = [{"x0": line["bbox"][0], "y0": line["bbox"][1], "x1": line["bbox"][2], "y1": line["bbox"][3],
                       "text": "".join(span["text"] for span in line["spans"])}
                      for block in page.get_text("dict")["blocks"] if block.get("type") == 0 for line in block["lines"]]
+            tables = page_tables(page)
+            # A table is read row by row; read in columns, its rows would fall apart.
+            boxes = [b for b in boxes if not any(inside(b, area) for area, _ in tables)]
             parts = ordered_text(boxes, page.rect.width)
-            if len("".join(parts).strip()) < MIN_PAGE_CHARACTERS:
+            if len("".join(parts).strip()) + sum(len(t) for _, t in tables) < MIN_PAGE_CHARACTERS:
                 ocr_pages.append(number)
             units.extend(column_units("page", number, parts))
+            units.extend({"locator": f"page {number} table {index}", "text": text} for index, (_, text) in enumerate(tables, start=1))
             if thumbnails is not None and document.page_count <= MAX_THUMBNAIL_PAGES:
                 name = f"img-{short_hash(f'{key}|page {number}', 16)}.png"
                 if not (thumbnails / name).is_file():

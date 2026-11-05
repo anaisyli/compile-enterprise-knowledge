@@ -24,7 +24,7 @@ WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
     "cell-review/decisions.jsonl", "cell-review/sheet-columns.json", "cell-review/t3-audit.json",
-    "page-check/results.json",
+    "page-check/results.json", "sample-decisions.json",
 ]
 
 

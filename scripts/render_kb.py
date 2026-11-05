@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shutil
 import sys
@@ -38,6 +39,7 @@ from kb_common import (
     write_text,
 )
 from review_cells import progress_of, t3_gate
+from samples import PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed, load_decisions, status_of
 
 
 SOURCE_ROOT = "02_源资料/10_净化原文"
@@ -57,6 +59,9 @@ VISIBLE = {"kept", "flagged", "pending_client"}
 # Inside each package: the knowledge base's name for every file beside its original name.
 NAME_MAP_PAGE = "审计记录/知识库文件对照.md"
 NAME_MAP_CSV = "审计记录/知识库文件对照.csv"
+ALIAS_FOLDER = "审计记录/按知识库名字"
+MARKER_PLAN = "<!-- compile-enterprise-knowledge plan -->"
+TABLE_LOCATOR = re.compile(r"^table at \d+$| table \d+$")
 ASSET_INDEX = "03_正式知识/90_素材/00_素材索引.md"
 SEARCH_STATE = {"read_ok": "全文文字可搜索", "partial": "部分内容可搜索", "needs_ocr": "未建立正文索引"}
 
@@ -80,7 +85,7 @@ def doc_status(doc: dict[str, Any], blocks: list[dict[str, Any]], effective: set
     return "部分待客户确认" if pending else "有效"
 
 
-def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout: str = "") -> list[str]:
+def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout: str = "", original: str = "") -> list[str]:
     """Where a document came from. Original file names are not printed: they often name the
     customer a quote went to. The package's name map pairs each name here with the original."""
     tier = TIERS[doc["tier"]]
@@ -91,7 +96,8 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
     elif doc.get("origin") == "points":
         rows.append(f"> - 原始位置：初筛包 `{doc.get('package_name') or '初筛包'}` → `{origin}`")
     else:
-        rows.append(f"> - 原文件：在初筛包 `{doc.get('package_name') or '初筛包'}` 里；原名和位置见初筛包的 `{NAME_MAP_PAGE}`，"
+        opener = f"[打开原件]({original})；" if original else ""
+        rows.append(f"> - 原文件：{opener}在初筛包 `{doc.get('package_name') or '初筛包'}` 里，原名和位置见初筛包的 `{NAME_MAP_PAGE}`，"
                     f"按本页名字“{doc['title']}”查")
     rows.append(f"> - 资料编号：`{doc['item_id']}`")
     if doc.get("pages"):
@@ -134,6 +140,16 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
     return "；".join(notes)
 
 
+def as_table(text: str, header: bool = True) -> str:
+    """Rows written as "a | b | c" become a Markdown table; the words stay as they are."""
+    rows = [[cell.strip() for cell in line.split(" | ")] for line in text.splitlines() if line.strip()]
+    width = max((len(row) for row in rows), default=1)
+    lines = ["| " + " | ".join(row + [""] * (width - len(row))) + " |" for row in rows]
+    if header and lines:
+        lines.insert(1, "|" + " --- |" * width)
+    return "\n".join(lines)
+
+
 def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, card: list[str],
                anm_ids: dict[str, str], cus_ids: dict[str, str], pictures: dict[str, str] | None = None,
                page_notes: dict[str, list[str]] | None = None) -> str:
@@ -148,7 +164,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
         "flags": sum(1 for b in blocks if b.get("flags")), "generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}",
     }
     parts = [frontmatter(fields), "", f"# {doc['title']}", "", *card]
-    current, table_columns, show_images, pending_marked = None, [], False, set()
+    current, table_columns, show_images, pending_marked, previous = None, [], False, set(), ""
     for block in blocks:
         if block["group"] != current:
             current = block["group"]
@@ -156,7 +172,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             if current in pictures:
                 parts.extend([f"![[{pictures[current]}|{PAGE_PICTURE_WIDTH}]]", ""])
             for note in page_notes.get(current, []):
-                parts.extend([f"> {note}", ""])
+                parts.extend([f"> {line}" for line in note.splitlines()] + [""])
             table_columns = []
         if block["status"] == "pending_client" and (block["group"], block["client_hold"]) not in pending_marked:
             pending_marked.add((block["group"], block["client_hold"]))
@@ -182,10 +198,19 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
         elif block["kind"] == "point":
             parts.append(f"- [{block.get('scope', 'single_communication')}] {block['text']}" + (f" {note}" if note else ""))
         else:
+            text = block["text"]
+            table = bool(TABLE_LOCATOR.search(block["locator"]))
+            # The rest of a table a removed row split off joins the rows above it, so it stays one table.
+            continued = table and block["locator"] == previous
+            if table and not text.lstrip().startswith("|"):
+                text = as_table(text, header=not continued)  # Read before tables were kept as tables.
             if note:
                 parts.append(f"> {note}")
                 parts.append("")
-            parts.extend([block["text"], ""])
+            elif continued and parts and parts[-1] == "":
+                parts.pop()
+            parts.extend([text, ""])
+        previous = block["locator"]
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -330,7 +355,7 @@ def package_reconciliation(build: Path, routes: dict[str, Any], docs: dict[str, 
 
 def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
                    statuses: dict[str, str], status_info: dict[str, Any], issues: dict[str, list[str]],
-                   counts: dict[str, Counter] | None = None) -> None:
+                   counts: dict[str, Counter] | None = None, originals: dict[str, str] | None = None) -> None:
     """One row per document that entered; excluded material is only counted, never listed by name."""
     counts = counts or {"kept": Counter(), "removed": Counter()}
     columns = ["资料ID", "知识库名字", "来源类型", "原始位置", "格式", "SHA-256", "可检索状态", "页数", "待识别页",
@@ -353,7 +378,8 @@ def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str
         kept, removed = counts["kept"].get(doc_id, 0), counts["removed"].get(doc_id, 0)
         share = f"{removed} 段（{removed * 100 // (kept + removed)}%）" if removed else "0"
         pages = f"第 {'、'.join(map(str, waiting[:8]))}{' 等' if len(waiting) > 8 else ''} 页（共 {len(waiting)} 页）" if waiting else ""
-        place = origin if origin.startswith("http") else f"初筛包 `{doc.get('package_name') or ''}`（见对照表）"
+        place = origin if origin.startswith("http") else (f"[打开原件]({(originals or {})[doc_id]})" if doc_id in (originals or {})
+                                                          else f"初筛包 `{doc.get('package_name') or ''}`（见对照表）")
         row = [doc["doc_id"], f"[[{Path(doc['file_name']).stem}]]", doc.get("source_label", ""), place,
                Path(doc.get("original_name") or "").suffix.lstrip(".") or ("网页" if origin.startswith("http") else ""),
                doc["source_sha256"][:12], state, str(info.get("pages") or ""), pages, share,
@@ -388,7 +414,106 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
             page.append(f"⚠ 看图核对：{detail}原件上看不出款号和产品的对应，不要自行配对（{gov['cus_ids'].get('pairing', '')}）")
         elif result.get("pairing"):
             page.append(f"看图核对：{result['pairing']}")
+        if result.get("structured"):
+            # The page's own words in the page's own order: a table as a table, a flow in its steps.
+            order = {"流程图": "按图上箭头的顺序", "时间轴": "按时间先后"}.get(result["structure"], "按图上的排法")
+            page.append(f"⚠ 看图整理（{result['structure']}，{order}；AI 整理，只用了图上的字，待核对）：\n\n{result['structured']}")
     return notes
+
+
+def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
+                    statuses: dict[str, str], originals: dict[str, str], config: dict[str, Any], status_info: dict[str, Any]) -> list[str]:
+    """02_源资料/处理计划与样例: every kind of material, what is done to it, one example, and whether
+    a person has confirmed the example. Returns the kinds still waiting for confirmation."""
+    entered = [docs[d] for d in published]
+    decisions = load_decisions(build)
+    samples = choose_samples(entered, config)
+    check_dir = build / "page-check"
+    todo = load_jsonl(check_dir / "todo.jsonl")
+    done = load_json(check_dir / "results.json") if (check_dir / "results.json").is_file() else {}
+    deferred = (load_json(check_dir / "plan.json") if (check_dir / "plan.json").is_file() else {}).get("deferred", {})
+    by_item = {d["item_id"]: d for d in entered}
+    checks: Counter = Counter()
+    for entry in list(todo) + list(done.values()):
+        if entry["item_id"] in by_item:
+            checks[doc_type(by_item[entry["item_id"]])] += 1
+    maps = sorted({(Path(r["package"]) / NAME_MAP_PAGE).resolve().as_uri() for r in routes.values() if r.get("package")})
+    lines = ["# 处理计划与样例", "", MARKER_PLAN,
+             "每类资料先处理一份样例给人看，确认后再统一处理同类。还没确认的类，费时的工作（逐页对照原图核对）只做样例那一份。", "",
+             "- 怎么确认：在下表“确认状态”一列写“已确认”，或者写“要改：……”说明怎么改；也可以直接告诉 AI。下次建库会读回来，不会被覆盖。",
+             "- 原文件：点“打开原件”直接打开初筛包里的原文件。原名对照：" + "、".join(f"[打开对照表]({uri})" for uri in maps), ""]
+    lines.extend(["## 按资料类型", "", "| 类型 | 份数 | 在初筛包哪里 | 怎么处理 | 要做的事 | 样例 | 确认状态 |",
+                  "| --- | ---: | --- | --- | --- | --- | --- |"])
+    waiting: list[str] = []
+    for kind, (label, how) in TYPES.items():
+        members = [d for d in entered if doc_type(d) == kind]
+        if not members:
+            continue
+        folders = Counter(str(Path(d.get("package_path") or "").parent.as_posix()) if not str(d.get("package_path", "")).startswith("http")
+                          else "官网" for d in members)
+        where = "、".join(f"{f}（{n} 份）" for f, n in folders.most_common(3)) + (" 等" if len(folders) > 3 else "")
+        todo_text = []
+        if checks[kind] or deferred.get(kind):
+            todo_text.append(f"对照原图核对 {checks[kind]} 页" + (f"，确认后再核对其余 {deferred[kind]} 页" if deferred.get(kind) else ""))
+        ocr = sum(len(remaining_ocr_pages(build, d["item_id"], status_info.get(d["item_id"], {}).get("ocr_pages") or [])) for d in members)
+        if ocr:
+            todo_text.append(f"{ocr} 页图片要 MinerU 或 AI 读图")
+        sample = docs.get(samples.get(kind, ""))
+        sample_text = ""
+        if sample:
+            stem = Path(sample["file_name"]).stem
+            sample_text = f"[[{stem}]]" + (f" · [打开原件]({originals[sample['doc_id']]})" if sample["doc_id"] in originals else "")
+        status = status_of(kind, decisions)
+        if not is_confirmed(kind, decisions, config):
+            waiting.append(label)
+        lines.append(f"| {label} | {len(members)} | {escape_cell(where)} | {how} | {'；'.join(todo_text) or '—'} | {sample_text} | {status} |")
+    found: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for result in done.values():
+        if result.get("structure") and result["item_id"] in by_item:
+            found[result["structure"]].append(result)
+    if found:
+        lines.extend(["", "## 特殊结构", "", "看图核对时认出的表格、流程图、时间轴、地图、图表。每种先看样例，确认整理方式后再统一处理。", "",
+                      "| 结构 | 出现几处 | 出现在 | 样例 | 确认状态 |", "| --- | ---: | --- | --- | --- |"])
+        for name, results in sorted(found.items()):
+            links = [f"[[{Path(by_item[r['item_id']]['file_name']).stem}#{check_group(r)}|{by_item[r['item_id']]['title']} · {check_group(r)}]]"
+                     for r in results]
+            key = f"{STRUCTURE_PREFIX}{name}"
+            if not is_confirmed(key, decisions, config):
+                waiting.append(f"结构：{name}")
+            lines.append(f"| {name} | {len(results)} | {'、'.join(links[:3])}{' 等' if len(links) > 3 else ''} | {links[0]} | {status_of(key, decisions)} |")
+    held = Counter((r.get("decision") or "", reason_label(r["reason"])) for r in routes.values() if r["route"] in {"hold", "skip"})
+    lines.extend(["", "## 不处理的资料", "", "| 初筛类别 | 原因 | 份数 |", "| --- | --- | ---: |"])
+    lines.extend(f"| {DECISION_LABELS.get(code, code)} | {reason} | {count} |" for (code, reason), count in sorted(held.items()))
+    write_text(build / "vault" / PLAN_PAGE, "\n".join(lines) + "\n")
+    return waiting
+
+
+def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str]) -> dict[str, str]:
+    """doc_id -> link that opens the original file, under a name without the customer in it.
+
+    Each original gets a second name in the package, 审计记录/按知识库名字/<knowledge-base name>,
+    as a hard link: the same file, no copy, no extra space. A link in the vault can then open
+    the original with one click while the vault never prints the original name. Where a hard
+    link cannot be made (another drive, a network share), the document has no link and the
+    name map is the way."""
+    links: dict[str, str] = {}
+    for doc_id in order:
+        doc = docs[doc_id]
+        route = routes.get(doc["item_id"], {})
+        if not route.get("package") or not route.get("path"):
+            continue
+        source = Path(route["package"]) / route["path"]
+        alias = Path(route["package"]) / ALIAS_FOLDER / f"{Path(doc['file_name']).stem}{source.suffix}"
+        try:
+            if alias.exists() and not alias.samefile(source):
+                alias.unlink()  # The name now belongs to another file, or the original was replaced.
+            if not alias.exists():
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                os.link(source, alias)
+            links[doc_id] = alias.resolve().as_uri()
+        except OSError:
+            continue
+    return links
 
 
 def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
@@ -535,11 +660,12 @@ def main() -> int:
     published, statuses = {}, {}
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
+    originals = make_aliases(routes, docs, order)
     for doc_id in order:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
-        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""))
+        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""))
         pictures = {f"第 {page} 页": name for page, name in status_info.get(doc["item_id"], {}).get("page_images", {}).items()
                     if (doc_id, f"第 {page} 页") not in unsafe and (build / "assets" / name).is_file()}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
@@ -548,8 +674,9 @@ def main() -> int:
 
     write_table_summary(clean, visible, docs, statuses)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
-    write_register(build, routes, docs, published, statuses, status_info, issues, counts)
+    write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     write_name_maps(routes, docs, published, statuses, same_content)
+    write_json(build / "samples-waiting.json", write_plan_page(build, routes, docs, published, statuses, originals, config, status_info))
     write_asset_index(build, visible, docs, published)
     write_exports(build, visible, docs, styles, statuses)
     write_jsonl(build / "docs.jsonl", docs.values())

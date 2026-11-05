@@ -80,7 +80,9 @@ def build_package(root: Path) -> tuple[Path, Path, Path]:
     config.write_text(
         json.dumps(
             {"company": "测试公司", "own_terms": ["NORDTEX", "AB"], "own_domains": ["nordtex.example"],
-             "own_contacts": ["+86 138 0013 8000"], "deny_terms": ["RivalCo"], "vocabularies": ["apparel"]},
+             "own_contacts": ["+86 138 0013 8000"], "deny_terms": ["RivalCo"], "vocabularies": ["apparel"],
+             # The fixture's kinds count as confirmed; the sample review has tests of its own.
+             "sample_review": False},
             ensure_ascii=False,
         ),
         encoding="utf-8",
