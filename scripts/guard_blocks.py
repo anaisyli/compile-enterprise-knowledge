@@ -404,6 +404,8 @@ def strip_site_furniture(blocks: list[dict[str, Any]]) -> int:
 
 
 def garbled(text: str) -> bool:
+    # A Markdown table's bars and rules are layout, not unreadable characters.
+    text = "\n".join(re.sub(r"[|:\-]", "", line) if line.lstrip().startswith("|") else line for line in text.splitlines())
     compact = re.sub(r"\s", "", text)
     if len(compact) < 2:
         return True
@@ -526,6 +528,9 @@ def main() -> int:
                 block["flags"].append({"type": "unverified_name", "terms": unvetted})
                 for term in unvetted:
                     enqueue(term, "unverified_name", block)
+            if block.get("screening_hint"):
+                # Screening wanted this gone; the rules found nothing to remove, so it stays, marked.
+                block["flags"].append({"type": "screening_hint", "terms": block["screening_hint"]})
             if block.get("reference"):
                 # A compilation from other suppliers' listings: it can guide, not state the company's facts.
                 block["flags"].append({"type": "reference_draft", "terms": []})

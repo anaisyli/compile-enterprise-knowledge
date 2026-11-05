@@ -61,7 +61,7 @@ NAME_MAP_PAGE = "审计记录/知识库文件对照.md"
 NAME_MAP_CSV = "审计记录/知识库文件对照.csv"
 ALIAS_FOLDER = "审计记录/按知识库名字"
 MARKER_PLAN = "<!-- compile-enterprise-knowledge plan -->"
-TABLE_LOCATOR = re.compile(r"^table at \d+$| table \d+$")
+TABLE_LOCATOR = re.compile(r"^table at \d+$| table \d+$|^sheet .+ \(visible\)$")
 ASSET_INDEX = "03_正式知识/90_素材/00_素材索引.md"
 SEARCH_STATE = {"read_ok": "全文文字可搜索", "partial": "部分内容可搜索", "needs_ocr": "未建立正文索引"}
 
@@ -128,6 +128,8 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
             notes.append(f"⚠ 含没核实的词：{'、'.join(flag['terms'][:6])}（{anm}）")
         elif flag["type"] == "report_page":
             notes.append(f"⚠ 检测或审核报告页，引用前核对日期（{anm}）")
+        elif flag["type"] == "screening_hint":
+            notes.append(f"⚠ 初筛建议删除（{'、'.join(flag['terms'])}），整理时看是产品内容、规则也没发现价格或客户信息，保留；用前核对")
         elif flag["type"] == "brand_hidden":
             # The word itself may be the customer's name, so it is not repeated here.
             notes.append("⚠ 隐去了含品牌词的格（可能是客户品牌，词在待判断清单里）")
@@ -165,8 +167,18 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
     }
     parts = [frontmatter(fields), "", f"# {doc['title']}", "", *card]
     current, table_columns, show_images, pending_marked, previous = None, [], False, set(), ""
+    row_notes: dict[str, list[str]] = {}
+
+    def flush_row_notes() -> None:
+        # A table cell has no room for a sentence: what the ⚠ in a row means is said under the table.
+        if row_notes:
+            parts.append("")
+            parts.extend(f"> 第 {'、'.join(numbers)} 行：{text}" for text, numbers in row_notes.items())
+            row_notes.clear()
+
     for block in blocks:
         if block["group"] != current:
+            flush_row_notes()
             current = block["group"]
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
@@ -191,6 +203,8 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.append("| " + " | ".join(header) + " |")
                 parts.append("|" + " --- |" * len(header))
             row = [block["locator"].rsplit(" ", 2)[-2] + (" ⚠" if note else "")]
+            if note:
+                row_notes.setdefault(note, []).append(block["locator"].rsplit(" ", 2)[-2])
             row += [escape_cell(block["cells"].get(role, "")) for role in table_columns]
             if show_images:
                 row.append(" ".join(f"![[{name}|80]]" for name in block.get("images", [])[:MAX_STYLE_IMAGES]))
@@ -211,6 +225,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.pop()
             parts.extend([text, ""])
         previous = block["locator"]
+    flush_row_notes()
     return "\n".join(parts).rstrip() + "\n"
 
 

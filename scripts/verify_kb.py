@@ -42,6 +42,15 @@ BOILERPLATE = re.compile(r"^(?:>|\s*$|---|[a-z_]+: )")
 IMAGE_LINK = re.compile(r"!\[\[img-[^\]]+\]\]|`?img-[0-9a-f]+\.[a-z]+`?")
 
 
+SHEET_LOCATOR = re.compile(r"^sheet .+ \(([^)]+)\)$")
+SHEET_CELL = re.compile(r"(?:^|;\s*)[A-Z]{1,3}\d+=")
+TABLE_RULE = re.compile(r"^:?-{3,}:?$")
+
+
+def table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|") if not TABLE_RULE.match(cell.strip())]
+
+
 def squeeze(text: str) -> str:
     return re.sub(r"\s+", "", text.replace(" ", ""))
 
@@ -164,7 +173,9 @@ def main() -> int:
         source = units_by_item[item_id]
         values = block["cells"].values() if block["kind"] == "row" else block["text"].splitlines()
         for value in values:
-            for piece in str(value).split(" / "):
+            # A Markdown table is checked cell by cell; its bars and rules are layout, not text.
+            pieces = table_cells(value) if str(value).lstrip().startswith("|") else str(value).split(" / ")
+            for piece in pieces:
                 if squeeze(piece) and squeeze(piece) not in source:
                     errors.append(f"text not in source: {doc['title']} {block['locator']}")
                     break
@@ -177,7 +188,17 @@ def main() -> int:
         accounted_ocr = ocr_format_key("\n".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
         for unit in load_units(dirs, doc["item_id"]):
+            sheet = SHEET_LOCATOR.match(unit["locator"])
+            if sheet and sheet.group(1) != "visible":
+                continue  # Hidden sheets never enter.
             for line in unit["text"].splitlines():
+                if sheet:
+                    # A sheet row "A7=x; B7=y" is published as table cells: each value must be there.
+                    missing = [v for v in SHEET_CELL.split(line) if v.strip() and squeeze(v) not in accounted]
+                    if missing:
+                        errors.append(f"source line lost: {doc['title']} {unit['locator']}")
+                        break
+                    continue
                 text = normalize_space(line)
                 if unit["locator"].endswith(" ocr") and ocr_format_key(text) in accounted_ocr:
                     continue  # The same words are present; only OCR list formatting differs.

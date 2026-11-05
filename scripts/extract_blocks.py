@@ -24,6 +24,7 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from fetch_website import module_for as web_module, page_kind as web_kind
+from extract_package_text import markdown_table
 from office import convert_office
 from collections import Counter, defaultdict
 from kb_common import (
@@ -91,6 +92,8 @@ CELL_ERROR = re.compile(r"^(?:#[A-Z/0!?]+!?|=DISPIMG\(.*)$")
 SHORT_TITLE = 20
 SAMPLE_ROWS = 4
 SERIAL = re.compile(r"\d{1,3}")
+SCREENING_REASONS = {"price_columns": "价格列", "quantity_columns": "数量列", "customer_block": "客户和业务员信息",
+                     "customer_columns": "客户列", "cost_columns": "成本列", "notes_columns": "备注列"}
 # Phrases a compiled reference document uses about itself.
 REFERENCE_MARK = re.compile(
     r"(?i)内部审核版|审核稿|草稿|公开参考|参考记录|参考款|参考供应商|参考数据|同类产品参考|仅供参考|"
@@ -231,7 +234,9 @@ def parse_actions(actions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
                 unreadable.append(locator)
                 continue
             parts = match.groupdict()
-            rule: dict[str, Any] = {"sheet": parts["sheet"]}
+            # Why screening wanted it gone, said in words, for when the build decides otherwise.
+            reasons = [SCREENING_REASONS.get(code, code) for code in action.get("reason_codes", [])]
+            rule: dict[str, Any] = {"sheet": parts["sheet"], "reasons": reasons or ["初筛标了清理"]}
             if parts["col1"]:
                 # A column without a sheet was read off one sheet only, and the same
                 # letter is a product column elsewhere. Headers already drop price columns.
@@ -263,15 +268,20 @@ def removed(rules: list[dict[str, Any]], sheet: str, column: str | None, row: in
     return False
 
 
+def hinted(rules: list[dict[str, Any]], sheet: str, column: str | None, row: int | None) -> list[str]:
+    """Why screening marked this place for removal; empty when it did not."""
+    return sorted({reason for rule in rules if removed([rule], sheet, column, row) for reason in rule["reasons"]})
+
+
 def find_header(
     rows: dict[int, dict[str, str]],
     rules: list[dict[str, Any]],
     sheet: str,
     header_map: dict[str, str],
 ) -> tuple[int, dict[str, str]] | None:
+    # Screening's marks do not decide where the header is: a range drawn a row too far
+    # would otherwise hide the header and lose the whole sheet.
     for number in sorted(rows)[:MAX_HEADER_SCAN]:
-        if removed(rules, sheet, None, number):
-            continue
         roles = {column: header_role(value, header_map) for column, value in rows[number].items()}
         kept = [role for role in roles.values() if role in ROLE_ORDER]
         denied = [role for role in roles.values() if role == "drop"]
@@ -338,27 +348,33 @@ def sheet_blocks(
 
     # Whatever sits above the table names the customer and the salesperson.
     for number in sorted(rows):
-        if number < header_row or removed(rules, sheet, None, number):
+        if number < header_row:
             for value in rows[number].values():
                 terms.append({"term": normalize_space(value), "item_id": item_id, "origin": "above_table"})
     customer_columns = [c for c, value in headers.items() if CUSTOMER_HEADER.search(value)]
 
-    kept_columns = {
-        column: role
-        for column, role in roles.items()
-        if role in ROLE_ORDER and not removed(rules, sheet, column, header_row)
-    }
+    # Screening's marks are advice, not orders. What decides is what is really there: the header
+    # says what a column holds, and the row rules after this catch prices and customers in any
+    # cell. Where screening wanted a product column or a data row gone, it stays, marked.
+    kept_columns = {column: role for column, role in roles.items() if role in ROLE_ORDER}
+    for column, role in kept_columns.items():
+        reasons = hinted(rules, sheet, column, header_row)
+        if reasons:
+            stats.setdefault("screening_overruled", []).append(
+                f"{label} {column} 列（表头“{normalize_space(headers[column])[:20]}”）：初筛标为{'、'.join(reasons)}，表头是产品字段，保留")
     blocks = []
     for number in sorted(rows):
-        if number <= header_row or removed(rules, sheet, None, number):
+        if number <= header_row:
             continue
         for column in customer_columns:
             if column in rows[number]:
                 terms.append({"term": normalize_space(rows[number][column]), "item_id": item_id, "origin": "customer_column"})
         cells: dict[str, str] = {}
+        advised: set[str] = set()
         for column, role in kept_columns.items():
             value = rows[number].get(column)
-            if value and not CELL_ERROR.match(value) and not removed(rules, sheet, column, number):
+            if value and not CELL_ERROR.match(value):
+                advised.update(hinted(rules, sheet, column, number))
                 value = normalize_space(value)
                 cells[role] = f"{cells[role]} / {value}" if role in cells else value
         if not ({"description", "fabric", "style"} & set(cells)):
@@ -375,6 +391,7 @@ def sheet_blocks(
                 "text": " | ".join(cells[role] for role in ROLE_ORDER if role in cells),
                 "cells": cells,
                 "images": images.get(number, []),
+                **({"screening_hint": sorted(advised)} if advised else {}),
             }
         )
     # Quotations number their lines 1, 2, 3 under ITEM NO; that is a line number, not a style.
@@ -458,9 +475,25 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
     has_ocr = any(u["locator"].endswith(OCR_SUFFIX) for u in units)
     if has_ocr:
         units = ocr_additions(units)
+    sheets = 0
     for unit in units:
         text = unit["text"].replace("\r\n", "\n").strip()
         if not text:
+            continue
+        sheet = SHEET_UNIT.match(unit["locator"])
+        if sheet:
+            # A workbook outside the product tables, say a list of fabrics: read as the table it is,
+            # without cell addresses. Hidden sheets stay out, as they do for product tables.
+            if sheet.group("state") != "visible":
+                continue
+            sheets += 1
+            rows = parse_sheet_rows(text)
+            columns = sorted({c for row in rows.values() for c in row}, key=column_number)
+            table = [[rows[n].get(c, "") for c in columns] for n in sorted(rows)]
+            blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}"), "doc_id": doc_id, "kind": "text",
+                           # A sheet name can be a customer's, so the heading is neutral.
+                           "group": f"表 {sheets}", "locator": unit["locator"], "text": markdown_table(table) if table else text,
+                           "ocr": False, "ai_read": False, "ai_checked": False})
             continue
         first_line = text.splitlines()[0].strip()
         if unit["locator"].startswith("para ") and len(first_line) <= 40 and HEADING.match(first_line):
@@ -735,29 +768,27 @@ def main() -> int:
         if asset.get("decision") == "B":
             rules, unreadable = parse_actions(triage.get(item_id, {}).get("actions", []))
             stats: dict[str, Any] = {"sheets_without_header": [], "unknown_headers": [], "rows_kept": 0, "templates": {}}
-            if unreadable:
-                # A deletion nobody can execute must not be skipped silently.
-                route.update(route="hold", reason="unreadable_removal_location")
-                doc = None
-            else:
-                for position, unit in enumerate(units, start=1):
-                    match = SHEET_UNIT.match(unit["locator"])
-                    if not match:
-                        continue
-                    if match.group("state") != "visible":
-                        stats.setdefault("hidden_sheets", []).append(match.group("name"))
-                        continue
-                    item_blocks.extend(
-                        sheet_blocks(
-                            doc_id, item_id, match.group("name"), f"表 {position}", unit["text"], rules,
-                            config["header_map"], image_maps.get(item_id, {}).get(match.group("name"), {}),
-                            stats, terms, column_overrides,
-                        )
+            # A place screening named that cannot be found is told to a person; the file still goes
+            # in, because the header and the row rules clean every row whatever screening said.
+            stats["unreadable_locations"] = unreadable
+            for position, unit in enumerate(units, start=1):
+                match = SHEET_UNIT.match(unit["locator"])
+                if not match:
+                    continue
+                if match.group("state") != "visible":
+                    stats.setdefault("hidden_sheets", []).append(match.group("name"))
+                    continue
+                item_blocks.extend(
+                    sheet_blocks(
+                        doc_id, item_id, match.group("name"), f"表 {position}", unit["text"], rules,
+                        config["header_map"], image_maps.get(item_id, {}).get(match.group("name"), {}),
+                        stats, terms, column_overrides,
                     )
-                if stats.get("quotation_sheets") and item_id not in config.get("doc_titles", {}):
-                    # A quote sent to one customer, filed apart from the product lists.
-                    doc.update(kind="quotation", title=f"报价单-{asset['source_hash'][:8]}", folder="产品表/报价单",
-                               file_name=f"报价单-{asset['source_hash'][:8]}.md")
+                )
+            if stats.get("quotation_sheets") and item_id not in config.get("doc_titles", {}):
+                # A quote sent to one customer, filed apart from the product lists.
+                doc.update(kind="quotation", title=f"报价单-{asset['source_hash'][:8]}", folder="产品表/报价单",
+                           file_name=f"报价单-{asset['source_hash'][:8]}.md")
             sheet_reports[item_id] = stats
         else:
             item_blocks = document_blocks(doc_id, item_id, units)

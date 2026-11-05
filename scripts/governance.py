@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import csv
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
@@ -305,8 +305,18 @@ def build(
         unread_site.insert(0, f"这次没读到新页面，沿用 {fetch['using_snapshot']} 起保存的官网快照")
     mat("website", "官网没有读到的页面", unread_site, "条", "等待材料或工具",
         "检查网址和网络后重跑 fetch_website.py；网站拦截时用浏览器保存页面，再 --browser-capture 导入", "官网恢复访问或改版时")
-    removal = [show(r["display_name"]) for r in routes.values() if r["reason"] == "unreadable_removal_location"]
-    mat("removal", "清理位置无法识别的产品表", removal, "份", "待知识库专员判断", "核对初筛结果，补可执行的位置", "初筛包更新时")
+    # Screening's cleanup marks are advice: where the build kept something they named, a person looks.
+    named = {doc["item_id"]: doc for doc in docs.values()}
+    lost = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{'；'.join(r['unreadable_locations'][:3])}"
+            for i, r in sheet_report.get("sheets", {}).items() if r.get("unreadable_locations")]
+    mat("removal", "初筛写的清理位置找不到", lost, "份", "待知识库专员判断",
+        "这些表照常按表头和行规则清理后入库；核对一下初筛想删的东西是否已经删掉", "初筛包更新时")
+    overruled = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{entry}"
+                 for i, r in sheet_report.get("sheets", {}).items() for entry in r.get("screening_overruled", [])]
+    hinted_rows = Counter(b["doc_id"] for b in blocks if b.get("screening_hint") and b["status"] != "removed")
+    overruled += [f"{link(docs[d])}：{n} 行在初筛标的清理范围里，内容是产品信息，保留" for d, n in hinted_rows.items() if d in docs]
+    mat("screening_overruled", "初筛建议删除、整理时判断保留的内容", overruled, "处", "待知识库专员判断",
+        "看行旁标 ⚠ 的内容：确实该删的在 review-decisions.json 的 drop_blocks 里写块编号，确认可留的不用管", "初筛包或规则更新时")
     if cell_progress.get("cells_total") and not t3_state[0]:
         mat("t3", "产品表逐格判断", [f"已判断 {cell_progress['cells_decided']} / {cell_progress['cells_total']} 个单元格；{t3_state[1]}"],
             "项", "知识库专员处理中", "review_cells.py 导出、判断、合并，再独立通读", "产品表更新时")
