@@ -88,6 +88,9 @@ COMPANY_NAME = re.compile(r"(?i)公司|简介|profile|about")
 MAX_HEADER_SCAN = 80
 # Stricter than these notes already: rows above the header and unrecognised columns never pass.
 COVERED_BY_ALLOWLIST = re.compile(r"表头|全部价格|逐表确认")
+# File properties (author, template, PDF /Info): the knowledge base never carries them, so there is
+# nothing to clean and nothing to report.
+METADATA_ONLY = re.compile(r"(?i)docProps/|/Info\b|settings\.xml|_rels/|元数据|文件属性|metadata")
 CELL_ERROR = re.compile(r"^(?:#[A-Z/0!?]+!?|=DISPIMG\(.*)$")
 SHORT_TITLE = 20
 SAMPLE_ROWS = 4
@@ -141,7 +144,10 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
             return {"route": "kb", "reason": "resolved_by_answer", "tier": "T1" if official else "T2"}
         return {"route": "hold", "reason": "unresolved_item"}
     if decision == "B":
-        return {"route": "kb", "reason": "cleaned_from_b", "tier": "T3"}
+        # B says the file needs cleaning, not what it is: a spec sheet in Word is read as a document.
+        # A workbook becomes a product table (T3) only when its sheets turn out to be one.
+        official = resource == "marketing" and extension in {".pdf", ".pptx"}
+        return {"route": "kb", "reason": "cleaned_from_b", "tier": "T1" if official else "T2"}
     if decision == "C":
         return {"route": "points", "reason": "knowledge_points", "tier": "T4"}
     if decision == "A":
@@ -239,7 +245,7 @@ def parse_actions(actions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
     for action in actions:
         for locator in action.get("locators", []):
             match = LOCATOR.match(locator.strip())
-            if COVERED_BY_ALLOWLIST.search(locator):
+            if COVERED_BY_ALLOWLIST.search(locator) or METADATA_ONLY.search(locator):
                 continue
             if not match:
                 unreadable.append(locator)
@@ -842,26 +848,50 @@ def main() -> int:
             "origin": "package",
         }
         item_blocks: list[dict[str, Any]] = []
-        if asset.get("decision") == "B":
+        sheet_units = [u for u in units if SHEET_UNIT.match(u["locator"])]
+        if asset.get("decision") == "B" and sheet_units:
+            # A workbook screening wants cleaned: a sheet whose header names product columns is read
+            # row by row, so prices and customers go cell by cell; any other sheet is the table it is.
             rules, unreadable = parse_actions(triage.get(item_id, {}).get("actions", []))
             stats: dict[str, Any] = {"sheets_without_header": [], "unknown_headers": [], "rows_kept": 0, "templates": {}}
             # A place screening named that cannot be found is told to a person; the file still goes
             # in, because the header and the row rules clean every row whatever screening said.
             stats["unreadable_locations"] = unreadable
+            plain: list[dict[str, str]] = []
             for position, unit in enumerate(units, start=1):
                 match = SHEET_UNIT.match(unit["locator"])
                 if not match:
+                    plain.append(unit)
                     continue
                 if match.group("state") != "visible":
                     stats.setdefault("hidden_sheets", []).append(match.group("name"))
                     continue
-                item_blocks.extend(
-                    sheet_blocks(
-                        doc_id, item_id, match.group("name"), f"表 {position}", unit["text"], rules,
-                        config["header_map"], image_maps.get(item_id, {}).get(match.group("name"), {}),
-                        stats, terms, column_overrides,
-                    )
+                rows = sheet_blocks(
+                    doc_id, item_id, match.group("name"), f"表 {position}", unit["text"], rules,
+                    config["header_map"], image_maps.get(item_id, {}).get(match.group("name"), {}),
+                    stats, terms, column_overrides,
                 )
+                if rows:
+                    item_blocks.extend(rows)
+                    continue
+                as_table = document_blocks(doc_id, item_id, [unit])
+                if as_table and match.group("name") in stats["sheets_without_header"]:
+                    # Read as the whole table it is, so nothing is lost and nothing to report.
+                    stats["sheets_without_header"].remove(match.group("name"))
+                for block in as_table:
+                    block["group"] = f"表 {position}"
+                    # Screening named places to clean in this sheet: kept, with its marks shown.
+                    if any(r["sheet"] in (None, match.group("name")) for r in rules):
+                        block["screening_hint"] = ["这张表没有产品表头，整张保留"]
+                item_blocks.extend(as_table)
+            item_blocks.extend(document_blocks(doc_id, item_id, plain))
+            if stats["rows_kept"]:
+                # Product rows were found: it is a product table, reviewed cell by cell before it counts.
+                tier = "T3"
+                if item_id not in config.get("doc_titles", {}):
+                    doc.update(title=f"产品表-{asset['source_hash'][:8]}", folder=FOLDERS["T3"],
+                               file_name=f"产品表-{asset['source_hash'][:8]}.md")
+                doc.update(tier=tier, module=MODULES["product"])
             if stats.get("quotation_sheets") and item_id not in config.get("doc_titles", {}):
                 # A quote sent to one customer, filed apart from the product lists.
                 doc.update(kind="quotation", title=f"报价单-{asset['source_hash'][:8]}", folder="产品表/报价单",
@@ -869,6 +899,12 @@ def main() -> int:
             sheet_reports[item_id] = stats
         else:
             item_blocks = document_blocks(doc_id, item_id, units)
+            if asset.get("decision") == "B":
+                # Places screening wanted cleaned in a document: the guard cleans prices and customers
+                # wherever they are; what it cannot place is told to a person.
+                unreadable = parse_actions(triage.get(item_id, {}).get("actions", []))[1]
+                if unreadable:
+                    sheet_reports[item_id] = {"unreadable_locations": unreadable}
             if reference_draft(units, config.get("doc_roles", {}).get(item_id)):
                 # Someone's compilation from other sources, not the company's own material.
                 doc["role"] = "reference"

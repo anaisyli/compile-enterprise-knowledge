@@ -55,5 +55,29 @@ class ScreeningAdviceTests(Base):
         self.assertIn("初筛写的清理位置找不到", self.ledger("01_源资料处理台账.md"))
 
 
+    def test_a_b_class_document_is_read_for_its_text_not_as_a_product_table(self) -> None:
+        # Screening put a spec sheet in B only to strip its author field.
+        self.write_units("b1", [{"locator": "para 1", "text": "DS50 系列壁挂数字标牌规格书"},
+                                {"locator": "para 2", "text": "屏幕尺寸 65 英寸，亮度 450 nits，安卓 11 系统。"}])
+        self.triage("docProps/core.xml 第 2 个已审查属性（creator）；删除完整属性节点", "PDF /Info 第 1 个 /Author 字段；删除字段，不改正文",
+                    codes=("personal_metadata",))
+        self.assertEqual(self.pipeline().returncode, 0)
+        pages = [p for p in self.clean.rglob("*.md") if "亮度 450 nits" in p.read_text(encoding="utf-8")]
+        self.assertEqual(len(pages), 1)
+        self.assertNotIn("产品表", pages[0].as_posix())
+        self.assertNotIn("tier: \"T3\"", pages[0].read_text(encoding="utf-8"))
+        # File properties are not in the knowledge base: nothing to clean, nothing to report.
+        self.assertNotIn("初筛写的清理位置找不到", self.ledger("01_源资料处理台账.md"))
+
+    def test_a_b_class_sheet_without_product_columns_is_kept_as_the_table_it_is(self) -> None:
+        self.write_units("b1", [{"locator": "sheet 工作表 (visible)", "text": "A1=城市; B1=展位\nA2=巴塞罗那; B2=3C200\nA3=迪拜; B3=Z1-B40"}])
+        self.assertEqual(self.pipeline().returncode, 0)
+        pages = [p for p in self.clean.rglob("*.md") if "巴塞罗那" in p.read_text(encoding="utf-8")]
+        self.assertEqual(len(pages), 1)
+        self.assertIn("| 城市 | 展位 |", pages[0].read_text(encoding="utf-8"))
+        self.assertNotIn("产品表", pages[0].as_posix())
+        self.assertNotIn("找不到表头的工作表", self.ledger("01_源资料处理台账.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

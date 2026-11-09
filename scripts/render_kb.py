@@ -264,9 +264,10 @@ def product_master(kept: list[dict[str, Any]], docs: dict[str, dict[str, Any]]) 
     return sorted(styles.values(), key=lambda entry: entry["style"])
 
 
-def neutral_title(doc: dict[str, Any]) -> None:
-    """A title becomes a file name and a link, so it must pass the same rules as text."""
-    if any(pattern.search(doc["title"]) for pattern in HARD_PATTERNS.values()):
+def neutral_title(doc: dict[str, Any], forbidden: re.Pattern[str] | None = None) -> None:
+    """A title becomes a file name and a link, so it must pass the same rules as text: a price, or a
+    customer's name taken from the original file name (报价单 sent to Acme), gives way to a number."""
+    if any(pattern.search(doc["title"]) for pattern in HARD_PATTERNS.values()) or (forbidden and forbidden.search(doc["title"])):
         prefix = doc["title"].split("-", 1)[0] if "-" in doc["title"] else "资料"
         doc["title"] = f"{prefix}-{doc['doc_id'][-6:]}"
         doc["file_name"] = safe_name(doc["title"]) + ".md"
@@ -636,6 +637,9 @@ def main() -> int:
         if block["status"] in VISIBLE:
             by_doc[block["doc_id"]].append(block)
 
+    # The names the guard learned (customers, denied words): no title, so no file name, may carry one.
+    guard_terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
+    title_terms = compile_terms(guard_terms.get("hard", []) + guard_terms.get("soft", []))
     # Saved-again copies differ in bytes but say the same thing; publish one.
     same_content, fingerprints, names_seen = {}, {}, Counter()
     order = []
@@ -643,7 +647,7 @@ def main() -> int:
         members = by_doc.get(doc_id, [])
         if not members:
             continue
-        neutral_title(doc)
+        neutral_title(doc, title_terms)
         fingerprint = hash(tuple(sorted(b["text"] for b in members)))
         if fingerprint in fingerprints:
             same_content[doc["item_id"]] = docs[fingerprints[fingerprint]]["item_id"]

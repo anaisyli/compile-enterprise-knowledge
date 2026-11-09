@@ -339,7 +339,7 @@ def build(
     lost = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{'；'.join(r['unreadable_locations'][:3])}"
             for i, r in sheet_report.get("sheets", {}).items() if r.get("unreadable_locations")]
     mat("removal", "初筛写的清理位置找不到", lost, "份", "待知识库专员判断",
-        "这些表照常按表头和行规则清理后入库；核对一下初筛想删的东西是否已经删掉", "初筛包更新时")
+        "这些文件照常清理后入库（价格、客户信息按规则删）；核对一下初筛想删的东西是否已经删掉", "初筛包更新时")
     overruled = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{entry}"
                  for i, r in sheet_report.get("sheets", {}).items() for entry in r.get("screening_overruled", [])]
     hinted_rows = Counter(b["doc_id"] for b in blocks if b.get("screening_hint") and b["status"] != "removed")
