@@ -11,6 +11,7 @@ Each file's hash is checked first: a copy that changed is not read.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -51,7 +52,12 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 3, ".pptx": 3, ".ppt": 3, ".docx": 3, ".doc": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 3, ".ppt": 3, ".docx": 3, ".doc": 3}
+# Photos printed in a PDF are kept as material when they are big enough to be one.
+PICTURE_MIN_SIDE = 300
+PICTURE_MIN_BYTES = 15_000
+PICTURE_REPEATED = 3
+MAX_PICTURES_PER_FILE = 400
 
 
 def reader_version(name: str) -> int:
@@ -227,7 +233,44 @@ def pdf_units_by_layout(path: Path, pymupdf: Any, thumbnails: Path | None, key: 
                     page.get_pixmap(dpi=THUMBNAIL_DPI).save(str(thumbnails / name))
                 images[str(number)] = name
         pages = document.page_count
-    return units, {"pages": pages, "ocr_pages": ocr_pages, "layout": "columns", "page_images": images}
+        pictures = page_pictures(document, pymupdf, thumbnails) if thumbnails is not None else {}
+    return units, {"pages": pages, "ocr_pages": ocr_pages, "layout": "columns", "page_images": images, "page_pictures": pictures}
+
+
+def page_pictures(document: Any, pymupdf: Any, folder: Path) -> dict[str, list[str]]:
+    """The photos printed in a PDF, stored once per picture: the material a website is built from.
+    Small pictures are icons, and one on many pages is a logo or a background."""
+    pages_of: dict[int, list[int]] = {}
+    for number, page in enumerate(document, start=1):
+        for info in page.get_images(full=True):
+            pages_of.setdefault(info[0], [])
+            if number not in pages_of[info[0]]:
+                pages_of[info[0]].append(number)
+    found: dict[str, list[str]] = {}
+    saved = 0
+    for xref, numbers in pages_of.items():
+        if len(numbers) > PICTURE_REPEATED or saved >= MAX_PICTURES_PER_FILE:
+            continue
+        try:
+            image = document.extract_image(xref)
+            if min(image.get("width", 0), image.get("height", 0)) < PICTURE_MIN_SIDE or len(image.get("image", b"")) < PICTURE_MIN_BYTES:
+                continue
+            data, suffix = image["image"], "." + image.get("ext", "png").casefold().replace("jpeg", "jpg")
+            if suffix not in {".jpg", ".png"}:
+                pixmap = pymupdf.Pixmap(document, xref)
+                if pixmap.n - pixmap.alpha > 3:
+                    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)  # CMYK prints, RGB screens.
+                data, suffix = pixmap.tobytes("png"), ".png"
+        except Exception:  # A damaged picture leaves the text untouched.
+            continue
+        name = f"img-{hashlib.sha256(data).hexdigest()[:16]}{suffix}"
+        if not (folder / name).is_file():
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(data)
+        saved += 1
+        for number in numbers:
+            found.setdefault(str(number), []).append(name)
+    return found
 
 
 def pdf_units(path: Path, thumbnails: Path | None = None, key: str = "") -> tuple[list[dict[str, str]], dict[str, Any]]:

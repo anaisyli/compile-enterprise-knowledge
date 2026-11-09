@@ -38,7 +38,6 @@ OLD_TODO = Path("01_工作台/20_当前待办.md")
 OLD_REGISTER = Path("02_源资料/知识库资料台账.md")
 MARKER = "<!-- compile-enterprise-knowledge -->"
 LEDGER_ROOT = "05_数据与审核/30_异常与待决定/"
-IMAGE_LINK = re.compile(r"!\[\[(img-[0-9a-f]+\.[a-z]+)")
 TABLE_RULE = re.compile(r"^:?-{3,}:?$")
 HASH_MODE = "normalized-v1"
 # More 已失效 records than this in one publish usually means missing input, not retired documents.
@@ -72,12 +71,54 @@ def planned_files(run: Path) -> dict[str, Path]:
     vault = build / "vault"
     for path in sorted(p for p in vault.rglob("*") if p.is_file()):
         files[path.relative_to(vault).as_posix()] = path
-    body = "\n".join(p.read_text(encoding="utf-8") for p in clean.rglob("*.md"))
-    # Images of removed rows were extracted too; only referenced ones may leave.
-    for name in sorted(set(IMAGE_LINK.findall(body))):
-        if (build / "assets" / name).is_file():
-            files[(ASSETS / name).as_posix()] = build / "assets" / name
+    # Images of removed rows were extracted too; only the pictures the build named may leave.
+    for picture_id, entry in sorted(pictures_of(build).items()):
+        if (build / "assets" / picture_id).is_file():
+            files[(ASSETS / entry["file"]).as_posix()] = build / "assets" / picture_id
     return files
+
+
+def pictures_of(build: Path) -> dict[str, dict[str, str]]:
+    return load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
+
+
+def move_pictures(vault: Path, build: Path, previous: dict[str, str], renamed: list[str]) -> dict[str, str]:
+    """Pictures published under their old numbered names move to their new names; links in the
+    pages people wrote follow. Returns old file name -> new file name."""
+    moved: dict[str, str] = {}
+    pictures = pictures_of(build)
+    for key in sorted(previous):
+        path = Path(key)
+        if not key.startswith(ASSETS.as_posix() + "/") or path.name not in pictures:
+            continue
+        new_key = (ASSETS / pictures[path.name]["file"]).as_posix()
+        if new_key == key or not (vault / key).is_file():
+            continue
+        if not (vault / new_key).exists():
+            (vault / new_key).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(vault / key), vault / new_key)
+            previous[new_key] = previous.pop(key)
+            moved[path.name] = Path(new_key).name
+            renamed.append(f"{key} → {new_key}")
+    return moved
+
+
+def follow_picture_links(vault: Path, moved: dict[str, str], ours_now: set[str]) -> int:
+    """Obsidian finds a picture by its file name, so a renamed one is relinked by name."""
+    if not moved:
+        return 0
+    pattern = re.compile(r"(?<![\w.-])(" + "|".join(map(re.escape, sorted(moved, key=len, reverse=True))) + r")(?![\w.-])")
+    changed = 0
+    for page in vault.rglob("*.md"):
+        key = page.relative_to(vault).as_posix()
+        if key in ours_now or key.startswith(ARCHIVE.as_posix()):
+            continue  # Pages this publish writes already carry the new names.
+        text = page.read_text(encoding="utf-8")
+        new = pattern.sub(lambda m: moved[m.group(1)], text)
+        if new != text:
+            page.write_text(new, encoding="utf-8", newline="\n")
+            changed += 1
+    return changed
 
 
 def ours(path: Path) -> bool:
@@ -222,6 +263,8 @@ def main() -> int:
                          "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
     written: dict[str, str] = {}
     renamed: list[str] = []
+    moved = move_pictures(vault, build, previous, renamed)
+    relinked = follow_picture_links(vault, moved, set(planned))
     for key, source in list(planned.items()):
         target = vault / key
         if key.startswith(LEDGER_ROOT):
@@ -301,7 +344,7 @@ def main() -> int:
     if archived:
         lines = [f"# 版本说明 {stamp}", "", f"由 compile-enterprise-knowledge {SKILL_VERSION} 发布时归档，共 {len(set(archived))} 个文件。", ""]
         if renamed:
-            lines.extend(["## 改名（同一份资料换了标题或目录）", "", *(f"- {entry}" for entry in renamed), "", "## 归档的旧版", ""])
+            lines.extend(["## 改名（同一份资料或图片换了名字或目录）", "", *(f"- {entry}" for entry in renamed), "", "## 归档的旧版", ""])
         lines.extend(f"- {key}" for key in sorted(set(archived)))
         write_text(vault / ARCHIVE / stamp / "00_版本说明.md", "\n".join(lines) + "\n")
 
@@ -314,7 +357,8 @@ def main() -> int:
     index = build_index(vault)
     entry = {"published_at": stamp, "version": SKILL_VERSION, "documents": report.get("documents"),
              "blocks": report.get("blocks_kept"), "withdrawn": withdrawn, "renamed": len(renamed), "files": len(written),
-             "archived": len(set(archived)), "state_saved": state["saved"], "run": str(run)}
+             "archived": len(set(archived)), "state_saved": state["saved"], "pictures_renamed": len(moved),
+             "pages_relinked": relinked, "run": str(run)}
     with (vault / RUN_LOG).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     subprocess.run([sys.executable, str(Path(__file__).with_name("kb_status.py")), "--out", str(run), "--vault", str(vault)],

@@ -25,6 +25,8 @@ FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
     "cell-review/decisions.jsonl", "cell-review/sheet-columns.json", "cell-review/t3-audit.json",
     "page-check/results.json", "sample-decisions.json",
+    # Picture names stay once given, and the AI's picture names are not redone.
+    "picture-names.json", "picture-names/answers.json",
 ]
 
 
@@ -40,6 +42,7 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
             for item in root.glob("*.json") if root.is_dir() else []:
                 found.append((build / directory / item.name, vault / target / item.name))
     found.append((build / "website" / "fetch-report.json", vault / WEBSITE / "fetch-report.json"))
+    found.append((build / "website" / "pictures.json", vault / WEBSITE / "pictures.json"))
     return sorted(set(found))
 
 

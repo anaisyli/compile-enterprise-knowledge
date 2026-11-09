@@ -45,6 +45,11 @@ MODULE_PATHS = [
 EMPTY_SHELL_CHARS = 80
 # Page-builder fragments, feeds, and archive listings repeat other pages' content.
 NOISE_PATH = re.compile(r"(?i)elementskit|wp-json|/feed|/tag/|/author/|/page/\d|/wp-content/|\?|xmlrpc")
+# Product and company photos for the material folder; icons and sprites are too small to matter.
+PICTURE_EXTENSIONS = re.compile(r"(?i)\.(?:jpe?g|png|webp)$")
+PICTURE_MIN_BYTES = 15_000
+MAX_PICTURES_PER_PAGE = 12
+MAX_PICTURES = 800
 
 
 class PageParser(HTMLParser):
@@ -57,10 +62,20 @@ class PageParser(HTMLParser):
         self.links: list[str] = []
         self.title = ""
         self.in_title = False
+        # (index of the text block it belongs to, address, alt text) for each picture in the content.
+        self.images: list[tuple[int, str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in SKIP_TAGS:
             self.skip += 1
+        if tag == "img" and not self.skip:
+            values = dict(attrs)
+            # Lazy-loading themes keep the real address in data-src.
+            src = values.get("data-src") or values.get("data-lazy-src") or values.get("src") or ""
+            if src and not src.startswith("data:"):
+                # Inside an open paragraph the picture belongs to it; otherwise to the text before it.
+                position = len(self.blocks) if self.current is not None else len(self.blocks) - 1
+                self.images.append((position, src, normalize_space(values.get("alt") or values.get("title") or "")))
         if tag == "a":
             href = dict(attrs).get("href")
             if href:
@@ -93,8 +108,9 @@ class PageParser(HTMLParser):
         self.current = None
 
 
-def sections(blocks: list[tuple[str, str]]) -> list[dict[str, str]]:
-    """One unit per heading section, so a page reads in the order it was written."""
+def sections(blocks: list[tuple[str, str]], owners: list[int] | None = None) -> list[dict[str, str]]:
+    """One unit per heading section, so a page reads in the order it was written. owners, when
+    given, receives the section number of every block."""
     units: list[dict[str, str]] = []
     current: list[str] = []
     for tag, text in blocks:
@@ -103,9 +119,47 @@ def sections(blocks: list[tuple[str, str]]) -> list[dict[str, str]]:
             current = []
         if not current or current[-1] != text:
             current.append(text)
+        if owners is not None:
+            owners.append(len(units) + 1)
     if current:
         units.append({"locator": f"section {len(units) + 1}", "text": "\n".join(current)})
     return units
+
+
+def picture_host(host: str, hosts: set[str]) -> bool:
+    """The site's own host or one of its subdomains, such as img.example.com."""
+    return host in hosts or any(host.endswith("." + h.removeprefix("www.")) for h in hosts)
+
+
+def save_pictures(url: str, images: list[tuple[int, str, str]], owners: list[int], hosts: set[str], assets: Path,
+                  budget: dict[str, int], delay: float) -> list[dict[str, Any]]:
+    """Download the page's own pictures once each, named by content, so the vault keeps one copy."""
+    saved: list[dict[str, Any]] = []
+    for position, src, alt in images:
+        if budget["left"] <= 0 or len(saved) >= MAX_PICTURES_PER_PAGE:
+            break
+        address = urljoin(url, src)
+        parsed = urlparse(address)
+        if parsed.scheme not in {"http", "https"} or not picture_host((parsed.hostname or "").casefold(), hosts) \
+                or not PICTURE_EXTENSIONS.search(parsed.path):
+            continue
+        try:
+            data, kind = fetch(address)
+        except (HTTPError, URLError, OSError, TimeoutError):
+            continue
+        if not kind.casefold().startswith("image/") or len(data) < PICTURE_MIN_BYTES:
+            continue
+        suffix = PICTURE_EXTENSIONS.search(parsed.path).group(0).casefold().replace(".jpeg", ".jpg")
+        name = f"img-{hashlib.sha256(data).hexdigest()[:16]}{suffix}"
+        if not (assets / name).is_file():
+            assets.mkdir(parents=True, exist_ok=True)
+            (assets / name).write_bytes(data)
+        section = owners[min(max(position, 0), len(owners) - 1)] if owners else 1
+        if all(p["id"] != name for p in saved):
+            saved.append({"id": name, "alt": alt, "section": section, "src": address})
+        budget["left"] -= 1
+        time.sleep(delay / 2)
+    return saved
 
 
 def module_for(url: str) -> str:
@@ -177,9 +231,11 @@ def record_page(store: Path, pages: dict[str, dict[str, Any]], url: str, title: 
     return page
 
 
-def crawl(config: dict[str, Any], store: Path, pages: dict[str, dict[str, Any]], max_pages: int, delay: float) -> dict[str, Any]:
+def crawl(config: dict[str, Any], store: Path, pages: dict[str, dict[str, Any]], max_pages: int, delay: float,
+          pictures: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     hosts = allowed_hosts(config)
-    report: dict[str, Any] = {"fetched": 0, "blocked_by_robots": 0, "failed": [], "needs_browser": []}
+    report: dict[str, Any] = {"fetched": 0, "blocked_by_robots": 0, "failed": [], "needs_browser": [], "pictures": 0}
+    budget = {"left": MAX_PICTURES}
     for site in config.get("websites", []):
         base = site["url"]
         robots = RobotFileParser(urljoin(base, "/robots.txt"))
@@ -208,8 +264,13 @@ def crawl(config: dict[str, Any], store: Path, pages: dict[str, dict[str, Any]],
             parser = PageParser()
             parser.feed(raw.decode("utf-8", errors="replace"))
             parser.flush()
-            page = record_page(store, pages, url, parser.title, sections(parser.blocks), raw)
+            owners: list[int] = []
+            page = record_page(store, pages, url, parser.title, sections(parser.blocks, owners), raw)
             report["fetched"] += 1
+            # Customer stories wait for consent, so their pictures are not taken either.
+            if pictures is not None and page["kind"] == "page":
+                pictures[page["page_id"]] = save_pictures(url, parser.images, owners, hosts, store.parent / "assets", budget, delay)
+                report["pictures"] += len(pictures[page["page_id"]])
             if page["kind"] == "needs_browser":
                 report["needs_browser"].append(url)
             queue.extend(urljoin(url, link) for link in parser.links)
@@ -236,6 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=1.0, help="Seconds between requests")
     parser.add_argument("--browser-capture", action="append", default=[], help="Saved browser capture JSON; repeat")
     parser.add_argument("--vault", help="Published project: start from the website snapshot kept there")
+    parser.add_argument("--no-pictures", action="store_true", help="Read the text only, without the site's photos")
     return parser.parse_args()
 
 
@@ -253,7 +315,11 @@ def main() -> int:
         imported = [import_capture(Path(p), config, store, pages) for p in args.browser_capture]
         report = {"imported": len(imported)}
     else:
-        report = crawl(config, store, pages, args.max_pages, args.delay)
+        picture_index = store / "pictures.json"
+        pictures = load_json(picture_index) if picture_index.is_file() else {}
+        report = crawl(config, store, pages, args.max_pages, args.delay, None if args.no_pictures else pictures)
+        if not args.no_pictures:
+            write_json(picture_index, pictures)
     usable = [p for p in pages.values() if p["kind"] in {"page", "case"}]
     snapshot = min((p["fetched_at"][:10] for p in usable), default=None)
     report.update(checked_at=datetime.now().astimezone().isoformat(timespec="seconds"),

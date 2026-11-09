@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
+from pictures import build_pictures, write_index as write_picture_index
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     BUILD_DIRECTORY,
@@ -62,8 +63,15 @@ NAME_MAP_CSV = "审计记录/知识库文件对照.csv"
 ALIAS_FOLDER = "审计记录/按知识库名字"
 MARKER_PLAN = "<!-- compile-enterprise-knowledge plan -->"
 TABLE_LOCATOR = re.compile(r"^table at \d+$| table \d+$|^sheet .+ \(visible\)$")
-ASSET_INDEX = "03_正式知识/90_素材/00_素材索引.md"
 SEARCH_STATE = {"read_ok": "全文文字可搜索", "partial": "部分内容可搜索", "needs_ocr": "未建立正文索引"}
+
+
+# Picture id (img-<hash>) -> its file name in 90_素材, set once per build before pages are written.
+PICTURE_FILES: dict[str, str] = {}
+
+
+def shown(name: str) -> str:
+    return PICTURE_FILES.get(name, name)
 
 
 def escape_cell(text: str) -> str:
@@ -182,7 +190,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             current = block["group"]
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
-                parts.extend([f"![[{pictures[current]}|{PAGE_PICTURE_WIDTH}]]", ""])
+                parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
             for note in page_notes.get(current, []):
                 parts.extend([f"> {line}" for line in note.splitlines()] + [""])
             table_columns = []
@@ -207,7 +215,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 row_notes.setdefault(note, []).append(block["locator"].rsplit(" ", 2)[-2])
             row += [escape_cell(block["cells"].get(role, "")) for role in table_columns]
             if show_images:
-                row.append(" ".join(f"![[{name}|80]]" for name in block.get("images", [])[:MAX_STYLE_IMAGES]))
+                row.append(" ".join(f"![[{shown(name)}|80]]" for name in block.get("images", [])[:MAX_STYLE_IMAGES] if name in PICTURE_FILES))
             parts.append("| " + " | ".join(row) + " |")
         elif block["kind"] == "point":
             parts.append(f"- [{block.get('scope', 'single_communication')}] {block['text']}" + (f" {note}" if note else ""))
@@ -262,29 +270,6 @@ def neutral_title(doc: dict[str, Any]) -> None:
         doc["file_name"] = safe_name(doc["title"]) + ".md"
 
 
-def write_asset_index(build: Path, visible: list[dict[str, Any]], docs: dict[str, dict[str, Any]], published: dict[str, str]) -> None:
-    """Pictures stay in 90_素材 for good; this page says where each one came from."""
-    # One row per picture, without previews: thousands of embedded images make Obsidian crawl.
-    uses: dict[str, dict[str, tuple[str, str]]] = {}
-    for block in visible:
-        doc = docs[block["doc_id"]]
-        if doc["doc_id"] not in published:
-            continue
-        # Only the pictures a page shows are published, so only those are indexed.
-        for name in block.get("images", [])[:MAX_STYLE_IMAGES]:
-            uses.setdefault(name, {}).setdefault(doc["doc_id"], (block["group"], block["locator"]))
-    rows = []
-    for name, by_doc in sorted(uses.items()):
-        first = min(by_doc, key=lambda d: docs[d]["title"])
-        group, locator = by_doc[first]
-        doc = docs[first]
-        link = f"[[{Path(doc['file_name']).stem}#{group}|{doc['title']}]]"
-        rows.append(f"| [[{name}]] | {link}{f' 等 {len(by_doc)} 份' if len(by_doc) > 1 else ''} | {escape_cell(locator)} |")
-    lines = ["# 素材索引", "", "图片发布后一直保留，不随资料变化删除。这里每张图一行，写第一次出现的资料和位置；点文件名看图。", "",
-             f"共 {len(rows)} 张。", "", "| 图片 | 出现在 | 位置 |", "| --- | --- | --- |", *rows]
-    write_text(build / "vault" / ASSET_INDEX, "\n".join(lines) + "\n")
-
-
 def write_table_summary(clean: Path, visible: list[dict[str, Any]], docs: dict[str, dict[str, Any]],
                         statuses: dict[str, str]) -> int:
     """Every product row kept from every product table and quotation, once, with where it came from.
@@ -323,7 +308,8 @@ def write_table_summary(clean: Path, visible: list[dict[str, Any]], docs: dict[s
         values = entry["values"]
         cell = lambda role: escape_cell(" / ".join(values[role][:3]) + (" 等" if len(values[role]) > 3 else ""))
         sources = "、".join(entry["sources"][:3]) + (f" 等 {len(entry['sources'])} 份" if len(entry["sources"]) > 3 else "")
-        picture = f"![[{entry['images'][0]}|80]]" if entry["images"] else ""
+        named = [name for name in entry["images"] if name in PICTURE_FILES]
+        picture = f"![[{shown(named[0])}|80]]" if named else ""
         lines.append(f"| {cell('style')}{' ⚠' if entry['flagged'] else ''} | {cell('name')} | {cell('description')} | {cell('fabric')} "
                      f"| {cell('size')} | {picture} | {sources} |")
     write_text(clean / TABLE_SUMMARY, "\n".join(lines) + "\n")
@@ -607,7 +593,7 @@ def write_exports(build: Path, visible: list[dict[str, Any]], docs: dict[str, di
         writer.writerow(["款号", "品名", "描述", "面料", "尺码", "面料说法不一致", "来源数", "图片"])
         for entry in styles:
             writer.writerow([entry["style"]] + [" / ".join(entry["values"][r]) for r in ("name", "description", "fabric", "size")]
-                            + ["是" if entry["conflict"] else "", len(entry["sources"]), " ".join(entry["images"])])
+                            + ["是" if entry["conflict"] else "", len(entry["sources"]), " ".join(PICTURE_FILES[i] for i in entry["images"] if i in PICTURE_FILES)])
 
 
 def parse_args() -> argparse.Namespace:
@@ -688,13 +674,22 @@ def main() -> int:
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
     originals = make_aliases(routes, docs, order)
+    # Pictures are named before pages are written, so every page links the same name.
+    terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
+    forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))
+    picture_status = {doc_id: doc_status(docs[doc_id], by_doc[doc_id], effective) for doc_id in order}
+    held = {(b["doc_id"], b["locator"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
+    pictures_named = build_pictures(build, config, docs, by_doc, order, picture_status, unsafe, status_info, forbidden,
+                                    MAX_STYLE_IMAGES, held)
+    PICTURE_FILES.clear()
+    PICTURE_FILES.update({picture_id: Path(entry["file"]).name for picture_id, entry in pictures_named.items()})
     for doc_id in order:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
         card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""))
         pictures = {f"第 {page} 页": name for page, name in status_info.get(doc["item_id"], {}).get("page_images", {}).items()
-                    if (doc_id, f"第 {page} 页") not in unsafe and (build / "assets" / name).is_file()}
+                    if (doc_id, f"第 {page} 页") not in unsafe and name in PICTURE_FILES}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
                                                      checks.get(doc["item_id"], {})))
         published[doc_id], statuses[doc_id] = doc_path(doc), status
@@ -704,7 +699,7 @@ def main() -> int:
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     write_name_maps(routes, docs, published, statuses, same_content)
     write_json(build / "samples-waiting.json", write_plan_page(build, routes, docs, published, statuses, originals, config, status_info))
-    write_asset_index(build, visible, docs, published)
+    write_picture_index(build, pictures_named, docs, escape_cell)
     write_exports(build, visible, docs, styles, statuses)
     write_jsonl(build / "docs.jsonl", docs.values())
     write_json(build / "published.json", published)

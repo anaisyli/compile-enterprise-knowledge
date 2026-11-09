@@ -17,7 +17,6 @@ import curate  # noqa: E402
 from curate import plan  # noqa: E402
 from kb_common import load_config  # noqa: E402
 from kb_state import merge_pages  # noqa: E402
-from render_kb import write_asset_index  # noqa: E402
 from sections import classify, load_sections  # noqa: E402
 
 
@@ -77,19 +76,6 @@ class SnapshotTests(unittest.TestCase):
             empty.write_text("[]", encoding="utf-8")
             merge_pages(empty, saved)
             self.assertEqual(len(json.loads(saved.read_text(encoding="utf-8"))), 1)
-
-
-class AssetIndexTests(unittest.TestCase):
-    def test_each_picture_is_one_row_without_a_preview(self) -> None:
-        import tempfile
-        docs = {d: {"doc_id": d, "title": f"产品表-{d}", "file_name": f"产品表-{d}.md"} for d in ("a", "b")}
-        visible = [{**block("x" * 12, d, "row"), "images": ["img-0123.png"]} for d in ("a", "b")]
-        with tempfile.TemporaryDirectory() as folder:
-            write_asset_index(Path(folder), visible, docs, {"a": "x", "b": "y"})
-            page = next(Path(folder).rglob("00_素材索引.md")).read_text(encoding="utf-8")
-        self.assertEqual(page.count("img-0123.png"), 1)
-        self.assertNotIn("![[", page)
-        self.assertIn("等 2 份", page)
 
 
 class RerunTests(Base):

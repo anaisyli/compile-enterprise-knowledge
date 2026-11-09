@@ -228,6 +228,11 @@ def main() -> int:
         for path in pages:
             if pattern.search(path.stem):
                 errors.append(f"forbidden term in file name: {path.name}")
+        # Picture names are made from the words beside them, so they pass the same test.
+        named = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
+        for entry in named.values():
+            if pattern.search(entry["file"]) or pattern.search(entry.get("alt", "")):
+                errors.append(f"forbidden term in picture name: {entry['file']}")
 
     # Risky passages are published on purpose, so each one must carry its mark.
     for block in kept:
