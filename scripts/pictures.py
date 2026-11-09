@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from products import material_folders
 
 
 ASSETS = "03_正式知识/90_素材"
@@ -115,7 +116,7 @@ def page_group(info: dict[str, Any], page: str) -> str:
 
 def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]], order: list[str],
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
-               max_row_images: int, held: set[tuple[str, str]]) -> list[dict[str, Any]]:
+               max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Every picture the vault will show or keep, with the words that can name it. held: (doc, locator)
     of every passage removed or waiting for the client."""
     found: list[dict[str, Any]] = []
@@ -192,15 +193,20 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     line="" if company else category, alt=alt or title, use=CHECK if flagged else PUBLIC,
                     english_source=alt or doc.get("original_name", ""), location=section)
     for entry in load_media(build):
-        if not entry.get("id"):
-            continue
-        folders = media_folders(entry["relpath"], namer)
+        # A product's pictures go under 大类/产品/图片类型; what matches no product keeps its own folders.
+        place = (places or {}).get(entry["item_id"])
+        placed = material_folders(place, namer.forbidden)
+        folders = placed or media_folders(entry["relpath"], namer)
         stem = Path(entry["relpath"]).stem
         label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
-        prefix = folders[-1] if folders else ""
-        add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
-            alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem,
-            location="/".join(folders) or "根目录")
+        prefix = (safe_name(place["product"]["name"], "其他") if placed else folders[-1]) if folders else ""
+        location = "/".join(media_folders(entry["relpath"], namer)) or "根目录"
+        if entry.get("id"):
+            add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
+                alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem, location=location)
+        if entry.get("cover"):
+            add(entry["cover"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=f"{label}-封面" if label else "视频封面",
+                alt=f"视频封面：{' '.join(p for p in (prefix, label) if p)}", use=PUBLIC, english_source=stem, location=location)
     return found
 
 
@@ -326,9 +332,10 @@ def media_section(build: Path, entries: dict[str, dict[str, Any]], escape: Calla
 
 def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]],
                    order: list[str], statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any],
-                   forbidden: re.Pattern[str] | None, max_row_images: int, held: set[tuple[str, str]]) -> dict[str, dict[str, Any]]:
+                   forbidden: re.Pattern[str] | None, max_row_images: int, held: set[tuple[str, str]],
+                   places: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     namer = Namer(config, forbidden)
-    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held)
+    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places)
     saved = load_json(build / STATE) if (build / STATE).is_file() else {}
     answers = load_json(build / AI_ANSWERS) if (build / AI_ANSWERS).is_file() else {}
     entries = assign(found, saved, answers, namer)

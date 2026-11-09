@@ -682,6 +682,28 @@ def collect_images(
     return results, failures
 
 
+def video_cover(source: Path, assets: Path, key: str) -> tuple[str, str]:
+    """(cover picture id, duration m:ss) of a video, when ffmpeg is installed; ("", "") otherwise.
+    The video itself stays in the package; one frame and its length tell people what it is."""
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg:
+        return "", ""
+    name = f"img-{hashlib.sha256(f'{key}|cover'.encode()).hexdigest()[:16]}.jpg"
+    duration = ""
+    try:
+        if not (assets / name).exists():
+            subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-ss", "1", "-i", long_path(source), "-frames:v", "1",
+                            "-vf", "scale=480:-2", str(assets / name)], capture_output=True, timeout=60)
+        if ffprobe:
+            seconds = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", long_path(source)],
+                                     capture_output=True, text=True, timeout=30).stdout.strip()
+            if seconds:
+                duration = f"{int(float(seconds)) // 60}:{int(float(seconds)) % 60:02d}"
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return (name if (assets / name).is_file() else ""), duration
+
+
 def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Path, max_bytes: int) -> list[dict[str, Any]]:
     """Pictures and videos screening kept by folder. A usable picture up to the size limit is copied
     once into the build's assets under its content hash, the same name embedded pictures get, so

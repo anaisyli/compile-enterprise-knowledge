@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
 from pictures import build_pictures, load_media, page_group, write_index as write_picture_index
+from products import Matcher, catalog as product_catalog, place_media, write_pages as write_product_pages
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     BUILD_DIRECTORY,
@@ -687,8 +688,13 @@ def main() -> int:
     forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))
     picture_status = {doc_id: doc_status(docs[doc_id], by_doc[doc_id], effective) for doc_id in order}
     held = {(b["doc_id"], b["locator"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
+    # Which product or solution each picture and video belongs to, by its folder names.
+    media = load_media(build)
+    products = product_catalog(config, media, {d: docs[d] for d in order}, forbidden)
+    match_product = Matcher(products)
+    places = place_media(media, match_product)
     pictures_named = build_pictures(build, config, docs, by_doc, order, picture_status, unsafe, status_info, forbidden,
-                                    MAX_STYLE_IMAGES, held)
+                                    MAX_STYLE_IMAGES, held, places)
     PICTURE_FILES.clear()
     PICTURE_FILES.update({picture_id: Path(entry["file"]).name for picture_id, entry in pictures_named.items()})
     for entry in load_media(build):
@@ -717,6 +723,7 @@ def main() -> int:
         published[doc_id], statuses[doc_id] = doc_path(doc), status
 
     write_table_summary(clean, visible, docs, statuses)
+    write_product_pages(build, products, match_product, docs, order, statuses, media, places, pictures_named, escape_cell)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     write_name_maps(routes, docs, published, statuses, same_content)

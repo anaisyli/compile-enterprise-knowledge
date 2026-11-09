@@ -183,14 +183,20 @@ def main() -> int:
                 config["client_answers"][item_id] = decision
         applied.append({"id": record["id"], "decision": decision})
 
-    if applied:
+    # Read again on every build: only a real change touches the config, and a remark is kept once.
+    changed = applied and config != load_json(config_path)
+    if changed:
         backup = config_path.with_name(f"{config_path.stem}.{datetime.now():%Y%m%d-%H%M%S}.bak.json")
         shutil.copy2(config_path, backup)
         write_json(config_path, config)
     if notes:
-        write_jsonl(build / "client-notes.jsonl", load_jsonl(build / "client-notes.jsonl") + notes)
-    print(json.dumps({"applied": len(applied), "notes_for_people": len(notes), "unclear": unclear,
-                      "next": "重跑 run_pipeline.py，再发布" if applied else "没有可执行的回答"}, ensure_ascii=False, indent=2))
+        kept = load_jsonl(build / "client-notes.jsonl")
+        seen = {(n.get("id"), n.get("answer"), n.get("note")) for n in kept}
+        fresh = [n for n in notes if (n.get("id"), n.get("answer"), n.get("note")) not in seen]
+        if fresh:
+            write_jsonl(build / "client-notes.jsonl", kept + fresh)
+    print(json.dumps({"applied": len(applied), "config_changed": bool(changed), "notes_for_people": len(notes), "unclear": unclear,
+                      "next": "重跑 run_pipeline.py，再发布" if changed else "没有新的回答"}, ensure_ascii=False, indent=2))
     return 0
 
 

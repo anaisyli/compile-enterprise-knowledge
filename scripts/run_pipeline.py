@@ -17,6 +17,7 @@ from kb_state import restore
 
 
 HERE = Path(__file__).resolve().parent
+SCREENING_WORKBOOK = "客户确认表.xlsx"
 
 
 def step(script: str, *arguments: str) -> int:
@@ -58,6 +59,12 @@ def main() -> int:
             args.config = str(build / "kb-config.json")
         if not args.package and (build / "run-info.json").is_file():
             args.package = load_json(build / "run-info.json")["packages"]
+            missing = [p for p in args.package if not Path(p).is_dir()]
+            if missing:
+                # The vault came from another computer: the package is somewhere else here.
+                print(f"上次用的初筛包不在这台电脑的原位置：{'；'.join(missing)}。用 --package 指定它现在的位置重建；"
+                      "只想让知识库里“打开原件”的链接能点开，运行 kb_relink.py --vault <知识库> --package <初筛包>。")
+                return 2
     if not args.package:
         print("要指定 --package，或者用 --vault 从知识库读取上次用的初筛包。")
         return 2
@@ -65,6 +72,12 @@ def main() -> int:
         if not (Path(package) / "审计记录" / "package-manifest.json").is_file():
             print(f"{package} 不是初筛包。没筛选过的资料先用 prepare-seo-knowledge-materials 生成初筛包，再来建库。")
             return 2
+    for package in args.package:
+        workbook = Path(package) / SCREENING_WORKBOOK
+        # The client may have answered screening's questions already; the build should not ask again.
+        if workbook.is_file() and args.config:
+            if step("apply_answers.py", "--out", args.out, "--config", args.config, "--answers", str(workbook)):
+                print(f"   读不了初筛包的客户确认表，跳过：{workbook}")
     if not args.text_dir:
         # Colleagues hand over the package, not the screening work folder, so read it again.
         code = step("extract_package_text.py", *repeat("--package", args.package), "--out", args.out)
