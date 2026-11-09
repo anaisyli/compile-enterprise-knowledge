@@ -102,6 +102,11 @@ def kind_folder(text: str, fallback: str) -> str:
     return fallback
 
 
+def page_group(info: dict[str, Any], page: str) -> str:
+    """The heading a page or slide has in the source layer."""
+    return f"第 {page} 张幻灯片" if info.get("page_unit") == "slide" else f"第 {page} 页"
+
+
 def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]], order: list[str],
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
                max_row_images: int, held: set[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -141,14 +146,14 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     english_source=words, location=block["locator"])
         info = status_info.get(doc["item_id"], {})
         for page, name in info.get("page_images", {}).items():
-            group = f"第 {page} 页"
+            group = page_group(info, page)
             if (doc_id, group) not in unsafe:
-                add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-第{page}页",
-                    alt=f"{doc['title']} 第 {page} 页原页", use=INTERNAL, location=group)
+                add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
+                    alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
         catalog = doc.get("folder") == "产品画册"
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():
-            group = f"第 {page} 页"
+            group = page_group(info, page)
             if (doc_id, group) in unsafe:
                 continue
             on_page = [b for b in blocks if b["group"] == group]

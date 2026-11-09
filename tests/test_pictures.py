@@ -160,6 +160,46 @@ class WebsitePictureTests(unittest.TestCase):
         self.assertFalse(picture_host("cdn.other.com", {"www.example.com", "example.com"}))
 
 
+class SlideTests(unittest.TestCase):
+    def deck(self, folder: Path) -> Path:
+        """Three slide files shown in the order 3, 1 with slide 2 hidden."""
+        import zipfile
+        path = folder / "deck.pptx"
+        p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+        r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("ppt/presentation.xml", f'<p:presentation xmlns:p="{p}" xmlns:r="{r}"><p:sldIdLst>'
+                             '<p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId1"/><p:sldId id="258" r:id="rId2"/>'
+                             '</p:sldIdLst></p:presentation>')
+            archive.writestr("ppt/_rels/presentation.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                             + "".join(f'<Relationship Id="rId{i}" Target="slides/slide{i}.xml"/>' for i in (1, 2, 3)) + "</Relationships>")
+            for number in (1, 2, 3):
+                hidden = ' show="0"' if number == 2 else ""
+                archive.writestr(f"ppt/slides/slide{number}.xml", f'<p:sld xmlns:p="{p}"{hidden}/>')
+        return path
+
+    def test_slides_follow_the_order_the_deck_shows_them(self) -> None:
+        from extract_package_text import slide_order
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(slide_order(self.deck(Path(folder))), [3, 1])
+
+    def test_slide_pictures_go_under_the_slide_heading(self) -> None:
+        self.assertEqual(pictures.page_group({"page_unit": "slide"}, "3"), "第 3 张幻灯片")
+        self.assertEqual(pictures.page_group({}, "3"), "第 3 页")
+
+    def test_a_deck_without_libreoffice_still_reads_and_says_why(self) -> None:
+        import extract_package_text
+        original = extract_package_text.convert_office
+        extract_package_text.convert_office = lambda *a, **k: (_ for _ in ()).throw(LookupError("needs_libreoffice"))
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                result = extract_package_text.slide_pictures(self.deck(Path(folder)), Path(folder) / "converted", "k", 10)
+        finally:
+            extract_package_text.convert_office = original
+        if "PyMuPDF" not in result["page_images_skipped"]:
+            self.assertEqual(result["page_images_skipped"], "需要 LibreOffice")
+
+
 class PdfPictureTests(unittest.TestCase):
     def test_photos_are_kept_but_icons_and_logos_are_not(self) -> None:
         try:

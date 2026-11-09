@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
-from pictures import build_pictures, write_index as write_picture_index
+from pictures import build_pictures, page_group, write_index as write_picture_index
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     BUILD_DIRECTORY,
@@ -688,8 +688,9 @@ def main() -> int:
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
         card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""))
-        pictures = {f"第 {page} 页": name for page, name in status_info.get(doc["item_id"], {}).get("page_images", {}).items()
-                    if (doc_id, f"第 {page} 页") not in unsafe and name in PICTURE_FILES}
+        info = status_info.get(doc["item_id"], {})
+        pictures = {page_group(info, page): name for page, name in info.get("page_images", {}).items()
+                    if (doc_id, page_group(info, page)) not in unsafe and name in PICTURE_FILES}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
                                                      checks.get(doc["item_id"], {})))
         published[doc_id], statuses[doc_id] = doc_path(doc), status

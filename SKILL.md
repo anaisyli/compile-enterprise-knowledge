@@ -26,7 +26,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 - 每台电脑第一次用、或换了运行环境（比如在 Codex 的沙盒里）时，先运行 `python scripts/check_tools.py`。它会真的用 LibreOffice 转换一个小表格，看 pypdf、PyMuPDF 在不在，按输出里的 `fix` 处理。LibreOffice 在沙盒里转不了时，用不受沙盒限制的方式运行提取这一步；实在不行，把 .xls/.doc/.ppt 另存为 .xlsx/.docx/.pptx 再放进初筛包。
 
-- 输入只需要 `verify_package.py` 通过的初筛包。流水线会自己从包里提取文字，并先核对哈希。读 PDF 建议 `python -m pip install pymupdf pypdf`：有 PyMuPDF 时画册和 PPT 按版面分栏读，款号不会跑到别款旁边，每页还附原页图；只有 pypdf 时按存储顺序读，卡片上会提示可能错位。读 `.xls`/`.doc`/`.ppt` 需要 LibreOffice。手上有 `_working/text` 时，可以用 `--text-dir` 复用。
+- 输入只需要 `verify_package.py` 通过的初筛包。流水线会自己从包里提取文字，并先核对哈希。读 PDF 建议 `python -m pip install pymupdf pypdf`：有 PyMuPDF 时画册和 PPT 按版面分栏读，款号不会跑到别款旁边，每页还附原页图（PPT 的幻灯片截图还要 LibreOffice，没有时只缺截图、文字照读）；只有 pypdf 时按存储顺序读，卡片上会提示可能错位。读 `.xls`/`.doc`/`.ppt` 需要 LibreOffice。手上有 `_working/text` 时，可以用 `--text-dir` 复用。
 - 用户给的是没筛选过的文件夹时，不要绕过筛选：装了 prepare-seo-knowledge-materials 就先用它筛，没装就告诉用户要先筛。流水线也会拒绝非初筛包。后来补充的资料同样先筛成小初筛包，再叠加 `--package`。
 - 长期只保存初筛包和知识库，运行目录随时可以删。配置、各种判断、台账编号、整理页原稿、MinerU 结果、官网快照，发布时都写进知识库；之后重跑加 `--vault <项目目录>`，就能从知识库恢复。详见合同“长期保存什么”。
 - 运行目录放在初筛包和知识库之外。第一次建库时在运行目录写 `kb-config.json`，发布后以知识库 `05_数据与审核/70_构建状态/` 里的那份为准。至少填：
@@ -92,7 +92,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - 主题多时可以分给子 Agent 并行，每个只拿一个主题文件夹。
 
 5.5 **素材图片：**
-   - 流水线自动收图：报价单和产品表行里的图、画册 PDF 里印的照片（太小的图标、每页都有的 logo 和底图不收）、官网页面上的产品和公司照片（官网读取时一并下载，`--no-pictures` 可以不下）。整页截图也在素材里，标“内部”。
+   - 流水线自动收图：报价单和产品表行里的图、画册 PDF 和 PPT 里印的照片（太小的图标、每页都有的 logo 和底图不收）、官网页面上的产品和公司照片（官网读取时一并下载，`--no-pictures` 可以不下）。整页截图也在素材里，标“内部”。
    - 名字取自图片旁边的原文，格式“类别-产品名或款号-8位编号”：表格行用品名或款号，画册用系列名、页标题和公司自己的款号，官网用图片说明（alt）或页面标题。买家款号、客户名、标 ⚠ 的原文都不进名字。
    - 按用途分文件夹：`产品/<大类或系列>`、`工厂与设备`、`证书`、`公司`、`报价单参考图`、`产品表图片`、`页面图`。《素材索引》和 `00_素材清单.csv` 写每张图的说明（可当 alt）、能否用于官网、英文文件名建议、出处。
    - 旁边没有可用文字的图名字是“编号”。要起名时运行 `pictures.py export --out <运行目录>`，按 `04_知识库构建/picture-names/README.md` 逐张看图写 `answers.jsonl`，再 `pictures.py collect --out <运行目录>`，重跑第 2 步。AI 起的名字标“AI看图”，能否用于官网降为“待核对”。

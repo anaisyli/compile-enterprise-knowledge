@@ -13,6 +13,7 @@ import random
 import re
 import sys
 import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -278,6 +279,14 @@ def main() -> int:
                           "确实不做，在 kb-config.json 的 page_check 里写 {\"skip\": \"理由\"}")
         else:
             warnings.append(f"还没做看图核对：{waiting} 页等 AI 对照原图看（04_知识库构建/page-check/README.md）")
+
+    # A deck without slide pictures still has all its text; say why the pictures are missing.
+    status_path = build / "package-text" / "extract-status.json"
+    extracted = load_json(status_path).get("items", {}) if status_path.is_file() else {}
+    no_slides = Counter(item["page_images_skipped"] for item in extracted.values() if item.get("page_images_skipped"))
+    if no_slides:
+        warnings.append("PPT 没有幻灯片截图：" + "，".join(f"{reason} {count} 份" for reason, count in no_slides.most_common())
+                        + "（文字已全部读取；装好 LibreOffice、PyMuPDF 后重跑即可补上）")
 
     # Kinds of material nobody has looked at an example of yet.
     waiting_path = build / "samples-waiting.json"

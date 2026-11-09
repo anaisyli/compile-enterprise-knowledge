@@ -52,7 +52,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 3, ".ppt": 3, ".docx": 3, ".doc": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -132,6 +132,62 @@ def pptx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if image_only:
         facts["ocr_pages"] = image_only
     return units, facts
+
+
+RELATIONSHIP = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def slide_order(path: Path) -> list[int]:
+    """Slide file numbers in the order the deck shows them, hidden slides left out: the order a
+    PDF export prints them in. slide7.xml can be the third slide of a reordered deck."""
+    with zipfile.ZipFile(long_path(path)) as archive:
+        names = set(archive.namelist())
+        if "ppt/presentation.xml" not in names or "ppt/_rels/presentation.xml.rels" not in names:
+            return []
+        targets = {rel.get("Id"): rel.get("Target", "") for rel in ET.fromstring(archive.read("ppt/_rels/presentation.xml.rels"))}
+        order = []
+        for entry in ET.fromstring(archive.read("ppt/presentation.xml")).iter(f"{PRESENTATION}sldId"):
+            match = re.search(r"slides/slide(\d+)\.xml$", targets.get(entry.get(f"{RELATIONSHIP}id"), ""))
+            if not match:
+                continue
+            name = f"ppt/slides/slide{match.group(1)}.xml"
+            if name in names and ET.fromstring(archive.read(name)).get("show") != "0":
+                order.append(int(match.group(1)))
+        return order
+
+
+def slide_pictures(path: Path, cache: Path, key: str, timeout: int) -> dict[str, Any]:
+    """A picture of every slide, like a PDF page, so the text can be checked against the slide.
+    The deck goes through LibreOffice to a PDF; without it the text is still read in full."""
+    order = slide_order(path)
+    if not order:
+        return {"page_images_skipped": "读不出幻灯片顺序"}
+    try:
+        import pymupdf  # type: ignore[import-not-found]
+    except ImportError:
+        return {"page_images_skipped": "本机没装 PyMuPDF"}
+    if len(order) > MAX_THUMBNAIL_PAGES:
+        return {"page_images_skipped": f"超过 {MAX_THUMBNAIL_PAGES} 张幻灯片"}
+    try:
+        pdf = convert_office(path, "pdf", cache, f"{key}-slides", timeout)
+    except (LookupError, ConversionError, OSError) as exc:
+        return {"page_images_skipped": "需要 LibreOffice" if isinstance(exc, LookupError) else f"转 PDF 失败：{str(exc)[:80]}"}
+    assets = cache.parent / ASSETS_DIRECTORY
+    images: dict[str, str] = {}
+    with pymupdf.open(long_path(pdf)) as document:
+        if document.page_count != len(order):
+            # Pictures beside the wrong slide would mislead; none is better.
+            return {"page_images_skipped": f"导出的 {document.page_count} 页和 {len(order)} 张幻灯片对不上"}
+        for page, number in zip(document, order):
+            name = f"img-{short_hash(f'{key}|slide {number}', 16)}.png"
+            if not (assets / name).is_file():
+                assets.mkdir(parents=True, exist_ok=True)
+                page.get_pixmap(dpi=THUMBNAIL_DPI).save(str(assets / name))
+            images[str(number)] = name
+        found = page_pictures(document, pymupdf, assets)
+    # The PDF numbers pages 1, 2, 3; the text numbers slides by their file.
+    pictures = {str(order[int(page) - 1]): names for page, names in found.items()}
+    return {"page_images": images, "page_pictures": pictures, "page_unit": "slide"}
 
 
 def xlsx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
@@ -309,6 +365,7 @@ def read_item(path: Path, extension: str, cache: Path, key: str, timeout: int) -
         units, facts = docx_units(path)
     elif extension == ".pptx":
         units, facts = pptx_units(path)
+        facts.update(slide_pictures(path, cache, key, timeout))
     elif extension == ".xlsx":
         units, facts = xlsx_units(path)
     elif extension == ".pdf":
