@@ -13,9 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-RENDERS = "建站资料/产品/SS50/渲染图"
-PHOTOS = "建站资料/产品/SS50/实拍图"
-VIDEOS = "建站资料/产品/SS50/渲染视频"
+RENDERS = "建站资料/产品/X100/渲染图"
+PHOTOS = "建站资料/产品/X100/实拍图"
+VIDEOS = "建站资料/产品/X100/渲染视频"
 
 
 def media(item_id: str, relpath: str, kind: str, **extra) -> dict:
@@ -83,12 +83,12 @@ class MediaFolderTests(unittest.TestCase):
                          {"r1": "media_kept", "p1": "media_awaiting_client", "v1": "media_kept"})
         files = sorted(entry["file"] for entry in self.pictures().values())
         self.assertEqual(len(files), 2)
-        self.assertTrue(all(f.startswith("资料包素材/产品/SS50/渲染图/渲染图-") for f in files), files)
+        self.assertTrue(all(f.startswith("资料包素材/产品/X100/渲染图/渲染图-") for f in files), files)
 
         index = (self.build / "vault/03_正式知识/90_素材/00_素材索引.md").read_text(encoding="utf-8")
         self.assertIn("## 留在初筛包里的素材", index)
-        self.assertIn("| 建站资料/产品/SS50/渲染视频 | 视频 1 个 | 已保留，内容待转写 |", index)
-        self.assertIn("| 建站资料/产品/SS50/实拍图 | 图片 2 个 | 待客户确认（整个文件夹） |", index)
+        self.assertIn("| 建站资料/产品/X100/渲染视频 | 视频 1 个 | 已保留，内容待转写 |", index)
+        self.assertIn("| 建站资料/产品/X100/实拍图 | 图片 2 个 | 待客户确认（整个文件夹） |", index)
 
         with (self.build / "客户确认表.csv").open(encoding="utf-8-sig", newline="") as handle:
             rows = [row for row in csv.DictReader(handle) if "实拍图" in row["原文件名"]]
@@ -97,7 +97,7 @@ class MediaFolderTests(unittest.TestCase):
         self.assertIn("2 个文件", rows[0]["原文件名"])
 
         name_map = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
-        self.assertIn("进素材库：90_素材/资料包素材/产品/SS50/渲染图/", name_map)
+        self.assertIn("进素材库：90_素材/资料包素材/产品/X100/渲染图/", name_map)
         self.assertIn("视频或音频，原件留在初筛包", name_map)
 
         verified = self.run_script("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),

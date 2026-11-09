@@ -100,7 +100,11 @@
   `{"company": [{"name": "环保", "keywords": ["recycled", "再生"], "how": "向客户要环保认证"}, {"name": "销售市场", "remove": true}]}`。
   模块名用 company、product、solution、case、industry、faq、other。
 - `vocabularies` 选用 `assets/vocabulary-<行业>.txt`。词表只放行业通用词，不放客户名、品牌名或款号前缀。
-- `client_answers` 和 `client_answers_units` 一般由 `apply_answers.py` 写。
+- `client_answers` 和 `client_answers_units` 一般由 `apply_answers.py` 写。它读建库的 `客户确认表.csv`，也读初筛包的 `客户确认表.xlsx`（`--answers` 给 .xlsx 路径，按表头找列，Excel 或 WPS 存过的都能读）。初筛表的编号这样对应：
+  - `<item_id>#<n>`：位置是整份文件，或不在该文件的 `pending_units` 里，写 `client_answers[item_id]`；否则写 `client_answers_units[item_id][位置]`。
+  - `folder:<文件夹>`：写给 manifest 里 `review_group` 是这个文件夹的每个文件。
+  - 知识点编号：写 `client_answers[knowledge_id]`。待客户审核的知识点，回答“保留”后进业务要点。
+  - 读不懂或找不到的编号列在输出的 `unclear` 里。“需要修改”和备注只记进 `client-notes.jsonl`。
 
 ## review-decisions.json
 
@@ -483,6 +487,7 @@
 | 运行目录已经删了 | 用 `--package <初筛包> --vault <项目目录>` 重建，从知识库恢复配置和各种判断 |
 | 来了新资料 | 先筛成小初筛包，加一个 `--package` 重跑 |
 | 客户回复确认表 | `apply_answers.py` 读回，再重跑、发布；“以哪个为准”这类回答只记备注 |
+| 客户先填了初筛包的确认表 | `apply_answers.py --answers <初筛包>/客户确认表.xlsx`，再建库；初筛包不改 |
 | 官网一个月没读 | 重跑 `fetch_website.py` |
 | 词表或规则更新 | 直接重跑 |
 | 每月 | `kb_status.py --monthly` 更新总览，写体检报告 |

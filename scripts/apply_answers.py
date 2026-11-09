@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read the client's answers back from 客户确认表.csv into kb-config.json.
+"""Read the client's answers back into kb-config.json.
+
+Two tables carry answers: the build's own 客户确认表.csv, and the screening package's
+客户确认表.xlsx, which the client may already have filled in before the knowledge base
+was built. Either one is read with --answers, so the client never answers twice.
 
 Only yes/no answers to "can this be used" questions change the build. Anything else, such
 as which fabric is right, is kept as a note for a person, because turning free text into
@@ -12,18 +16,26 @@ import argparse
 import csv
 import json
 import shutil
+import re
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
-from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, write_json, write_jsonl
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, load_jsonl, write_json, write_jsonl
 
 
 KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
 DROP = {"不用", "不可以", "删除", "不同意", "否", "drop", "no", "n"}
 ANSWER_COLUMN = "回答（保留 / 不用 / 文字）"
 QUESTION_COLUMN = "要确认的问题"
+SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+# The screening workbook's columns, found by their headers.
+SCREENING_COLUMNS = {"编号": "id", "您的选择": "choice", "备注": "note", "需要您确认什么": "question",
+                     "在文件里的位置": "location", "来自哪个文件": "source"}
+WHOLE_FILE = {"", "整份文件", "整个文件", "整个文件夹", "全部", "全文"}
 
 
 def normalized(answer: str) -> str | None:
@@ -31,11 +43,102 @@ def normalized(answer: str) -> str | None:
     return "keep" if value in KEEP else "drop" if value in DROP else None
 
 
+def read_screening_workbook(path: Path) -> list[dict[str, str]]:
+    """Rows of the screening package's 客户确认表.xlsx, as saved by Excel or WPS."""
+    with zipfile.ZipFile(path) as archive:
+        shared = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            for entry in ET.fromstring(archive.read("xl/sharedStrings.xml")).findall(f"{SHEET_NS}si"):
+                shared.append("".join(node.text or "" for node in entry.iter(f"{SHEET_NS}t")))
+        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+    table = []
+    for row in sheet.iter(f"{SHEET_NS}row"):
+        values = {}
+        for cell in row.findall(f"{SHEET_NS}c"):
+            inline, value = cell.find(f"{SHEET_NS}is"), cell.find(f"{SHEET_NS}v")
+            if inline is not None:
+                text = "".join(node.text or "" for node in inline.iter(f"{SHEET_NS}t"))
+            elif cell.get("t") == "s" and value is not None and value.text:
+                text = shared[int(value.text)]
+            else:
+                text = value.text if value is not None and value.text else ""
+            values[re.sub(r"\d", "", cell.get("r", ""))] = text
+        table.append(values)
+    header = next((i for i, values in enumerate(table) if "编号" in values.values()), None)
+    if header is None:
+        raise SystemExit(f"不是初筛包的客户确认表，找不到“编号”一列：{path}")
+    columns = {letter: SCREENING_COLUMNS[name] for letter, name in table[header].items() if name in SCREENING_COLUMNS}
+    rows = []
+    for values in table[header + 1:]:
+        row = {field: values.get(letter, "").strip() for letter, field in columns.items()}
+        if row.get("id"):
+            rows.append(row)
+    return rows
+
+
+def screening_targets(package: Path) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]], set[str]]:
+    """What each workbook number points at: assets by id, folders by group, knowledge points."""
+    assets = {a["item_id"]: a for a in load_json(package / MANIFEST_NAME).get("assets", [])}
+    groups: dict[str, list[str]] = {}
+    for asset in assets.values():
+        if asset.get("review_group"):
+            groups.setdefault(asset["review_group"], []).append(asset["item_id"])
+    points_file = package / POINTS_NAME
+    points = {str(p.get("knowledge_id")) for p in load_jsonl(points_file)} if points_file.is_file() else set()
+    return assets, groups, points
+
+
+def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, list]:
+    """Turn the screening workbook's answers into the same config entries as the CSV."""
+    assets, groups, points = screening_targets(path.parent)
+    applied, notes, unclear = [], [], []
+    for row in read_screening_workbook(path):
+        number, answer, note = row["id"], row.get("choice", ""), row.get("note", "")
+        if not answer and not note:
+            continue
+        decision = normalized(answer) if answer else None
+        if note or (answer and decision is None):
+            # 需要修改 and free remarks are for a person to read, not facts for the build.
+            notes.append({"id": number, "question": row.get("question", ""), "answer": answer, "note": note,
+                          "source": row.get("source", ""), "from": "初筛客户确认表",
+                          "at": datetime.now().isoformat(timespec="seconds")})
+        if decision is None:
+            if answer and answer != "需要修改":
+                unclear.append({"id": number, "answer": answer})
+            continue
+        if number.startswith("folder:"):
+            members = groups.get(number[len("folder:"):], [])
+            if not members:
+                unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这个文件夹"})
+                continue
+            for item_id in members:
+                config["client_answers"][item_id] = decision
+        elif "#" in number and number.rsplit("#", 1)[0] in assets:
+            asked = assets[number.rsplit("#", 1)[0]]
+            location = row.get("location", "")
+            # The workbook asks once for the same file kept in several folders.
+            content = asked.get("source_hash")
+            copies = [a for a in assets.values() if content and a.get("source_hash") == content] or [asked]
+            for asset in copies:
+                if location in WHOLE_FILE or location not in (asset.get("pending_units") or []):
+                    config["client_answers"][asset["item_id"]] = decision
+                else:
+                    config["client_answers_units"].setdefault(asset["item_id"], {})[location] = decision
+        elif number in points:
+            config["client_answers"][number] = decision
+        else:
+            unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这一项"})
+            continue
+        applied.append({"id": number, "decision": decision})
+    return applied, notes, unclear
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply answers from 客户确认表.csv to kb-config.json.")
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--config", required=True, help="kb-config.json to update")
-    parser.add_argument("--answers", help="Filled CSV; defaults to the build's 客户确认表.csv")
+    parser.add_argument("--answers", help="Filled 客户确认表.csv of the build (default), or the screening "
+                        "package's 客户确认表.xlsx")
     return parser.parse_args()
 
 
@@ -43,17 +146,22 @@ def main() -> int:
     args = parse_args()
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     config_path = Path(args.config).resolve()
-    # Each answerable row has its own number (P-007-CUS-002.1), even inside a grouped entry.
-    records = {item["sub_id"]: {**item, "id": item["sub_id"]} for r in load_json(build / "governance.json").get("CUS", [])
-               for item in r.get("items", [])}
     answers_path = Path(args.answers).resolve() if args.answers else build / "客户确认表.csv"
-    with answers_path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-
     config: dict[str, Any] = load_json(config_path)
     config.setdefault("client_answers", {})
     config.setdefault("client_answers_units", {})
-    applied, notes, unclear = [], [], []
+    records: dict[str, dict[str, Any]] = {}
+    if answers_path.suffix.casefold() == ".xlsx":
+        # The screening workbook can be read before the first build.
+        applied, notes, unclear = apply_screening(answers_path, config)
+        rows: list[dict[str, str]] = []
+    else:
+        # Each answerable row has its own number (P-007-CUS-002.1), even inside a grouped entry.
+        records = {item["sub_id"]: {**item, "id": item["sub_id"]}
+                   for r in load_json(build / "governance.json").get("CUS", []) for item in r.get("items", [])}
+        with answers_path.open(encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        applied, notes, unclear = [], [], []
     for row in rows:
         answer = (row.get(ANSWER_COLUMN) or row.get("回答") or "").strip()
         record = records.get(row.get("编号", ""))

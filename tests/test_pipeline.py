@@ -151,6 +151,25 @@ class PipelineTests(unittest.TestCase):
     def decide(self, **decisions) -> None:
         (self.build / "review-decisions.json").write_text(json.dumps(decisions, ensure_ascii=False), encoding="utf-8")
 
+    def test_point_waiting_for_the_client_enters_once_kept(self) -> None:
+        waiting = {"knowledge_id": "k2", "knowledge_point": "北美客户案例：交期四周。", "source_id": "c1",
+                   "locator": "邮件2", "scope": "single_communication", "usable_as_fact": False,
+                   "pending_client_review": True}
+        with (self.package / "C-知识点/knowledge-points.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(waiting, ensure_ascii=False) + "\n")
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("北美客户案例", self.published_text())
+
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["client_answers"] = {"k2": "keep"}
+        self.config.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("北美客户案例：交期四周。", self.published_text())
+        verified = self.verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+
     def test_free_text_tiers_are_published_as_pending_review_by_default(self) -> None:
         result = self.run_pipeline("--tiers", "T1,T2")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

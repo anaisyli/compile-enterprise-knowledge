@@ -932,7 +932,12 @@ def main() -> int:
     points = []
     for point in (record for path in point_files for record in load_jsonl(path)):
         route = routes.get(point.get("source_id"))
-        if not route or route["route"] != "points" or not point.get("usable_as_fact"):
+        if not route or route["route"] != "points":
+            continue
+        # A point waiting for the client enters once the client said keep (apply_answers.py).
+        if not point.get("usable_as_fact") and not (
+            point.get("pending_client_review") and config["client_answers"].get(str(point.get("knowledge_id"))) == "keep"
+        ):
             continue
         points.append(point)
     if points:
