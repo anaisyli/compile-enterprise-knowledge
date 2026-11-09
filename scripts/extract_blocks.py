@@ -799,6 +799,13 @@ def main() -> int:
         # A picture someone (MinerU or the model) has read enters with what was read in it.
         if route["reason"] == "image_needs_review" and any(u["text"].strip() for u in load_units([ocr_dir], item_id)):
             route.update(route="kb", reason="image_read", tier="T2")
+    gate_path = build / "sample-gate.json"
+    if gate_path.is_file():
+        # A kind of file not confirmed yet is read on its sample only; the rest wait, they are not unreadable.
+        allowed = set(load_json(gate_path)["allowed"])
+        for item_id, route in routes.items():
+            if route["route"] == "kb" and item_id not in allowed:
+                route.update(route="hold", reason="awaiting_sample")
     reviewed_columns = build / "cell-review" / "sheet-columns.json"
     column_overrides = {**config.get("sheet_columns", {}), **(load_json(reviewed_columns) if reviewed_columns.is_file() else {})}
 

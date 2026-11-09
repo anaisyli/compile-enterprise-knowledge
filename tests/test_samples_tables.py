@@ -82,5 +82,65 @@ class SampleTests(Base):
         self.assertIn("已确认", page.read_text(encoding="utf-8"))
 
 
+class SampleFirstTests(Base):
+    """On a first build only one file of each kind is extracted; the rest wait for a confirmation."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.clear_catalog_pending()
+        self.edit_config(project_id="P-999", sample_review=True)
+        path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        second = {**manifest["assets"][0], "item_id": "a3", "display_name": "Winter.pdf", "path": "A/Winter.pdf",
+                  "source_hash": "3" * 64, "byte_size": 10}
+        manifest["assets"].append(second)
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        (self.text / "a3.json").write_text(json.dumps({"item_id": "a3", "units": [
+            {"locator": "page 1", "text": "WINTER SERIES\nNTX W-001 FLEECE VEST"}]}), encoding="utf-8")
+
+    def catalogs(self) -> list[str]:
+        return sorted(p.name for p in self.clean.rglob("产品画册-*.md"))
+
+    def test_one_sample_per_kind_first_then_the_batch_after_confirmation(self) -> None:
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual(len(self.catalogs()), 1)  # One of the two catalogs, not both.
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual(sum(r["reason"] == "awaiting_sample" for r in routes.values()), 1)
+        plan = (self.build / "vault/02_源资料/处理计划与样例.md").read_text(encoding="utf-8")
+        self.assertIn("| 产品画册 PDF | 2 |", plan)
+        self.assertIn("确认后提取其余 1 份", plan)
+        self.assertIn("PyMuPDF 按版面分栏读文字", plan)  # How the kind is extracted, said beside its sample.
+        self.assertNotIn("等样例确认后提取", plan.split("## 不处理的资料")[1])
+        (self.build / "sample-decisions.json").write_text(json.dumps({"catalog_pdf": {"status": "已确认"}}), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual(self.catalogs(), ["产品画册-Catalog.md", "产品画册-Winter.md"])
+        plan = (self.build / "vault/02_源资料/处理计划与样例.md").read_text(encoding="utf-8")
+        self.assertNotIn("确认后提取", plan.split("## 特殊结构")[0].split("## 不处理的资料")[0].split("| 产品画册 PDF |")[1].split("\n")[0])
+
+    def test_text_extraction_reads_only_the_sample_of_an_unconfirmed_kind(self) -> None:
+        import hashlib
+        package = self.root / "small"
+        (package / "审计记录").mkdir(parents=True)
+        (package / "A").mkdir()
+        assets = []
+        for item_id, size in (("t1", 10), ("t2", 20), ("t3", 30)):
+            data = (item_id * size).encode()
+            (package / "A" / f"{item_id}.txt").write_bytes(data)
+            assets.append({"item_id": item_id, "display_name": f"{item_id}.txt", "decision": "A", "resource_type": "marketing",
+                           "asset_kind": "document", "source_hash": hashlib.sha256(data).hexdigest(), "path": f"A/{item_id}.txt",
+                           "copy_status": "copied", "usable_as_fact": True, "byte_size": len(data)})
+        (package / "审计记录/package-manifest.json").write_text(json.dumps({"assets": assets}), encoding="utf-8")
+        out = self.root / "small-run"
+        self.assertEqual(run("sample_gate.py", "--package", str(package), "--out", str(out), "--config", str(self.config)).returncode, 0)
+        self.assertEqual(run("extract_package_text.py", "--package", str(package), "--out", str(out)).returncode, 0)
+        read = sorted(p.stem for p in (out / "04_知识库构建/package-text").glob("t*.json"))
+        self.assertEqual(read, ["t2"])  # The file of middling size is the sample.
+
+    def test_a_quotation_confirmed_by_an_earlier_version_counts_for_spreadsheets(self) -> None:
+        from samples import is_confirmed
+        self.assertTrue(is_confirmed("spreadsheet", {"quotation": {"status": "已确认"}}, {}))
+        self.assertFalse(is_confirmed("word", {"quotation": {"status": "已确认"}}, {}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,7 +128,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     # Until a kind of file is confirmed on its example, only the example is looked at page by page.
     docs = load_jsonl(build / "docs.jsonl")
     by_item = {d["item_id"]: d for d in docs}
-    samples = set(choose_samples(docs, config).values())
+    samples = set(choose_samples(docs, config, build).values())
     decisions = load_decisions(build)
     deferred: dict[str, int] = {}
     for item_id, route in sorted(routes.items()):

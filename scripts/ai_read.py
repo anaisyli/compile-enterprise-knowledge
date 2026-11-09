@@ -77,9 +77,14 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
     pictures = folder / "pages"
     pictures.mkdir(parents=True, exist_ok=True)
     todo, skipped = [], []
+    gate_path = build / "sample-gate.json"
+    # Pictures of a kind nobody has confirmed yet: only the sample is read now.
+    allowed = set(load_json(gate_path)["allowed"]) if gate_path.is_file() else None
     for item_id, route in sorted(routes.items()):
         asset = files.get(item_id)
         if not asset or not Path(long_path(asset["file"])).is_file():
+            continue
+        if allowed is not None and item_id not in allowed:
             continue
         name = route.get("display_name") or asset["file"].name
         if route.get("route") == "hold" and route.get("reason") == "image_needs_review" and asset["file"].suffix.casefold() in PICTURES:

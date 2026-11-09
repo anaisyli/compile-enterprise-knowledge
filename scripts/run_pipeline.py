@@ -78,6 +78,10 @@ def main() -> int:
         if workbook.is_file() and args.config:
             if step("apply_answers.py", "--out", args.out, "--config", args.config, "--answers", str(workbook)):
                 print(f"   读不了初筛包的客户确认表，跳过：{workbook}")
+    # Before anything is read: one sample of each kind of file nobody has confirmed yet.
+    gate = ["--out", args.out, *repeat("--package", args.package), *(["--config", args.config] if args.config else [])]
+    if step("sample_gate.py", *gate):
+        return 1
     if not args.text_dir:
         # Colleagues hand over the package, not the screening work folder, so read it again.
         code = step("extract_package_text.py", *repeat("--package", args.package), "--out", args.out)

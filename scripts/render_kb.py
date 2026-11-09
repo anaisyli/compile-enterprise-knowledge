@@ -41,7 +41,7 @@ from kb_common import (
     write_text,
 )
 from review_cells import progress_of, t3_gate
-from samples import PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed, load_decisions, status_of
+from samples import PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed, load_decisions, load_gate, status_of
 
 
 SOURCE_ROOT = "02_源资料/10_净化原文"
@@ -55,7 +55,7 @@ REASON_LABELS = {
     "third_party_material": "竞品或第三方资料", "writing_operations_material": "写作运营资料", "not_copied_restricted": "受限未复制",
     "no_extractable_content": "读不出可用内容", "unresolved_item": "初筛待定，未确认", "image_needs_review": "图片待识别",
     "unreadable_removal_location": "清理位置看不懂", "client_said_no": "客户说不用", "unknown_decision": "初筛分类不明",
-    "website_needs_browser": "要用浏览器读取",
+    "website_needs_browser": "要用浏览器读取", "awaiting_sample": "等样例确认后提取",
     "media_kept": "按文件夹保留的图片和视频", "media_awaiting_client": "整个文件夹待客户确认",
 }
 VISIBLE = {"kept", "flagged", "pending_client"}
@@ -443,7 +443,8 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     a person has confirmed the example. Returns the kinds still waiting for confirmation."""
     entered = [docs[d] for d in published]
     decisions = load_decisions(build)
-    samples = choose_samples(entered, config)
+    samples = choose_samples(entered, config, build)
+    gate = load_gate(build).get("kinds", {})
     check_dir = build / "page-check"
     todo = load_jsonl(check_dir / "todo.jsonl")
     done = load_json(check_dir / "results.json") if (check_dir / "results.json").is_file() else {}
@@ -455,7 +456,7 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
             checks[doc_type(by_item[entry["item_id"]])] += 1
     maps = sorted({(Path(r["package"]) / NAME_MAP_PAGE).resolve().as_uri() for r in routes.values() if r.get("package")})
     lines = ["# 处理计划与样例", "", MARKER_PLAN,
-             "每类资料先处理一份样例给人看，确认后再统一处理同类。还没确认的类，费时的工作（逐页对照原图核对）只做样例那一份。", "",
+             "每类文件先只提取一份样例给人看，确认后再批量提取同类。还没确认的类，这次只提取了样例那一份，其余的在“要做的事”里写着“确认后提取”。", "",
              "- 怎么确认：在下表“确认状态”一列写“已确认”，或者写“要改：……”说明怎么改；也可以直接告诉 AI。下次建库会读回来，不会被覆盖。",
              "- 原文件：点“打开原件”直接打开初筛包里的原文件。原名对照：" + "、".join(f"[打开对照表]({uri})" for uri in maps), ""]
     lines.extend(["## 按资料类型", "", "| 类型 | 份数 | 在初筛包哪里 | 怎么处理 | 要做的事 | 样例 | 确认状态 |",
@@ -463,12 +464,21 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     waiting: list[str] = []
     for kind, (label, how) in TYPES.items():
         members = [d for d in entered if doc_type(d) == kind]
-        if not members:
+        info = gate.get(kind, {})
+        if not members and not info:
             continue
         folders = Counter(str(Path(d.get("package_path") or "").parent.as_posix()) if not str(d.get("package_path", "")).startswith("http")
                           else "官网" for d in members)
+        if info.get("folders"):
+            folders = Counter(info["folders"])  # Every file of the kind, read or waiting.
         where = "、".join(f"{f}（{n} 份）" for f, n in folders.most_common(3)) + (" 等" if len(folders) > 3 else "")
         todo_text = []
+        if info.get("waiting"):
+            todo_text.append(f"确认后提取其余 {info['waiting']} 份")
+        # What reading the files found they are: quotes, product lists, other people's compilations.
+        roles = Counter("报价单" if d.get("kind") == "quotation" else "产品表" if d.get("tier") == "T3" else
+                        "参考整理稿（不当公司事实）" if d.get("role") == "reference" else "" for d in members)
+        found_roles = "；".join(f"其中 {n} 份是{r}" for r, n in roles.items() if r)
         if checks[kind] or deferred.get(kind):
             todo_text.append(f"对照原图核对 {checks[kind]} 页" + (f"，确认后再核对其余 {deferred[kind]} 页" if deferred.get(kind) else ""))
         ocr = sum(len(remaining_ocr_pages(build, d["item_id"], status_info.get(d["item_id"], {}).get("ocr_pages") or [])) for d in members)
@@ -482,7 +492,9 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
         status = status_of(kind, decisions)
         if not is_confirmed(kind, decisions, config):
             waiting.append(label)
-        lines.append(f"| {label} | {len(members)} | {escape_cell(where)} | {how} | {'；'.join(todo_text) or '—'} | {sample_text} | {status} |")
+        count = info.get("total", len(members))
+        how_text = how + (f"。{found_roles}" if found_roles else "")
+        lines.append(f"| {label} | {count} | {escape_cell(where)} | {how_text} | {'；'.join(todo_text) or '—'} | {sample_text} | {status} |")
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for result in done.values():
         if result.get("structure") and result["item_id"] in by_item:
@@ -497,7 +509,8 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
             if not is_confirmed(key, decisions, config):
                 waiting.append(f"结构：{name}")
             lines.append(f"| {name} | {len(results)} | {'、'.join(links[:3])}{' 等' if len(links) > 3 else ''} | {links[0]} | {status_of(key, decisions)} |")
-    held = Counter((r.get("decision") or "", reason_label(r["reason"])) for r in routes.values() if r["route"] in {"hold", "skip"})
+    held = Counter((r.get("decision") or "", reason_label(r["reason"])) for r in routes.values()
+                   if r["route"] in {"hold", "skip"} and r["reason"] != "awaiting_sample")  # Those are in the rows above.
     lines.extend(["", "## 不处理的资料", "", "| 初筛类别 | 原因 | 份数 |", "| --- | --- | ---: |"])
     lines.extend(f"| {DECISION_LABELS.get(code, code)} | {reason} | {count} |" for (code, reason), count in sorted(held.items()))
     write_text(build / "vault" / PLAN_PAGE, "\n".join(lines) + "\n")

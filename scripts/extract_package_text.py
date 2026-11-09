@@ -406,11 +406,16 @@ def main() -> int:
     status_path = text_dir / "extract-status.json"
     statuses: dict[str, Any] = load_json(status_path).get("items", {}) if status_path.is_file() else {}
 
+    # Kinds of file nobody has confirmed yet are read on their sample only (sample_gate.py).
+    gate_path = build / "sample-gate.json"
+    allowed = set(load_json(gate_path)["allowed"]) if gate_path.is_file() else None
     jobs = []
     for raw in args.package:
         package = Path(raw).resolve()
         for asset in load_json(package / MANIFEST_NAME)["assets"]:
             if not wanted(asset):
+                continue
+            if allowed is not None and asset["item_id"] not in allowed and asset.get("decision") != "E":
                 continue
             previous = statuses.get(asset["item_id"], {})
             needed = reader_version(asset.get("display_name") or asset["path"])
