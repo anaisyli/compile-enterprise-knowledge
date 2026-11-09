@@ -4,7 +4,8 @@
 prepare  packs the source blocks for each topic, deduplicated, with style codes the script
          found itself, and writes the writing rules for the model.
 check    refuses any line without a citation, any number or style code the cited source
-         does not contain, and any line that cites a flagged passage without carrying ⚠.
+         does not contain, any line that cites a flagged passage without carrying ⚠, and a
+         page that cites fewer than half of the documents it was given.
 build    turns citations into links and writes the pages.
 
 The model organizes and summarizes; it does not add facts. The checker is what holds it
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import defaultdict
@@ -42,6 +44,8 @@ LINE_MAX = 30
 SPLIT_AT = 120
 SPLIT_MAX = 150
 OUTSIDE_HITS = 2
+# A page has to cite at least this share of the documents its input.md came from.
+COVERAGE = 0.5
 WEBSITE_PRODUCTS = "官网页面/"
 WEBSITE_COMPANY = "官网页面/公司与服务"
 
@@ -81,6 +85,8 @@ TEMPLATE = """# 整理页写作规则
 8. 最后写 `## 需核实`，列出有冲突、有风险或来源单一的说法。
 9. 标题写这一页讲的范围：“产品总览”要概括 input.md 里每份资料的产品线，不能只写其中一类。
    想换标题就改 `# 标题`，重跑时以它为准。
+10. 写全：input.md 里的每份资料至少写到一条，同一份资料里不同的款、参数、场景分开写，不要只挑几份概括。
+   一页引用到的资料不到 input.md 里资料的一半，校验不通过，并列出没写到的资料。
 
 写好后保存为同目录的 page.md。每个准备好的主题都要写；原文实在不够写的，在 kb-config.json 的
 "skip_topics" 里写明主题编号和理由，例如 {"faq": "原文里问答太少"}，否则校验不通过。
@@ -107,12 +113,16 @@ def topics_for(config: dict[str, Any], docs: dict[str, dict[str, Any]], statuses
         topics.append({"slug": f"cat-{safe_name(category)}", "title": category, "file": f"产品大类-{category}",
                        "module": "product", "sections": "product",
                        "folders": [f"官网页面/{category}"], "gate": rf"(?i){re.escape(category)}" if category else r"(?!)"})
-    if not categories:
-        # Without a website each catalog is a product line of its own.
-        for doc in sorted(docs.values(), key=lambda d: d["title"]):
-            if doc.get("folder") == "产品画册" and statuses.get(doc["doc_id"]) in USABLE_DOCS:
-                name = doc["title"].split("-", 1)[-1]
-                topics.append({"slug": f"line-{safe_name(name)}", "title": f"产品系列-{name}", "file": f"产品系列-{name}", "module": "product",
+    # Each catalog is a product line of its own, website or not: the category pages read the
+    # website, and a catalog's own series would otherwise only get a few lines in the overview.
+    slugs = {t["slug"] for t in topics}
+    for doc in sorted(docs.values(), key=lambda d: d["title"]):
+        if doc.get("folder") == "产品画册" and statuses.get(doc["doc_id"]) in USABLE_DOCS:
+            name = doc["title"].split("-", 1)[-1]
+            slug = f"line-{safe_name(name)}"
+            if slug not in slugs:  # A config that lists its topics may name the series itself.
+                slugs.add(slug)
+                topics.append({"slug": slug, "title": f"产品系列-{name}", "file": f"产品系列-{name}", "module": "product",
                                "sections": "product", "doc_ids": [doc["doc_id"]], "gate": r"(?!)"})
     return topics
 
@@ -320,6 +330,7 @@ def check(out: Path) -> dict[str, Any]:
     build = out / BUILD_DIRECTORY
     blocks = {b["block_id"]: b for b in load_jsonl(build / "blocks.jsonl")}
     statuses = load_json(build / "statuses.json") if (build / "statuses.json").is_file() else {}
+    docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")} if (build / "docs.jsonl").is_file() else {}
     results = {}
     for folder in sorted((build / CURATION).glob("*")):
         page_path, topic_path = folder / "page.md", folder / "topic.json"
@@ -356,7 +367,27 @@ def check(out: Path) -> dict[str, Any]:
             for name, pattern in HARD_PATTERNS.items():
                 if pattern.search(bare):
                     errors.append(f"第 {number} 行含禁止内容（{name}）")
-        results[folder.name] = {"title": page_title(page) or topic["title"], "ok": not errors, "errors": errors[:30]}
+        # A page that cites a handful of the documents it was given is a summary, not the knowledge.
+        usable = {b for b in topic["blocks"] if b in blocks and blocks[b]["status"] in USABLE
+                  and statuses.get(blocks[b]["doc_id"], "有效") in USABLE_DOCS}
+        page_cites = set(CITATION.findall(page))
+        if topic.get("by_line"):
+            # The overview speaks for every product line once; the line pages hold the detail.
+            given = {n for n, s in topic.get("sections", {}).items() if usable & set(s.get("blocks", []))}
+            used = {n for n in given if page_cites & set(topic["sections"][n]["blocks"])}
+            needed, unit, left = len(given), "条产品线", sorted(given - used)
+        else:
+            given = {blocks[b]["doc_id"] for b in usable}
+            used = {blocks[c]["doc_id"] for c in page_cites if c in blocks} & given
+            needed, unit = math.ceil(len(given) * COVERAGE), "份资料"
+            left = sorted(docs.get(d, {}).get("title", d) for d in given - used)
+        coverage = {"given": len(given), "cited": len(used)}
+        if len(used) < needed:
+            shown = "、".join(left[:12]) + (f" 等 {len(left)} 个" if len(left) > 12 else "")
+            rule = "每条都要写到" if topic.get("by_line") else "至少要写到一半"
+            errors.append(f"只写到 {len(used)}/{len(given)} {unit}，{rule}；没写到：{shown}")
+        results[folder.name] = {"title": page_title(page) or topic["title"], "ok": not errors, "errors": errors[:30],
+                                "coverage": coverage}
     write_json(build / "curation-report.json", results)
     return results
 
