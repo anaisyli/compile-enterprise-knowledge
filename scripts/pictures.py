@@ -41,7 +41,13 @@ NUMBERED, FROM_SOURCE, FROM_AI = "编号", "原文", "AI看图"
 CERTIFICATE = re.compile(r"(?i)certif|证书|认证|\bISO\s?\d|\bBSCI\b|OEKO|\bSGS\b|\bGRS\b|test report|检测报告")
 FACTORY = re.compile(r"(?i)factory|workshop|machine|equipment|\bloom|warehouse|工厂|车间|设备|织机|仓库")
 MEANINGLESS_ALT = re.compile(r"(?i)^(?:img|image|picture|photo|pic|dsc|banner|logo|icon)?[\s_\-]*\d*$|\.(?:jpe?g|png|webp|gif)$")
-FOLDERS = ("产品", "工厂与设备", "证书", "公司", "报价单参考图", "产品表图片", "页面图", "其他")
+FOLDERS = ("产品", "资料包素材", "工厂与设备", "证书", "公司", "报价单参考图", "产品表图片", "页面图", "其他")
+# Pictures screening kept by folder sit under their original folders, the last few levels of them:
+# enough to tell one product's 白底图 from another's without paths too long for Windows.
+MEDIA_ROOT = "资料包素材"
+MEDIA_DEPTH = 3
+MEDIA_LIST = "media.json"
+KIND_LABELS = {"image": "图片", "video": "视频", "audio": "音频"}
 
 
 def own_code_pattern(prefixes: list[str]) -> re.Pattern[str] | None:
@@ -185,7 +191,27 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 add(picture["id"], doc_id, own[0]["group"] if own else blocks[0]["group"], folder=folder, prefix=folder.split("/")[-1], label=alt or title,
                     line="" if company else category, alt=alt or title, use=CHECK if flagged else PUBLIC,
                     english_source=alt or doc.get("original_name", ""), location=section)
+    for entry in load_media(build):
+        if not entry.get("id"):
+            continue
+        folders = media_folders(entry["relpath"], namer)
+        stem = Path(entry["relpath"]).stem
+        label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
+        prefix = folders[-1] if folders else ""
+        add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
+            alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem,
+            location="/".join(folders) or "根目录")
     return found
+
+
+def load_media(build: Path) -> list[dict[str, Any]]:
+    return load_json(build / MEDIA_LIST) if (build / MEDIA_LIST).is_file() else []
+
+
+def media_folders(relpath: str, namer: Namer) -> list[str]:
+    """The last folders above a file, each safe for a path; one naming a customer becomes 其他."""
+    parts = [p for p in relpath.replace("\\", "/").split("/")[:-1] if p]
+    return [("其他" if namer.forbidden and namer.forbidden.search(p) else safe_name(p, "其他")) for p in parts[-MEDIA_DEPTH:]]
 
 
 def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str, Any], namer: Namer) -> dict[str, dict[str, Any]]:
@@ -235,6 +261,8 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
              f"- **{CHECK}**：原文有 ⚠ 或名字是 AI 看图起的，用前看一眼原图和原文。",
              f"- **{INTERNAL}**：报价单、产品表里的图（多是买家询价时发来的款式）和整页截图，不要上官网。",
              f"- 名字是“{NUMBERED}”的，旁边没有能用的文字；可以让 AI 看图起名（pictures.py export / collect）。",
+             f"- **{MEDIA_ROOT}**：初筛抽看样本后按文件夹整批保留的图片（比如建站资料里的渲染图、白底图），"
+             "放在原来的文件夹下（保留最后三层），名字取自文件夹和原文件名。视频、音频和较大的图片见最后一节。",
              f"- 建站用的清单（含英文文件名）：[[00_素材清单.csv]]。", ""]
     by_folder: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries.values():
@@ -244,11 +272,13 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
         rows = sorted(by_folder[folder], key=lambda e: e["file"])
         lines += [f"## {folder}（{len(rows)} 张）", "", "| 图片 | 说明 | 能否用于官网 | 名字来自 | 出现在 | 位置 |", "| --- | --- | --- | --- | --- | --- |"]
         for entry in rows:
-            doc = docs[entry["doc_id"]]
-            link = f"[[{Path(doc['file_name']).stem}#{entry['group']}|{doc['title']}]]" + (f" 等 {entry['more'] + 1} 处" if entry["more"] else "")
+            doc = docs.get(entry["doc_id"])
+            link = (f"[[{Path(doc['file_name']).stem}#{entry['group']}|{doc['title']}]]" if doc else "资料包原文件夹") \
+                + (f" 等 {entry['more'] + 1} 处" if entry["more"] else "")
             lines.append(f"| [[{Path(entry['file']).name}]] | {escape(entry['alt'])} | {entry['use']} | {entry['named_by']} | {link} "
                          f"| {escape(entry['location'])} |")
         lines.append("")
+    lines += media_section(build, entries, escape)
     write_text(build / "vault" / INDEX, "\n".join(lines).rstrip() + "\n")
     target = build / "vault" / LIST_CSV
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -256,8 +286,42 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
         writer = csv.writer(handle)
         writer.writerow(["文件", "说明（alt）", "能否用于官网", "英文文件名建议", "名字来自", "出处", "位置", "编号"])
         for entry in sorted(entries.values(), key=lambda e: e["file"]):
+            source = docs[entry["doc_id"]]["title"] if entry["doc_id"] in docs else "资料包原文件夹"
             writer.writerow([entry["file"], entry["alt"], entry["use"], entry["english"], entry["named_by"],
-                             docs[entry["doc_id"]]["title"], entry["location"], entry["id"]])
+                             source, entry["location"], entry["id"]])
+
+
+def media_section(build: Path, entries: dict[str, dict[str, Any]], escape: Callable[[str], str]) -> list[str]:
+    """What screening kept by folder but the vault does not hold: video, audio, pictures above the
+    size limit, and folders waiting for the client. One row per original folder, with a link that
+    opens it in the package, because thousands of rows help nobody."""
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for entry in load_media(build):
+        if entry.get("id") in entries:
+            continue
+        if entry["status"] == "media_awaiting_client":
+            state = "待客户确认（整个文件夹）"
+        elif entry["kind"] == "image":
+            state = "图片较大，原图在初筛包"
+        else:
+            state = "已保留，内容待转写"
+        folder = str(Path(entry["package_path"]).parent.as_posix())
+        groups[(entry["package"], folder, state)].append(entry)
+    if not groups:
+        return []
+    lines = ["## 留在初筛包里的素材", "",
+             "视频、音频和较大的图片不复制进知识库，原件在初筛包里，点“打开文件夹”就能看。视频里讲的内容转写以后才能当知识用。"
+             "待客户确认的文件夹，客户回复“保留”后重跑，图片会进上面的素材文件夹。", "",
+             "| 原来的文件夹 | 内容 | 状态 | 打开文件夹 |", "| --- | --- | --- | --- |"]
+    for (package, folder, state), members in sorted(groups.items(), key=lambda kv: (kv[0][2], kv[0][1])):
+        kinds = defaultdict(int)
+        for entry in members:
+            kinds[KIND_LABELS.get(entry["kind"], entry["kind"])] += 1
+        original = str(Path(members[0]["relpath"]).parent.as_posix())
+        what = "、".join(f"{label} {count} 个" for label, count in kinds.items())
+        uri = (Path(package) / folder).resolve().as_uri()
+        lines.append(f"| {escape(original if original != '.' else '根目录')} | {what} | {state} | [打开文件夹]({uri}) |")
+    return [*lines, ""]
 
 
 def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]],
@@ -294,7 +358,8 @@ def export(out: Path) -> dict[str, Any]:
     build = out / BUILD_DIRECTORY
     pictures = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
     docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")}
-    todo = [{"id": i, "path": str(build / "assets" / i), "source": f"{docs[e['doc_id']]['title']} {e['group']}"}
+    todo = [{"id": i, "path": str(build / "assets" / i),
+             "source": f"{docs[e['doc_id']]['title']} {e['group']}" if e["doc_id"] in docs else "资料包原文件夹"}
             for i, e in sorted(pictures.items()) if e["named_by"] == NUMBERED and e["use"] != INTERNAL]
     folder = build / AI_FOLDER
     write_jsonl(folder / "todo.jsonl", todo)

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
-from pictures import build_pictures, page_group, write_index as write_picture_index
+from pictures import build_pictures, load_media, page_group, write_index as write_picture_index
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     BUILD_DIRECTORY,
@@ -55,6 +55,7 @@ REASON_LABELS = {
     "no_extractable_content": "读不出可用内容", "unresolved_item": "初筛待定，未确认", "image_needs_review": "图片待识别",
     "unreadable_removal_location": "清理位置看不懂", "client_said_no": "客户说不用", "unknown_decision": "初筛分类不明",
     "website_needs_browser": "要用浏览器读取",
+    "media_kept": "按文件夹保留的图片和视频", "media_awaiting_client": "整个文件夹待客户确认",
 }
 VISIBLE = {"kept", "flagged", "pending_client"}
 # Inside each package: the knowledge base's name for every file beside its original name.
@@ -343,6 +344,11 @@ def package_reconciliation(build: Path, routes: dict[str, Any], docs: dict[str, 
         else:
             entered_count = str(len(entered))
             state = "、".join(f"{s} {n}" for s, n in Counter(statuses[d["doc_id"]] for d in entered).most_common())
+            media = Counter(r["reason"] for r in members.values() if r["route"] == "media")
+            if media.get("media_kept"):
+                entered_count += f"，另有素材 {media['media_kept']} 个"
+            if media.get("media_awaiting_client"):
+                state = "、".join(p for p in (state, f"素材待客户确认 {media['media_awaiting_client']}") if p)
         waiting = [(d, remaining_ocr_pages(build, d["item_id"], status_info.get(d["item_id"], {}).get("ocr_pages") or [])) for d in entered]
         waiting = [(d, pages) for d, pages in waiting if pages]
         ocr = f"{len(waiting)} 份共 {sum(len(p) for _, p in waiting)} 页" if waiting else ""
@@ -544,6 +550,8 @@ def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], pub
         doc = by_item.get(item_id) or (by_item.get(same_content[item_id]) if item_id in same_content else None)
         if route["route"] == "points" and points:
             doc, fate = points, "汇总进业务要点"
+        elif route.get("fate"):
+            fate = route["fate"]
         elif item_id in same_content and doc:
             fate = "内容和另一份相同，只发布了一份"
         elif doc:
@@ -683,6 +691,19 @@ def main() -> int:
                                     MAX_STYLE_IMAGES, held)
     PICTURE_FILES.clear()
     PICTURE_FILES.update({picture_id: Path(entry["file"]).name for picture_id, entry in pictures_named.items()})
+    for entry in load_media(build):
+        # Material kept by folder has no page; the name map says where it went instead.
+        route = routes.get(entry["item_id"])
+        if not route:
+            continue
+        if entry.get("id") in pictures_named:
+            route["fate"] = f"进素材库：90_素材/{pictures_named[entry['id']]['file']}"
+        elif entry["status"] == "media_awaiting_client":
+            route["fate"] = "整个文件夹待客户确认，回复前不进素材库"
+        elif entry["kind"] == "image":
+            route["fate"] = "图片较大，原图留在初筛包，素材索引里有文件夹链接"
+        else:
+            route["fate"] = "视频或音频，原件留在初筛包，内容待转写"
     for doc_id in order:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)

@@ -145,7 +145,14 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
     if decision == "C":
         return {"route": "points", "reason": "knowledge_points", "tier": "T4"}
     if decision == "A":
-        if asset.get("asset_kind") == "image":
+        kind = asset.get("asset_kind")
+        if kind in {"video", "audio"} or (kind == "image" and asset.get("folder_rule")):
+            # Screening judged a sorted folder of pictures or videos from samples: they are
+            # material for the website, filed by their original folders, not documents to read.
+            if not asset.get("usable_as_fact") and answer != "keep":
+                return {"route": "media", "reason": "media_awaiting_client"}
+            return {"route": "media", "reason": "media_kept"}
+        if kind == "image":
             return {"route": "hold", "reason": "image_needs_review"}
         official = resource == "marketing" and extension in {".pdf", ".pptx"}
         tier = "T1" if official else "T2"
@@ -675,6 +682,45 @@ def collect_images(
     return results, failures
 
 
+def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Path, max_bytes: int) -> list[dict[str, Any]]:
+    """Pictures and videos screening kept by folder. A usable picture up to the size limit is copied
+    once into the build's assets under its content hash, the same name embedded pictures get, so
+    it can go to 90_素材; video, audio, and larger pictures stay in the package and are listed."""
+    assets = build / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    media = []
+    for item_id, route in sorted(routes.items()):
+        if route["route"] != "media":
+            continue
+        asset = route["asset"]
+        entry = {
+            "item_id": item_id,
+            "kind": asset.get("asset_kind"),
+            "relpath": asset.get("source_relpath") or asset.get("path") or "",
+            "package": str(package_of[item_id]),
+            "package_path": asset.get("path") or "",
+            "bytes": asset.get("byte_size") or 0,
+            "status": route["reason"],
+            "review_group": asset.get("review_group") or "",
+            "resource_type": asset.get("resource_type"),
+        }
+        suffix = extension_of(asset.get("display_name") or "")
+        source = package_of[item_id] / (asset.get("path") or "")
+        if (entry["kind"] == "image" and route["reason"] == "media_kept" and suffix in IMAGE_TYPES
+                and entry["bytes"] <= max_bytes and asset.get("path")):
+            name = f"img-{asset['source_hash'][:16]}{suffix}"
+            target = assets / name
+            if not target.exists():
+                try:
+                    shutil.copyfile(long_path(source), long_path(target))
+                except OSError:
+                    name = ""
+            if name:
+                entry["id"] = name
+        media.append(entry)
+    return media
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Route package items and extract source-located blocks.")
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat to merge later packages")
@@ -743,6 +789,8 @@ def main() -> int:
         jobs, build, int(args.max_image_mb * 1024 * 1024), args.images == "all", args.workers, args.timeout,
         {asset["item_id"]: asset["source_hash"] for asset in assets},
     )
+
+    write_json(build / "media.json", collect_media(routes, package_of, build, int(args.max_image_mb * 1024 * 1024)))
 
     docs, blocks, terms, sheet_reports = [], [], [], {}
     for item_id, route in routes.items():
@@ -942,6 +990,11 @@ def main() -> int:
                 "ocr_pages": route.get("ocr_pages", []),
                 "client_held_blocks": route.get("client_held_blocks", 0),
                 "pending_units": route["asset"].get("pending_units", []),
+                "asset_kind": route["asset"].get("asset_kind"),
+                "source_relpath": route["asset"].get("source_relpath"),
+                # One client question covers a folder screening judged as a group.
+                "review_group": route["asset"].get("review_group"),
+                "review_question": route["asset"].get("review_question"),
             }
             for item_id, route in routes.items()
         },

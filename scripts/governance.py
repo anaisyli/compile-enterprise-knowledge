@@ -164,6 +164,21 @@ def build(
             "内容运营 → 客户",
             ["- 为什么问：初筛时标记为待客户确认。", f"- 回复前：已入来源层并标 🕒，整理页不引用。来源：{link(doc)}", "",
              "| 位置 | 段数 |", "| --- | ---: |"] + [f"| {short(hold)} | {count} |" for hold, count in holds], items)
+    # Pictures and videos screening sent to the client as a whole folder: one question, one answer.
+    folders: dict[str, list[str]] = defaultdict(list)
+    for item_id, route in sorted(routes.items()):
+        if route["route"] == "media" and route["reason"] == "media_awaiting_client":
+            folders[route.get("review_group") or (route.get("source_relpath") or "").rsplit("/", 1)[0]].append(item_id)
+    for folder, ids in sorted(folders.items()):
+        name = folder.rsplit("/", 1)[-1] or "根目录"
+        question = routes[ids[0]].get("review_question") or f"文件夹《{name}》里的 {len(ids)} 个图片和视频能否公开使用？"
+        place = str(Path(routes[ids[0]].get("path") or "").parent.as_posix())
+        items = [{"key": "folder", "item_id": ",".join(ids), "location": "", "question": question,
+                  "name": f"{name}（文件夹，{len(ids)} 个文件）", "place": place}]
+        add("CUS", f"media:{folder}", short(f"文件夹《{name}》{len(ids)} 个素材能否公开使用", 60), f"{len(ids)} 个",
+            "等待客户回复", "内容运营 → 客户",
+            ["- 为什么问：初筛时抽看了样本，整个文件夹标记为待客户确认（常见于客户现场照片，能看到客户的标志）。",
+             "- 回复前：这些图片不进 90_素材，视频不列为可用素材。客户回答一次，对整个文件夹生效。"], items)
     images = sorted(i for i, r in routes.items() if r["route"] == "hold" and r["reason"] == "image_needs_review")
     if images:
         items = [{"key": i, "item_id": i, "location": "", "question": f"产品图 {show(routes[i]['display_name'])} 能否公开使用？"} for i in images]
@@ -347,7 +362,8 @@ def build(
         for record in sorted(records["CUS"], key=lambda r: r["id"]):
             for item in record["items"]:
                 route = routes.get(item["item_id"], {})
-                writer.writerow([item["sub_id"], item["question"], route.get("display_name") or "", route.get("path") or "", ""])
+                writer.writerow([item["sub_id"], item["question"], item.get("name") or route.get("display_name") or "",
+                                 item.get("place") or route.get("path") or "", ""])
     write_json(build_dir / "governance.json", {kind: [{k: v for k, v in r.items() if k != "details"} for r in rs] for kind, rs in records.items()})
     return {"anm_ids": anm_ids, "mat_ids": mat_ids, "cus_ids": cus_ids, "cus_items": {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]},
             "counts": {kind: len(rs) for kind, rs in records.items()}}
