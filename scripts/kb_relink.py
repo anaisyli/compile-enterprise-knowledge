@@ -20,7 +20,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from kb_common import MANIFEST_NAME, load_json, write_json
 from publish_vault import ARCHIVE, PROJECT_INFO, RECEIPT, normalized_hash
@@ -50,9 +50,16 @@ def pair_packages(old: list[str], new: list[Path]) -> dict[str, Path]:
     return pairs
 
 
+def link_path(link: str) -> str:
+    """The local path a file: link points at, the same on every system: file:///C:/a gives C:/a
+    (Windows), file:///Users/a gives /Users/a (Mac, Linux): the leading slash belongs to the path there."""
+    path = unquote(urlparse(link).path)
+    return path[1:] if re.match(r"^/[A-Za-z]:", path) else path
+
+
 def moved_link(link: str, pairs: dict[str, Path]) -> str | None:
     """The same file under the package's new place, or None for a link into somewhere else."""
-    local = unquote(link[len("file:///"):])
+    local = link_path(link)
     for old, new in pairs.items():
         root = plain(old)
         if plain(local) == root or plain(local).startswith(root + "/"):

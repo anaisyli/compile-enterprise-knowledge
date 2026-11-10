@@ -61,6 +61,15 @@ class RelinkTests(unittest.TestCase):
             self.assertIn(str(new.resolve()), info.read_text(encoding="utf-8"))
             self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["files"][key], normalized_hash(page))
 
+    def test_links_on_mac_and_linux_keep_their_leading_slash(self) -> None:
+        from kb_relink import link_path, moved_link
+        self.assertEqual(link_path("file:///Users/xx/%E5%8C%85/a.pdf"), "/Users/xx/包/a.pdf")
+        self.assertEqual(link_path("file:///C:/old/%E5%8C%85/a.pdf"), "C:/old/包/a.pdf")
+        moved = moved_link("file:///Users/xx/02_%E5%88%9D%E7%AD%9B%E5%8C%85/a.pdf", {"/Users/xx/02_初筛包": Path("/Volumes/new/02_初筛包")})
+        self.assertIsNotNone(moved)  # Before, a Mac link never matched its package and stayed pointing at the old place.
+        self.assertTrue(moved.endswith("/a.pdf"))
+        self.assertIsNone(moved_link("file:///Users/xx/elsewhere/a.pdf", {"/Users/xx/02_初筛包": Path("/Volumes/new/02_初筛包")}))
+
 
 if __name__ == "__main__":
     unittest.main()
