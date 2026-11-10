@@ -41,7 +41,8 @@ GALLERY = 8
 ROUND = re.compile(r"(?:(?<=[一-鿿])\d{1,2}|[\s_-]+\d{1,2}|[（(]\d+[)）]|[\s_-]*第[一二三四五六七八九十\d]+[批轮版期]|[\s_-]+v\d+|[\s_-]*(?:新版|旧版|最新))$", re.I)
 # A model code inside a name: DS50 in "DS50系列" (Chinese letters count as word characters, so no \b).
 MODEL_CODE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,4}(?![0-9])")
-KIND_FOLDER = re.compile("|".join(p.pattern.replace("(?i)", "") for _, p in PICTURE_KINDS) + r"|实拍|规格书|说明书|视频|图片|照片", re.I)
+KIND_FOLDER = re.compile("|".join(p.pattern.replace("(?i)", "") for _, p in PICTURE_KINDS)
+                         + r"|实拍|规格书|说明书|视频|图片|照片|^新建文件夹|^new folder|^未命名|^untitled|副本$|^copy of", re.I)
 RESOURCE = re.compile(r"(?i)画册|catalog|brochure|目录|规格书|规格|spec|datasheet|说明书|manual|guide|下载|download")
 UNPROCESSED = {"awaiting_sample": "等样例确认后提取", "unresolved_item": "初筛待定，还没确认", "no_extractable_content": "读不出文字",
                "image_needs_review": "图片还没识别文字", "media_awaiting_client": "整个文件夹待客户确认", "needs_libreoffice": "要 LibreOffice 才能读",
@@ -83,7 +84,7 @@ def page_title(key: str) -> str:
 
 def file_stem(key: str) -> str:
     """Every page name starts with 建站-: no clash with the knowledge pages (产品大类-…) or the sources."""
-    return safe_name(f"建站-{page_title(key)}")
+    return safe_name(f"建站-{page_title(key)}".replace(" / ", "、"))  # A slash would cut the name at the folder line.
 
 
 def round_base(name: str) -> str:
@@ -440,14 +441,105 @@ def collect_home(out: Path) -> dict[str, Any]:
     return {"candidates": taken}
 
 
+def update(out: Path, vault: Path) -> dict[str, Any]:
+    """Write only the site view into a published vault, from what the last build already made.
+
+    Nothing is extracted, read, or uploaded again, and nothing outside 80_建站资料 is touched.
+    The pages go into the publish receipt, so the next full publish keeps treating them as its own."""
+    from datetime import datetime
+    from guard_blocks import compile_terms
+    from kb_common import load_config
+    from publish_vault import ARCHIVE, RECEIPT, archive, normalized_hash
+    from render_kb import ALIAS_FOLDER, escape_cell
+
+    build = out / BUILD_DIRECTORY
+    for name in ("routes.json", "docs.jsonl", "published.json", "statuses.json"):
+        if not (build / name).is_file():
+            raise SystemExit(f"运行目录里没有 {name}：要用发布这个知识库的那次运行目录（知识库构建记录里的 run）。")
+    receipt_path = vault / RECEIPT
+    if not receipt_path.is_file():
+        raise SystemExit("知识库里没有发布记录，先正常发布一次。")
+    config = load_config(build / "kb-config.json" if (build / "kb-config.json").is_file() else None)
+    state_config = vault / "05_数据与审核/70_构建状态/kb-config.json"
+    run_config = build / "kb-config.json"
+    if state_config.is_file() and (not run_config.is_file() or state_config.stat().st_mtime > run_config.stat().st_mtime):
+        config = load_config(state_config)  # A product list written into the vault since that run counts.
+    for name in ("site-home.json",):
+        kept = vault / "05_数据与审核/70_构建状态" / name
+        if kept.is_file() and not (build / name).is_file():
+            (build / name).write_bytes(kept.read_bytes())
+    routes = load_json(build / "routes.json")
+    docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")}
+    published = load_json(build / "published.json")
+    statuses = load_json(build / "statuses.json")
+    order = [d for d in docs if d in published]
+    media = load_json(build / "media.json") if (build / "media.json").is_file() else []
+    pictures = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
+    terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
+    forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))
+    # The one-click originals the last build made; none is made here.
+    originals = {}
+    for doc_id in order:
+        route = routes.get(docs[doc_id]["item_id"], {})
+        if route.get("package") and route.get("path"):
+            alias = Path(route["package"]) / ALIAS_FOLDER / f"{Path(docs[doc_id]['file_name']).stem}{Path(route['path']).suffix}"
+            if alias.is_file():
+                originals[doc_id] = alias.resolve().as_uri()
+    site = build / "vault" / ROOT
+    if site.exists():
+        import shutil
+        shutil.rmtree(site)
+    write_site(build, config, routes, docs, order, statuses, originals, media, pictures, forbidden, escape_cell)
+    receipt = load_json(receipt_path)
+    files: dict[str, str] = receipt.setdefault("files", {})
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archived: list[str] = []
+    planned = {(Path(ROOT) / p.relative_to(site)).as_posix(): p for p in site.rglob("*.md")}
+    for key, source in planned.items():
+        target = vault / key
+        if target.exists() and key not in files:
+            raise SystemExit(f"目标位置已有不是本 Skill 写的文件，不覆盖：{key}")
+        if target.exists() and normalized_hash(target) != files.get(key):
+            raise SystemExit(f"这个页面被人改过，先把改动移到单独的文件再更新：{key}")
+        if target.exists() and normalized_hash(target) != normalized_hash(source):
+            archive(vault, key, stamp, archived)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        files[key] = normalized_hash(target)
+    for key in [k for k in files if k.startswith(ROOT + "/") and k not in planned]:
+        if (vault / key).is_file():
+            archive(vault, key, stamp, archived, move=True)  # A page no longer made, say a product renamed.
+        files.pop(key)
+    write_json(receipt_path, receipt)
+    if (build / HOME_STATE).is_file():
+        write_json(vault / "05_数据与审核/70_构建状态" / HOME_STATE, load_json(build / HOME_STATE))
+    if archived:
+        write_text(vault / ARCHIVE / stamp / "00_版本说明.md", f"# 版本说明 {stamp}\n\n只更新建站资料视图，归档的旧版：\n\n"
+                   + "\n".join(f"- {k}" for k in sorted(set(archived))) + "\n")
+    view = load_json(build / "site-view.json")
+    return {"pages": len(planned), "archived": len(set(archived)), "questions": view.get("questions", {}),
+            "folder": str(vault / ROOT)}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Home-page candidates for the site view.")
-    parser.add_argument("command", choices=["home-candidates"])
-    parser.add_argument("action", choices=["export", "collect"])
-    parser.add_argument("--out", required=True)
+    parser = argparse.ArgumentParser(description="The site view: update it alone in a published vault, or pick home-page candidates.")
+    parser.add_argument("command", choices=["update", "home-candidates"])
+    parser.add_argument("action", nargs="?", choices=["export", "collect"])
+    parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--vault", help="Published project (update)")
     args = parser.parse_args()
     out = Path(args.out).resolve()
-    print(json.dumps(export_home(out) if args.action == "export" else collect_home(out), ensure_ascii=False, indent=2))
+    if args.command == "update":
+        if not args.vault:
+            parser.error("update 要指定 --vault")
+        report = update(out, Path(args.vault).resolve())
+    elif args.action == "export":
+        report = export_home(out)
+    elif args.action == "collect":
+        report = collect_home(out)
+    else:
+        parser.error("home-candidates 后面写 export 或 collect")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
 

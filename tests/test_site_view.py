@@ -108,6 +108,34 @@ class SiteViewTests(unittest.TestCase):
         home = (self.build_site() / "建站-首页 Home.md").read_text(encoding="utf-8")
         self.assertIn("候选，待确认：白底完整", home)
 
+    def test_update_writes_only_the_view_into_a_published_vault(self) -> None:
+        out = self.build.parent / (self.build.name + "-upd")
+        build = out / "04_知识库构建"
+        build.mkdir(parents=True)
+        for name, value in (("routes.json", self.routes), ("published.json", {"D1": "公司资料/规格书.md", "D2": "产品画册/画册.md"}),
+                            ("statuses.json", {"D1": "有效", "D2": "有效"}), ("media.json", self.media), ("pictures.json", self.pictures),
+                            ("guard-terms.json", {"hard": ["Acme"], "soft": []})):
+            (build / name).write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        (build / "docs.jsonl").write_text("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in self.docs.values()), encoding="utf-8")
+        vault = self.build.parent / (self.build.name + "-vault")
+        receipt = vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json"
+        receipt.parent.mkdir(parents=True)
+        source = vault / "02_源资料/10_净化原文/公司资料/规格书.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("原文不动", encoding="utf-8")
+        receipt.write_text(json.dumps({"files": {}}), encoding="utf-8")
+        report = site_view.update(out, vault)
+        self.assertGreater(report["pages"], 10)
+        self.assertTrue((vault / SITE / "00_建站资料总览.md").is_file())
+        self.assertEqual(source.read_text(encoding="utf-8"), "原文不动")  # Nothing outside the view is touched.
+        files = json.loads(receipt.read_text(encoding="utf-8"))["files"]
+        self.assertIn(f"{SITE}/00_建站资料总览.md", files)
+        # A page a person edited is not overwritten.
+        edited = vault / SITE / "建站-FAQ.md"
+        edited.write_text(edited.read_text(encoding="utf-8") + "\n人写的补充\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            site_view.update(out, vault)
+
 
 if __name__ == "__main__":
     unittest.main()

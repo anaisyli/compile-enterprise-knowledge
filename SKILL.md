@@ -113,6 +113,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - **产品清单要人确认：**运行 `products.py propose --out <运行目录> --config <kb-config.json>`，读 `04_知识库构建/products/README.md` 和总览页“要人确认的”（比如产品下面的 01–11 编号文件夹是型号还是批次）。整理成 kb-config.json 的 `"products"`：`{"name": "DS50系列", "category": "广告机", "sub": "Wall mounted Digital Signage", "aliases": ["DS50系列1", "DS50系列2", "DS50"]}`（category 大类、sub 小类、name 产品；没有 sub 时 name 就是小类），给用户过目后重跑。官网截图文件夹名对不上产品的，把截图名加进 aliases。
    - **首页候选：**有 Banner、首页、主图、宣传片标记的直接进首页。另外运行 `site_view.py home-candidates export --out <运行目录>`，按 `04_知识库构建/site-home/README.md` 从各产品主图、白底图、效果图里挑候选写 `answers.jsonl`，再 `site_view.py home-candidates collect --out <运行目录>`，重跑。候选在《首页 Home》里标“候选，待确认”；用户确认后，把 `site-home.json` 里那张图的 `confirmed` 改成 `true`。
    - 视频不复制进知识库；装了 ffmpeg 时每个视频加一张封面和时长。
+   - **已发布的库只更新建站视图（不重建）：**`site_view.py update --out <上次发布用的运行目录> --vault <项目目录>`。用上次建库的结果重排一遍，只写 `80_建站资料`，不提取、不读图、不上传，来源层、台账、素材都不动；人改过的建站页会拒绝覆盖。改了产品清单、首页候选后用它刷新最快。上次没有的东西（没提取的文件内容、新功能收的图）要等正常建库。
 
 6. **产品表**（要让 T3 从“待审”变成“有效”时）：按合同“产品表逐格判断”小节导出、判断、合并，再独立通读并写通读记录。
 
