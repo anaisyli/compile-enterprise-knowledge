@@ -42,7 +42,7 @@ ROUND = re.compile(r"(?:(?<=[一-鿿])\d{1,2}|[\s_-]+\d{1,2}|[（(]\d+[)）]|[\s
 # A model code inside a name: DS50 in "DS50系列" (Chinese letters count as word characters, so no \b).
 MODEL_CODE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,4}(?![0-9])")
 KIND_FOLDER = re.compile("|".join(p.pattern.replace("(?i)", "") for _, p in PICTURE_KINDS)
-                         + r"|实拍|规格书|说明书|视频|图片|照片|^新建文件夹|^new folder|^未命名|^untitled|副本$|^copy of", re.I)
+                         + r"|实拍|规格书|说明书|视频|图片|照片|图$|^新建文件夹|^new folder|^未命名|^untitled|副本$|^copy of", re.I)
 RESOURCE = re.compile(r"(?i)画册|catalog|brochure|目录|规格书|规格|spec|datasheet|说明书|manual|guide|下载|download")
 UNPROCESSED = {"awaiting_sample": "等样例确认后提取", "unresolved_item": "初筛待定，还没确认", "no_extractable_content": "读不出文字",
                "image_needs_review": "图片还没识别文字", "media_awaiting_client": "整个文件夹待客户确认", "needs_libreoffice": "要 LibreOffice 才能读",
@@ -53,14 +53,14 @@ SECTIONS = [
     ("home", "首页", "Home", r"(?i)banner|首页|轮播|宣传片|宣传视频|homepage|home\s*page|\bhero\b"),
     ("cases", "案例", "Cases", r"(?i)案例|case|客户合作|合照|project"),
     ("solutions", "解决方案", "Solutions", r"(?i)solutions?\b|解决方案"),
-    ("services", "服务", "Services", r"(?i)services?\b|服务|\boem\b|\bodm\b|定制|customi[sz]|打样|售后|warranty|support"),
+    ("services", "服务", "Services", r"(?i)services?\b|服务|(?<![a-z])(?:oem|odm)(?![a-z])|代工|定制|customi[sz]|打样|售后|warranty|support"),
     ("faq", "FAQ", "FAQ", r"(?i)\bfaq\b|常见问题|问答|questions?"),
     ("blog", "博客 / 新闻", "Blog & News", r"(?i)\bblog|\bnews\b|新闻|资讯|文章|article"),
     ("contact", "联系我们", "Contact Us", r"(?i)contact|联系"),
     ("about-factory", "工厂与生产", "Factory", r"(?i)工厂|factory|车间|workshop|生产线|production|装柜|发货|出货|warehouse|仓库"),
     ("about-rnd", "研发", "R&D", r"(?i)研发|r\s*&\s*d|research|专利|patent|实验室|\blab\b"),
     ("about-certs", "资质认证", "Certificates", r"(?i)证书|资质|认证|certif|\biso\b|\bce\b|\bfcc\b|\brohs\b"),
-    ("about-exhibitions", "展会", "Exhibitions", r"(?i)展会|exhibition|\bise\s*\d|\bexpo\b|\bfair\b|canton"),
+    ("about-exhibitions", "展会", "Exhibitions", r"(?i)展会|exhibition|(?<![a-z])[il]se\s*20\d\d|\bexpo\b|\bfair\b|canton"),
     ("about-profile", "企业介绍", "Company Profile", r"(?i)公司简介|公司介绍|关于我们|\babout\b|公司照片|公司视频|展厅|团队|\bteam\b|企业介绍|品牌故事|why\s*\w*"),
 ]
 ABOUT = [key for key, *_ in SECTIONS if key.startswith("about-")]
@@ -117,16 +117,21 @@ class Products:
         root = next((i for i, p in enumerate(parts) if PRODUCT_ROOT.match(p)), None)
         if root is None or root + 1 >= len(parts):
             return None
-        configured = self.by_alias(parts[root + 1:], self.configured)
-        if configured:
-            return configured, parts[-1]
         named = [p for p in parts[root + 2:] if not NOT_A_NAME.match(p) and not KIND_FOLDER.search(p)]
         category = self.clean(parts[root + 1])
         sub = self.clean(named[0]) if named else ""
         model = self.clean(round_base(named[1])) if len(named) > 1 else ""
-        if model and re.fullmatch(r"\d{1,3}", model):
-            self.questions[f"{category} / {sub}"].add(model)  # 01…11: models or rounds? A person says.
-        key = (category, sub, model)
+        # A person's names rename a level; they never flatten the levels below it.
+        hit_model = self.by_alias([named[1]], self.configured) if len(named) > 1 else None
+        hit_sub = self.by_alias([named[0]], self.configured) if named else None
+        if hit_model:
+            key = hit_model
+        elif hit_sub:
+            key = hit_sub if not model or hit_sub[2] else (hit_sub[0], hit_sub[1], model)
+        else:
+            key = (category, sub, model)
+            if model and re.fullmatch(r"\d{1,3}", model):
+                self.questions[f"{category} / {sub}"].add(model)  # 01…11: models or rounds? A person says.
         leaf = self.leaves.setdefault(key, {"rounds": set(), "aliases": []})
         round_name = named[1] if len(named) > 1 else (named[0] if named else category)
         leaf["rounds"].add(round_name)
@@ -168,6 +173,14 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
             pages[("product", key)][item["what"]].append(item)
             return
         segments = parts_of(relpath) + [Path(relpath).stem, title]
+        # A whole folder or title a person named; a part would also catch “About Us-<site name>”.
+        names = {squeeze(s) for s in segments if s}
+        chosen = next((k for k, words in (config.get("site_sections") or {}).items()
+                       if k in PAGES and any(squeeze(w) in names for w in words)), None)
+        if chosen:
+            item["round"] = (parts_of(relpath) or [""])[-1]
+            pages[chosen][item["what"]].append(item)  # A person put this folder in a section: that decides.
+            return
         key = tree.by_alias(segments)
         if key:
             item["round"] = (parts_of(relpath) or ["官网"])[-1]

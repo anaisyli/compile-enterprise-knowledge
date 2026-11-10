@@ -94,6 +94,20 @@ class SiteViewTests(unittest.TestCase):
                                                "aliases": ["01"]}]})
         self.assertTrue((site / "产品" / "建站-产品-自助服务广告机-Self Services Kiosk-立式点餐机.md").is_file())
 
+    def test_a_person_renames_levels_without_flattening_and_names_whole_folders_for_sections(self) -> None:
+        self.media.append(media("m8", f"{BASE}/会议一体机/Interactive flat panel/ST Sceries/白底图/8.jpg", id="img-8888888888888888.jpg"))
+        self.media.append(media("m9", "知识库（总）/页面图片/Smart Board Manufacturer Smartline/9.jpg", id="img-9999999999999999.jpg"))
+        self.media.append(media("m10", "知识库（总）/页面图片/About Us-Smart Board Manufacturer Smartline/10.jpg", id="img-aaaaaaaaaaaaaaaa.jpg"))
+        for m in self.media[-3:]:
+            self.pictures[m["id"]] = {"file": f"资料包素材/x/{m['item_id']}-{m['id'][4:12]}.jpg", "alt": "", "use": "可用于官网", "doc_id": "", "group": ""}
+        site = self.build_site({"products": [{"name": "交互平板", "category": "会议一体机", "aliases": ["Interactive flat panel"]}],
+                                "site_sections": {"home": ["Smart Board Manufacturer Smartline"]}})
+        self.assertTrue((site / "产品" / "建站-产品-会议一体机-交互平板-ST Sceries.md").is_file())  # Renamed, series kept.
+        self.assertIn("m9-", (site / "建站-首页 Home.md").read_text(encoding="utf-8"))
+        # Only the folder with exactly that name: “About Us-<site name>” still goes by the rules.
+        self.assertNotIn("m10-", (site / "建站-首页 Home.md").read_text(encoding="utf-8"))
+        self.assertIn("m10-", (site / "建站-关于我们-企业介绍 Company Profile.md").read_text(encoding="utf-8"))
+
     def test_home_candidates_wait_for_a_person(self) -> None:
         out = self.build.parent / (self.build.name + "-run")
         build = out / "04_知识库构建"
