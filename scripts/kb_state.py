@@ -4,8 +4,9 @@
 Everything that cannot be recomputed from the package lives here: the config, review
 decisions, ledger numbers, AI-written knowledge pages, MinerU text, and the website
 snapshot. save copies it into the vault at publish; restore copies it back into a run
-folder, so a deleted run folder can be rebuilt. When both sides have a copy, the newer one
-wins and the other is reported, never silently overwritten.
+folder, so a deleted run folder can be rebuilt. When both sides have a copy, settings and
+decisions (JSON objects such as kb-config.json) are merged entry by entry; other files go by
+the newer copy, and the other is reported, never silently overwritten.
 """
 
 from __future__ import annotations
@@ -75,9 +76,45 @@ def same(left: Path, right: Path) -> bool:
     return left.is_file() and right.is_file() and left.read_bytes() == right.read_bytes()
 
 
+def json_object(path: Path) -> dict[str, Any] | None:
+    if path.suffix != ".json" or not path.is_file():
+        return None
+    try:
+        value = load_json(path)
+    except (ValueError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def merge_objects(source: Path, target: Path, kept: list[str]) -> bool:
+    """Settings and decisions are merged entry by entry, not file by file.
+
+    A whole-file "newer wins" lost a product list a person wrote into the vault, because a run
+    folder's older config was saved later. Now an entry only one side has is kept; where both
+    have it and differ, the newer file's value is used and the other is reported. Both copies
+    end up the same."""
+    left, right = json_object(source), json_object(target)
+    if left is None or right is None:
+        return False
+    newer, older = (left, right) if source.stat().st_mtime >= target.stat().st_mtime else (right, left)
+    merged = {**older, **newer}
+    lost = sorted(k for k in older if k in newer and older[k] != newer[k])
+    if lost:
+        kept.append(f"{target}（{'、'.join(lost[:5])} 两边不一样，用较新的那份）")
+    text = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
+    changed = False
+    for path in (source, target):
+        if path.read_text(encoding="utf-8") != text and json_object(path) != merged:
+            write_text(path, text)
+            changed = True
+    return changed
+
+
 def copy_newer(source: Path, target: Path, kept: list[str]) -> bool:
     if not source.is_file() or same(source, target):
         return False
+    if json_object(source) is not None and json_object(target) is not None:
+        return merge_objects(source, target, kept)
     if target.is_file() and target.stat().st_mtime > source.stat().st_mtime:
         kept.append(str(target))  # Someone changed the other copy later; keep theirs.
         return False
