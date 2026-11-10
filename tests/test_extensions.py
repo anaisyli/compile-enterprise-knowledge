@@ -105,6 +105,9 @@ class MinerUTests(Base):
 
     def test_only_limits_plan_and_approval_limits_run(self) -> None:
         self.pipeline()
+        # Catalogs go to MinerU only after a person chose that for them on the sample.
+        (self.build / "sample-decisions.json").write_text(json.dumps({"catalog_pdf": {"status": "已确认", "method": "mineru"}}),
+                                                          encoding="utf-8")
         result = run("mineru_ocr.py", "plan", "--out", str(self.out), "--package", str(self.package),
                      "--config", str(self.config), "--only", "a1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

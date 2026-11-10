@@ -25,7 +25,7 @@ from governance import merge_ledger
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
 from kb_index import build as build_index
 from kb_state import save as save_state
-from samples import PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, save_decisions
+from samples import PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
 
 
 SOURCE = Path("02_源资料/10_净化原文")
@@ -170,25 +170,37 @@ def update_project_info(vault: Path, packages: list[str]) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
-def merge_plan(current: str, new: str) -> tuple[str, dict[str, str]]:
-    """Keep the 确认状态 a person wrote in the plan page; return (page, {kind or structure key: status})."""
+def merge_plan(current: str, new: str) -> tuple[str, dict[str, dict[str, str]]]:
+    """Keep the 确认状态 and 处理方式 a person wrote in the plan page; return
+    (page, {kind or structure key: {"status": …, "method": …}}), with only what the person set."""
     labels = {label: key for key, (label, _) in TYPES.items()}
 
-    def status_cells(text: str) -> dict[str, str]:
+    def rows(text: str) -> dict[str, list[str]]:
         found = {}
         for line in text.splitlines():
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
             if len(cells) >= 5 and not set(cells[0]) <= set("-: ") and cells[0] not in {"类型", "结构", "初筛类别"}:
-                found[cells[0]] = cells[-1]
+                found[cells[0]] = cells
         return found
 
-    people = {label: status for label, status in status_cells(current).items() if status and status != PENDING}
-    answers = {labels.get(label, f"{STRUCTURE_PREFIX}{label}"): status for label, status in people.items()}
+    written = rows(current)
+    people = {label: cells[-1] for label, cells in written.items() if cells[-1] and cells[-1] != PENDING}
+    # The 处理方式 column sits before 确认状态 in rows of nine cells; “（默认）” means nobody chose yet.
+    methods = {label: cells[-2] for label, cells in written.items()
+               if label in labels and len(cells) >= 9 and "默认" not in cells[-2] and parse_method(cells[-2])}
+    answers: dict[str, dict[str, str]] = {}
+    for label, status in people.items():
+        answers.setdefault(labels.get(label, f"{STRUCTURE_PREFIX}{label}"), {})["status"] = status
+    for label, text in methods.items():
+        answers.setdefault(labels[label], {})["method"] = parse_method(text)
     lines = []
     for line in new.splitlines():
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if line.startswith("|") and len(cells) >= 5 and cells[0] in people:
-            cells[-1] = people[cells[0]]
+        if line.startswith("|") and len(cells) >= 5 and (cells[0] in people or cells[0] in methods):
+            if cells[0] in people:
+                cells[-1] = people[cells[0]]
+            if cells[0] in methods and len(cells) >= 9:
+                cells[-2] = methods[cells[0]]
             line = "| " + " | ".join(cells) + " |"
         lines.append(line)
     return "\n".join(lines) + "\n", answers
@@ -289,9 +301,11 @@ def main() -> int:
             merged, answers = merge_plan(current, source.read_text(encoding="utf-8"))
             if answers:
                 decisions = load_decisions(build)
-                for answer_key, status in answers.items():
-                    if (decisions.get(answer_key) or {}).get("status") != status:
-                        decisions[answer_key] = {"status": status, "at": stamp[:8]}
+                for answer_key, answer in answers.items():
+                    entry = dict(decisions.get(answer_key) or {})
+                    if any(entry.get(field) != value for field, value in answer.items()):
+                        entry.update(answer, at=stamp[:8])
+                        decisions[answer_key] = entry
                 save_decisions(build, decisions)
             if merged.rstrip() != current.rstrip():
                 archive(vault, key, stamp, archived)

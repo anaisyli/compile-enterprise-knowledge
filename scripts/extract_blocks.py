@@ -428,13 +428,13 @@ def sheet_blocks(
 def group_for(unit: dict[str, str], heading: str) -> str:
     locator = unit["locator"]
     # Columns of one page ("page 3 col 2") stay under that page's heading.
-    match = re.fullmatch(r"page (\d+)(?: col \d+| table \d+)?(?: ocr)?", locator)
+    match = re.fullmatch(r"page (\d+)(?: col \d+| table \d+)?(?: ocr| check)?", locator)
     if match:
         return f"第 {match.group(1)} 页"
-    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?(?: ocr)?", locator)
+    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?(?: ocr| check)?", locator)
     if match:
         return f"第 {match.group(2)} 张幻灯片" + ("备注" if match.group(1) == "notes" else "")
-    match = re.fullmatch(r"image (\d+)(?: ocr)?", locator)
+    match = re.fullmatch(r"image (\d+)(?: ocr| check)?", locator)
     if match:
         return f"图片 {match.group(1)}"  # A picture inside a Word document, read by MinerU or the model.
     match = SHEET_UNIT.match(locator)
@@ -507,10 +507,17 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
             rows = parse_sheet_rows(text)
             columns = sorted({c for row in rows.values() for c in row}, key=column_number)
             table = [[rows[n].get(c, "") for c in columns] for n in sorted(rows)]
+            first_row = min(rows) if rows else 1
+            header_end = max([first_row] + [int(m.group(2)) for merge in unit.get("merges", [])
+                             if (m := re.fullmatch(r"[A-Z]+(\d+):[A-Z]+(\d+)", merge))
+                             and int(m.group(1)) == first_row])
             blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}"), "doc_id": doc_id, "kind": "text",
                            # A sheet name can be a customer's, so the heading is neutral.
                            "group": f"表 {sheets}", "locator": unit["locator"], "text": markdown_table(table) if table else text,
-                           "ocr": False, "ai_read": False, "ai_checked": False})
+                           "ocr": False, "ai_read": False, "ai_checked": False,
+                           "table_layout": {"rows": sorted(rows), "columns": [column_number(c) for c in columns],
+                                            "merges": unit.get("merges", []),
+                                            "header_rows": sum(r <= header_end for r in rows)}})
             continue
         first_line = text.splitlines()[0].strip()
         if unit["locator"].startswith("para ") and len(first_line) <= 40 and HEADING.match(first_line):
@@ -527,6 +534,8 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                 # Read by the model from a picture, not by MinerU: published with a mark.
                 "ai_read": unit.get("engine") == "ai",
                 "ai_checked": bool(unit.get("checked")),  # Added on a page check, beside a text layer.
+                "transcription_review": unit.get("reviewed_by", ""),
+                "transcription_review_note": unit.get("review_note", ""),
             }
         )
     return blocks
@@ -835,7 +844,8 @@ def main() -> int:
         tier = route["tier"]
         extension = extension_of(asset.get("display_name") or "")
         doc_id = f"DOC-{asset['source_hash'][:10]}"
-        units = load_units(text_dirs, item_id)
+        from source_fidelity import reviewed_units
+        units = reviewed_units(build, item_id, asset['source_hash'], load_units(text_dirs, item_id))
         title, folder = package_title(asset, tier, config.get("doc_titles", {}))
         doc = {
             "doc_id": doc_id,

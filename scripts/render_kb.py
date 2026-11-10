@@ -41,7 +41,9 @@ from kb_common import (
     write_text,
 )
 from review_cells import progress_of, t3_gate
-from samples import PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed, load_decisions, load_gate, status_of
+from source_fidelity import literal_dimensions, merged_sheet_table
+from samples import (METHOD_HELP, METHODS, PAGED_KINDS, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed,
+                     load_decisions, load_gate, method_of, status_of)
 
 
 SOURCE_ROOT = "02_源资料/10_净化原文"
@@ -77,7 +79,7 @@ def shown(name: str) -> str:
 
 
 def escape_cell(text: str) -> str:
-    return str(text).replace("|", "\\|").replace("\n", " ")
+    return literal_dimensions(str(text).replace("|", "\\|").replace("\n", " "))
 
 
 def doc_path(doc: dict[str, Any]) -> str:
@@ -193,8 +195,13 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
                 parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
-            for note in page_notes.get(current, []):
+            for note in page_notes.get(current, []) if not any(b.get('transcription_review') for b in blocks if b['group'] == current) else []:
                 parts.extend([f"> {line}" for line in note.splitlines()] + [""])
+            if any(b.get('transcription_review') for b in blocks if b['group'] == current):
+                parts.extend(['> 已由 Agent 对照本页原图核对提取稿；原始提取及校正依据保留在构建审计记录。', ''])
+                for note in dict.fromkeys(b.get('transcription_review_note') for b in blocks
+                                         if b['group'] == current and b.get('transcription_review_note')):
+                    parts.extend([f'> {literal_dimensions(line)}' for line in note.splitlines()] + [''])
             table_columns = []
         if block["status"] == "pending_client" and (block["group"], block["client_hold"]) not in pending_marked:
             pending_marked.add((block["group"], block["client_hold"]))
@@ -233,7 +240,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.append("")
             elif continued and parts and parts[-1] == "":
                 parts.pop()
-            parts.extend([text, ""])
+            parts.extend([merged_sheet_table(text, block.get('table_layout', {})), ""])
         previous = block["locator"]
     flush_row_notes()
     return "\n".join(parts).rstrip() + "\n"
@@ -458,9 +465,12 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     lines = ["# 处理计划与样例", "", MARKER_PLAN,
              "每类文件先只提取一份样例给人看，确认后再批量提取同类。还没确认的类，这次只提取了样例那一份，其余的在“要做的事”里写着“确认后提取”。", "",
              "- 怎么确认：在下表“确认状态”一列写“已确认”，或者写“要改：……”说明怎么改；也可以直接告诉 AI。下次建库会读回来，不会被覆盖。",
+             "- 怎么选处理方式（PDF、PPT）：先看“样例情况”，再在“处理方式”一列写下面三种之一，和确认一起生效：",
+             *[f"  - **{name}**：{METHOD_HELP[key]}" for key, name in METHODS.items()],
+             "  - 想先看 MinerU 读样例的效果再选，跟 AI 说“样例试读 MinerU”（要批准上传，只传样例）。",
              "- 原文件：点“打开原件”直接打开初筛包里的原文件。原名对照：" + "、".join(f"[打开对照表]({uri})" for uri in maps), ""]
-    lines.extend(["## 按资料类型", "", "| 类型 | 份数 | 在初筛包哪里 | 怎么处理 | 要做的事 | 样例 | 确认状态 |",
-                  "| --- | ---: | --- | --- | --- | --- | --- |"])
+    lines.extend(["## 按资料类型", "", "| 类型 | 份数 | 在初筛包哪里 | 怎么提取 | 样例 | 样例情况 | 要做的事 | 处理方式 | 确认状态 |",
+                  "| --- | ---: | --- | --- | --- | --- | --- | --- | --- |"])
     waiting: list[str] = []
     for kind, (label, how) in TYPES.items():
         members = [d for d in entered if doc_type(d) == kind]
@@ -494,7 +504,11 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
             waiting.append(label)
         count = info.get("total", len(members))
         how_text = how + (f"。{found_roles}" if found_roles else "")
-        lines.append(f"| {label} | {count} | {escape_cell(where)} | {how_text} | {'；'.join(todo_text) or '—'} | {sample_text} | {status} |")
+        seen = sample_findings(build, sample, done, status_info) if sample and kind in PAGED_KINDS else "—"
+        chosen = (decisions.get(kind) or {}).get("method")
+        method = (METHODS[method_of(kind, decisions)] + ("" if chosen else "（默认）")) if kind in PAGED_KINDS else "—"
+        lines.append(f"| {label} | {count} | {escape_cell(where)} | {how_text} | {sample_text} | {escape_cell(seen)} "
+                     f"| {'；'.join(todo_text) or '—'} | {method} | {status} |")
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for result in done.values():
         if result.get("structure") and result["item_id"] in by_item:
@@ -515,6 +529,41 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     lines.extend(f"| {DECISION_LABELS.get(code, code)} | {reason} | {count} |" for (code, reason), count in sorted(held.items()))
     write_text(build / "vault" / PLAN_PAGE, "\n".join(lines) + "\n")
     return waiting
+
+
+def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], status_info: dict[str, Any]) -> str:
+    """What the sample showed about its kind, in numbers, and the way of reading it that suggests."""
+    item = sample["item_id"]
+    pages = int(sample.get("pages") or 0)
+    unread = remaining_ocr_pages(build, item, status_info.get(item, {}).get("ocr_pages") or [])
+    looked = [r for r in done.values() if r["item_id"] == item]
+    added = sum(1 for r in looked if r.get("added"))
+    wrong = sum(1 for r in looked if r.get("text_errors"))
+    unclear = sum(1 for r in looked if r.get("unclear"))
+    parts = [f"共 {pages} 页" if pages else ""]
+    if unread:
+        parts.append(f"{len(unread)} 页没有文字层")
+    if looked:
+        parts.append(f"对照原图看了 {len(looked)} 页：{added} 页图里有字文字层没有，{wrong} 页文字层有错" + (f"，{unclear} 页看不出款号对应" if unclear else ""))
+    else:
+        parts.append("还没对照原图看（先做看图核对，才看得出文字层够不够）")
+    read_path = build / "mineru-units" / f"{item}.json"
+    if read_path.is_file() and load_json(read_path).get("source") == "mineru":
+        native = defaultdict(str)
+        record = load_json(read_path).get("units", [])
+        text_path = build / "package-text" / f"{item}.json"
+        for unit in load_json(text_path).get("units", []) if text_path.is_file() else []:
+            native[re.sub(r" (?:col|table) \d+$", "", unit["locator"])] += squeeze_key(unit["text"])
+        fuller = sum(1 for u in record if u["locator"].endswith(" ocr") and u.get("engine") != "ai"
+                     and any(squeeze_key(line) and squeeze_key(line) not in native[u["locator"][:-4]] for line in u["text"].splitlines()))
+        parts.append(f"MinerU 试读：{fuller} 页读出了文字层没有的内容")
+    if not looked and not unread:
+        advice = ""
+    elif unread or (looked and (added + wrong) * 5 >= len(looked)):
+        advice = "建议：MinerU 初稿 + AI 复核（不想上传就选 AI 看图复核）"
+    else:
+        advice = "建议：文字层够用"
+    return "；".join(p for p in parts if p) + (f"。{advice}" if advice else "")
 
 
 def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str]) -> dict[str, str]:

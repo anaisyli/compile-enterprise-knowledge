@@ -40,6 +40,20 @@ TYPES = {
 }
 # Kinds confirmed under the names an earlier version used.
 LEGACY = {"spreadsheet": ("quotation", "product_table")}
+# How a kind of paged file is read, chosen by a person after seeing its sample.
+METHODS = {
+    "text": "文字层",
+    "mineru": "MinerU 初稿 + AI 复核",
+    "ai": "AI 看图复核",
+}
+METHOD_HELP = {
+    "text": "读文件里的文字层，图多字少、款号对不上的页和一成抽查对照原图看",
+    "mineru": "整份上传 MinerU 识别出初稿（要批准上传），再把每页有图片的原页和初稿一起交给 AI 对照：补漏字、标错字、写款号对应",
+    "ai": "不上传；每页有图片的原页都交给 AI 对照文字层：补漏字、标错字、写款号对应",
+}
+# Kinds with pages that can be pictured, sent to MinerU, and compared: the methods apply to them.
+# A single picture has no text layer; it is always read by MinerU or the model, then looked at.
+PAGED_KINDS = {"catalog_pdf", "pdf", "ppt"}
 STRUCTURE_PREFIX = "结构:"
 PICTURES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 SPREADSHEETS = {".xlsx", ".xls", ".csv", ".tsv"}
@@ -109,6 +123,27 @@ def status_of(key: str, decisions: dict[str, dict[str, Any]]) -> str:
         if status == CONFIRMED:
             return status
     return (decisions.get(key) or {}).get("status") or PENDING
+
+
+def parse_method(text: str) -> str | None:
+    """What a person wrote in the 处理方式 cell, in their own words."""
+    folded = (text or "").casefold()
+    if "mineru" in folded:
+        return "mineru"
+    if "ai" in folded or "看图" in folded:
+        return "ai"
+    if "文字层" in folded:
+        return "text"
+    return None
+
+
+def method_of(kind: str, decisions: dict[str, dict[str, Any]]) -> str:
+    """The way a kind is read: what a person chose, else the text layer."""
+    for name in (kind, *LEGACY.get(kind, ())):
+        method = (decisions.get(name) or {}).get("method")
+        if method in METHODS:
+            return method
+    return "text"
 
 
 def is_confirmed(key: str, decisions: dict[str, dict[str, Any]], config: dict[str, Any]) -> bool:

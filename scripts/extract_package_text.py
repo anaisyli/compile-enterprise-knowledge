@@ -28,6 +28,7 @@ from xml.etree import ElementTree as ET
 
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, sha256_file, short_hash, write_json
 from layout import ordered_text
+from source_fidelity import literal_dimensions
 from office import ConversionError, convert_office, disable as disable_office, self_test as office_self_test
 
 
@@ -52,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3, ".xlsx": 2, ".xls": 2}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -209,7 +210,8 @@ def xlsx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
             if target not in names:
                 continue
             rows = []
-            for row in ET.fromstring(archive.read(target)).iter(f"{SHEET}row"):
+            sheet_xml = ET.fromstring(archive.read(target))
+            for row in sheet_xml.iter(f"{SHEET}row"):
                 cells = []
                 for cell in row.findall(f"{SHEET}c"):
                     value, inline = cell.find(f"{SHEET}v"), cell.find(f"{SHEET}is")
@@ -225,7 +227,8 @@ def xlsx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
                 if cells:
                     rows.append("; ".join(cells))
             if rows:
-                units.append({"locator": f"sheet {sheet.get('name')} ({state})", "text": "\n".join(rows[:MAX_ROWS_PER_SHEET])})
+                units.append({"locator": f"sheet {sheet.get('name')} ({state})", "text": "\n".join(rows[:MAX_ROWS_PER_SHEET]),
+                              "merges": [m.get('ref') for m in sheet_xml.iter(f"{SHEET}mergeCell") if m.get('ref')]})
     return units, {}
 
 
@@ -241,7 +244,7 @@ def markdown_table(rows: list[list[str]]) -> str:
     cells = [[re.sub(r"\s+", " ", cell or "").strip().replace("|", "／") for cell in row] + [""] * (width - len(row)) for row in rows]
     lines = ["| " + " | ".join(cells[0]) + " |", "|" + " --- |" * width]
     lines += ["| " + " | ".join(row) + " |" for row in cells[1:]]
-    return "\n".join(lines)
+    return literal_dimensions("\n".join(lines))
 
 
 def page_tables(page: Any) -> list[tuple[tuple[float, float, float, float], str]]:

@@ -20,31 +20,48 @@ from pathlib import Path
 from typing import Any
 
 from extract_package_text import markdown_table
-from kb_common import BUILD_DIRECTORY, load_config, load_json, normalize_space, write_json, write_text
+from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, normalize_space, remaining_ocr_pages, write_json, write_text
 from mineru_client import MinerUError, client_from_env, extract, failure_report, probe
+from samples import METHODS, PAGED_KINDS, TYPES, choose_samples, doc_type, load_decisions, load_gate, method_of
 
 
 MINERU_FILES = {".pdf", ".pptx", ".ppt", ".docx", ".doc"}
-# Catalogs print product names as pictures, so even pages with a text layer can miss them.
-CATALOG_TYPES = {"marketing", "product"}
+
 OCR_DIRECTORY = "mineru-units"
 CACHE_DIRECTORY = "mineru-cache"
 
 
-def candidates(build: Path, package_paths: dict[str, Path]) -> list[dict[str, Any]]:
+def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool = False) -> list[dict[str, Any]]:
+    """Files MinerU would read: whole kinds a person chose “MinerU 初稿 + AI 复核” for after seeing their
+    sample, pages with no text layer, and files nothing could be read from. With samples_only, the
+    sample of each kind still waiting for a decision, so MinerU's result can be seen before deciding."""
     routes = load_json(build / "routes.json")
+    docs = {d["item_id"]: d for d in load_jsonl(build / "docs.jsonl")} if (build / "docs.jsonl").is_file() else {}
+    decisions = load_decisions(build)
+    gate = load_gate(build).get("kinds", {})
+    trial = {info["sample"] for kind, info in gate.items() if kind in PAGED_KINDS and not info.get("confirmed")}
+    if samples_only and not trial:
+        # No gate (review off or all confirmed): the fullest file of each paged kind stands in.
+        item_of = {d["doc_id"]: d["item_id"] for d in docs.values()}
+        trial = {item_of[d] for kind, d in choose_samples(list(docs.values()), {}, build).items() if kind in PAGED_KINDS}
     chosen = []
     for item_id, route in routes.items():
         name = route.get("display_name") or ""
         if Path(name).suffix.casefold() not in MINERU_FILES or item_id not in package_paths:
             continue
         reasons = []
-        if route["route"] == "kb" and route.get("ocr_pages"):
-            reasons.append(f"{len(route['ocr_pages'])} 页文字较少或没有文字层，需核对原页")
-        if route["route"] == "kb" and route.get("resource_type") in CATALOG_TYPES and route.get("tier") == "T1":
-            reasons.append("画册的产品名和款号常在图片里")
-        if route["route"] == "hold" and route["reason"] in {"unresolved_item", "no_extractable_content"}:
-            reasons.append("文件读不出文字")
+        kind = doc_type(docs[item_id]) if item_id in docs else ""
+        if samples_only:
+            if item_id in trial and route["route"] == "kb":
+                reasons.append("样例试读：看 MinerU 的效果，再定这类文件怎么处理")
+        else:
+            if route["route"] == "kb" and method_of(kind, decisions) == "mineru":
+                reasons.append(f"这类（{TYPES.get(kind, ('', ''))[0]}）按“{METHODS['mineru']}”处理")
+            left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" else []
+            if left:
+                reasons.append(f"{len(left)} 页没有文字层或文字很少，还没人读过")
+            if route["route"] == "hold" and route["reason"] in {"unresolved_item", "no_extractable_content"}:
+                reasons.append("文件读不出文字")
         if reasons:
             path = package_paths[item_id]
             chosen.append({"item_id": item_id, "display_name": name, "path": str(path),
@@ -124,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat for several")
     parser.add_argument("--config", help="kb-config.json")
     parser.add_argument("--only", action="append", default=[], help="item_id to run; default every planned file")
+    parser.add_argument("--samples", action="store_true", help="Only the samples of kinds still waiting for a decision: try MinerU before choosing")
     return parser.parse_args()
 
 
@@ -138,7 +156,7 @@ def main() -> int:
             if asset.get("path"):
                 package_paths[asset["item_id"]] = root / asset["path"]
     routes = load_json(build / "routes.json")
-    chosen = candidates(build, package_paths)
+    chosen = candidates(build, package_paths, args.samples)
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:

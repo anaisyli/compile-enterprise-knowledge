@@ -95,6 +95,33 @@ class PageCheckTests(Base):
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual(self.todo(), [])
 
+    def test_the_reviewer_sees_minerus_draft_and_what_it_adds_is_kept_beside_it(self) -> None:
+        ocr = self.build / "mineru-units"
+        ocr.mkdir(parents=True)
+        (ocr / "a1.json").write_text(json.dumps({"item_id": "a1", "source": "mineru", "units": [
+            {"locator": "page 1 ocr", "text": "SHERPA JACKET\nNTX S-099"}]}), encoding="utf-8")
+        self.pipeline()
+        picked = self.todo()
+        self.assertIn("【MinerU 识别】\nSHERPA JACKET\nNTX S-099", picked[0]["text"])  # The draft, not an empty page.
+        self.assertIn("MinerU 识别", picked[0]["draft"])
+        self.answer(missing="NTX S-100 SHERPA VEST")
+        self.assertEqual(self.pipeline().returncode, 0)
+        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+        self.assertIn("NTX S-099", page)  # MinerU's reading stays.
+        self.assertIn("NTX S-100 SHERPA VEST", page)  # The reviewer's addition is not swallowed by it.
+
+    def test_a_kind_chosen_for_mineru_waits_for_the_draft_then_every_pictured_page_is_looked_at(self) -> None:
+        (self.build).mkdir(parents=True, exist_ok=True)
+        (self.build / "sample-decisions.json").write_text(json.dumps({"catalog_pdf": {"status": "已确认", "method": "mineru"}}),
+                                                          encoding="utf-8")
+        self.pipeline()
+        self.assertEqual(self.todo(), [])
+        plan = json.loads((self.build / "page-check/plan.json").read_text(encoding="utf-8"))
+        self.assertTrue(any("等 MinerU 初稿" in s for s in plan["skipped"]))
+        result = run("mineru_ocr.py", "plan", "--out", str(self.out), "--package", str(self.package), "--config", str(self.config))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("MinerU 初稿 + AI 复核", (self.build / "mineru-plan.md").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

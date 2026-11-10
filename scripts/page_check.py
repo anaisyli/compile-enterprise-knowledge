@@ -30,7 +30,7 @@ from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, remaining_ocr_pages, write_json, write_text
 from office import convert_office
-from samples import choose_samples, doc_type, is_confirmed, load_decisions
+from samples import METHODS, choose_samples, doc_type, is_confirmed, load_decisions, method_of
 
 
 FOLDER = "page-check"
@@ -79,8 +79,19 @@ RULES = """# 看图核对规则
 
 
 def page_text(units: list[dict[str, str]], unit: str, number: int) -> str:
-    pattern = re.compile(rf"^{unit} {number}(?: col \d+)?$")
-    return "\n\n".join(u["text"] for u in units if pattern.match(u["locator"]))
+    """The page's draft as the build has it: the text layer, then what MinerU or the model read."""
+    native = re.compile(rf"^{unit} {number}(?: col \d+| table \d+)?$")
+    read = re.compile(rf"^{unit} {number} (?:ocr|check)$")
+    parts = [u["text"] for u in units if native.match(u["locator"])]
+    for u in units:
+        if read.match(u["locator"]) and u.get("text", "").strip():
+            label = "AI 看图补充" if u.get("checked") else "AI 读图" if u.get("engine") == "ai" else "MinerU 识别"
+            parts.append(f"【{label}】\n{u['text']}")
+    return "\n\n".join(parts)
+
+
+def draft_sources(text: str) -> list[str]:
+    return ["文字层"] + [name for name in ("MinerU 识别", "AI 读图") if f"【{name}】" in text]
 
 
 def code_pattern(prefixes: list[str]) -> re.Pattern[str]:
@@ -89,9 +100,18 @@ def code_pattern(prefixes: list[str]) -> re.Pattern[str]:
     return re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, prefixes), key=len, reverse=True)) + r")[\s-]?[A-Z]?-?\d{2,5}\b")
 
 
-def reasons_for(page: Any, text: str, codes: re.Pattern[str]) -> list[str]:
+def content_pictures(page: Any) -> list[dict[str, Any]]:
+    """Pictures big enough to be content, not a logo."""
     area = page.rect.width * page.rect.height or 1
-    pictures = [i for i in page.get_image_info() if (i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1]) > area * PICTURE_SHARE]
+    return [i for i in page.get_image_info() if (i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1]) > area * PICTURE_SHARE]
+
+
+def has_pictures(page: Any) -> bool:
+    return bool(content_pictures(page))
+
+
+def reasons_for(page: Any, text: str, codes: re.Pattern[str]) -> list[str]:
+    pictures = content_pictures(page)
     found = len(set(codes.findall(text)))
     reasons = []
     if pictures and len(text) < FEW_WORDS:
@@ -139,8 +159,15 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         if doc and doc["doc_id"] not in samples and not is_confirmed(doc_type(doc), decisions, config):
             deferred[doc_type(doc)] = deferred.get(doc_type(doc), 0) + int(doc.get("pages") or 1)
             continue
+        # How a person chose to read this kind: every pictured page is looked at when it is not the text layer.
+        method = method_of(doc_type(doc), decisions) if doc else "text"
         suffix = asset["file"].suffix.casefold()
-        units = load_units(text_dirs, item_id)
+        # The reviewer sees what the build will publish: text layer plus what MinerU or the model read.
+        units = load_units([*text_dirs, build / "mineru-units"], item_id)
+        read_path = build / "mineru-units" / f"{item_id}.json"
+        if method == "mineru" and not (read_path.is_file() and load_json(read_path).get("source") == "mineru"):
+            skipped.append(f"{route.get('display_name') or asset['file'].name}：这类按“MinerU 初稿 + AI 复核”处理，等 MinerU 初稿出来再对照")
+            continue
         name = route.get("display_name") or asset["file"].name
         if suffix in WORD:
             try:
@@ -162,13 +189,21 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
             skipped.append(f"{name}：没装 LibreOffice，幻灯片没法画成图")
             continue
         unit = "slide" if suffix in {".pptx", ".ppt"} else "page"
+        # Pages with no text that nobody has read yet go to MinerU or ai_read.py first. A page MinerU
+        # read is not skipped: OCR alone is not a visual check, it can miss labels or lose layout.
+        # Pages already looked at are in results.json and leave the list below.
         waiting = set(remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []))
-        # Only pages already checked against the source image can skip this review.
-        # OCR output alone is not a visual check: it can miss labels or lose layout.
-        read_path = build / "mineru-units" / f"{item_id}.json"
-        read = {int(m.group(1)) for u in (load_json(read_path).get("units", []) if read_path.is_file() else [])
-                if u.get("checked") and (m := re.match(r"(?:page|slide) (\d+)", u.get("locator", "")))}
-        waiting |= read
+        # A page already checked against its picture is done, unless MinerU's draft came after that look.
+        read_units = load_json(read_path).get("units", []) if read_path.is_file() else []
+        mineru_pages = {int(m.group(1)) for u in read_units if u.get("engine") not in {"ai"} and u.get("text", "").strip()
+                        and (m := re.match(r"(?:page|slide) (\d+) ocr$", u.get("locator", ""))) and not u.get("checked")}
+        for u in read_units:
+            match = re.match(r"(?:page|slide) (\d+)", u.get("locator", ""))
+            if u.get("checked") and match:
+                number = int(match.group(1))
+                looked = done.get(f"{item_id}|{'slide' if suffix in {'.pptx', '.ppt'} else 'page'} {number}", {})
+                if number not in mineru_pages or "MinerU 识别" in looked.get("draft", []) or not looked:
+                    waiting.add(number)
         try:
             document = pymupdf.open(long_path(source))
         except Exception as exc:  # A damaged file is reported, it does not stop the run.
@@ -181,6 +216,8 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     continue  # No text at all: ai_read.py or MinerU reads these whole.
                 text = page_text(units, unit, number)
                 reasons = reasons_for(page, text, codes)
+                if method != "text" and not reasons and has_pictures(page):
+                    reasons = [f"按“{METHODS[method]}”处理，有图片的页都对照"]
                 chosen.append((number, text, reasons))
             rest = [c for c in chosen if not c[2]]
             for number, text, _ in rng.sample(rest, max(1, round(len(rest) * SAMPLE_SHARE))) if rest else []:
@@ -192,8 +229,10 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 if not target.is_file():
                     document[number - 1].get_pixmap(dpi=DPI).save(str(target))
                 todo.append({"key": f"{item_id}|{unit} {number}", "item_id": item_id, "unit": unit, "page": number, "name": name,
-                             "image": str(target), "text": text, "reasons": reasons})
-    todo = [t for t in todo if t["key"] not in done]
+                             "image": str(target), "text": text, "reasons": reasons, "draft": draft_sources(text)})
+    # A page looked at before MinerU's draft came is looked at again with it.
+    todo = [t for t in todo if t["key"] not in done
+            or ("MinerU 识别" in t.get("draft", []) and "MinerU 识别" not in done[t["key"]].get("draft", []))]
     with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -246,14 +285,15 @@ def collect(build: Path) -> dict[str, Any]:
             structure = (record.get("structure") or "").strip()
             structured, refused = laid_out(record.get("structured") or "", entry.get("text", "") + "\n" + missing)
             results[entry["key"]] = {"item_id": entry["item_id"], "unit": entry["unit"], "page": entry["page"],
-                                     "reasons": entry["reasons"], "added": bool(missing),
+                                     "reasons": entry["reasons"], "added": bool(missing), "draft": entry.get("draft", ["文字层"]),
                                      "text_errors": clean_note(record.get("text_errors", "")),
                                      "pairing": clean_note(record.get("pairing", "")), "unclear": bool(record.get("unclear")),
                                      "structure": structure if structure in STRUCTURES else "",
                                      "structured": structured if structure in STRUCTURES else "", "structured_refused": refused}
             if missing:
+                # A locator of its own: on a page MinerU read, MinerU's "page N ocr" must not swallow it.
                 by_item.setdefault(entry["item_id"], []).append(
-                    {"locator": f"{entry['unit']} {entry['page']} ocr", "text": missing, "engine": "ai", "checked": True})
+                    {"locator": f"{entry['unit']} {entry['page']} check", "text": missing, "engine": "ai", "checked": True})
     store_ai_units(build, by_item)
     write_json(build / RESULTS, results)
     left = len(set(todo) - set(results))

@@ -24,7 +24,7 @@ WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
     "cell-review/decisions.jsonl", "cell-review/sheet-columns.json", "cell-review/t3-audit.json",
-    "page-check/results.json", "sample-decisions.json",
+    "page-check/results.json", "sample-decisions.json", "reviewed-pages.json",
     # Picture names stay once given, and the AI's picture names are not redone.
     "picture-names.json", "picture-names/answers.json",
 ]
@@ -33,6 +33,13 @@ FILES = [
 def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
     """(file in the run folder, file in the vault) for every piece of state that exists on either side."""
     found = [(build / name, vault / STATE / name) for name in FILES]
+    # The checked transcript, its exact page image and the machine draft travel together.
+    for directory in ("reviewed-page-images", "mineru-drafts"):
+        for root in (build / directory, vault / STATE / directory):
+            for item in root.rglob("*") if root.is_dir() else []:
+                if item.is_file():
+                    relative = item.relative_to(root)
+                    found.append((build / directory / relative, vault / STATE / directory / relative))
     for root in (build / "curation", vault / STATE / "curation"):
         for page in root.glob("*/page.md") if root.is_dir() else []:
             slug = page.parent.name

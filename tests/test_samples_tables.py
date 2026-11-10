@@ -136,6 +136,17 @@ class SampleFirstTests(Base):
         read = sorted(p.stem for p in (out / "04_知识库构建/package-text").glob("t*.json"))
         self.assertEqual(read, ["t2"])  # The file of middling size is the sample.
 
+    def test_a_method_written_in_the_plan_page_is_read_back_with_the_confirmation(self) -> None:
+        from publish_vault import merge_plan
+        new = ("| 类型 | 份数 | 在初筛包哪里 | 怎么提取 | 样例 | 样例情况 | 要做的事 | 处理方式 | 确认状态 |\n"
+               "| 产品画册 PDF | 2 | A | 读 | [[x]] | 建议：MinerU | — | 文字层（默认） | 待确认 |\n"
+               "| 其他 PDF（公司简介、规格书等） | 3 | A | 读 | [[y]] | 建议：文字层够用 | — | 文字层（默认） | 待确认 |\n")
+        current = new.replace("| 文字层（默认） | 待确认 |\n| 其他", "| MinerU+复核 | 已确认 |\n| 其他", 1)
+        merged, answers = merge_plan(current, new)
+        self.assertEqual(answers, {"catalog_pdf": {"status": "已确认", "method": "mineru"}})
+        self.assertIn("| MinerU+复核 | 已确认 |", merged)
+        self.assertIn("| 文字层（默认） | 待确认 |", merged)  # Untouched rows stay as generated.
+
     def test_a_quotation_confirmed_by_an_earlier_version_counts_for_spreadsheets(self) -> None:
         from samples import is_confirmed
         self.assertTrue(is_confirmed("spreadsheet", {"quotation": {"status": "已确认"}}, {}))
