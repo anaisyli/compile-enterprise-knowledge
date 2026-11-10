@@ -70,6 +70,17 @@ class RelinkTests(unittest.TestCase):
         self.assertTrue(moved.endswith("/a.pdf"))
         self.assertIsNone(moved_link("file:///Users/xx/elsewhere/a.pdf", {"/Users/xx/02_初筛包": Path("/Volumes/new/02_初筛包")}))
 
+    def test_check_finds_links_that_do_not_open_here(self) -> None:
+        from kb_relink import check_links
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            (vault / "a.md").write_text(f"[打开原件]({(vault / 'gone.pdf').as_uri()}) [[b]] [[不存在]] ![[pic.png|80]]\n", encoding="utf-8")
+            (vault / "b.md").write_text("x", encoding="utf-8")
+            (vault / "pic.png").write_bytes(b"x")
+            report = check_links(vault)
+        self.assertEqual((report["file_links"], report["broken"]), (1, 1))
+        self.assertEqual((report["wiki_links"], report["wiki_broken"]), (3, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

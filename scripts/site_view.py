@@ -251,7 +251,8 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
             continue
         relpath = route.get("source_relpath") or route.get("path") or ""
         hidden = bool(forbidden and forbidden.search(relpath))
-        source = Path(route["package"]) / (route.get("path") or "") if route.get("package") else None
+        # A file with no path of its own (say, inside an archive) has no folder to open.
+        source = Path(route["package"]) / route["path"] if route.get("package") and route.get("path") else None
         place({"what": "waiting", "name": "（名字含客户信息，见对照表）" if hidden else (route.get("display_name") or Path(relpath).name),
                "reason": reason, "open": "" if hidden or not source else source.parent.resolve().as_uri()}, relpath)
 

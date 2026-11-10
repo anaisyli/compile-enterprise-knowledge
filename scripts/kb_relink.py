@@ -20,6 +20,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 from kb_common import MANIFEST_NAME, load_json, write_json
@@ -144,10 +145,17 @@ def keep_receipt(vault: Path, changed: list[str], dry_run: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Point a copied vault at the package's new place.")
     parser.add_argument("--vault", required=True, help="Knowledge-base project folder")
-    parser.add_argument("--package", action="append", required=True, help="Where the package is now; repeat for several")
+    parser.add_argument("--package", action="append", default=[], help="Where the package is now; repeat for several")
     parser.add_argument("--dry-run", action="store_true", help="Only say what would change")
+    parser.add_argument("--check", action="store_true", help="Only check that every link opens here; change nothing")
     args = parser.parse_args()
     vault = Path(args.vault).resolve()
+    if args.check:
+        report = check_links(vault)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1 if report["broken"] or report["wiki_broken"] else 0
+    if not args.package:
+        parser.error("要指定 --package（初筛包现在的位置），只检查链接时用 --check")
     packages = [Path(p).resolve() for p in args.package]
     for package in packages:
         if not (package / MANIFEST_NAME).is_file():
@@ -165,11 +173,44 @@ def main() -> int:
         problems += issues
     record_place(vault, pairs, args.dry_run)
     keep_receipt(vault, changed, args.dry_run)
-    print(json.dumps({"packages": {old_path: str(new) for old_path, new in pairs.items()}, "pages_relinked": len(changed),
-                      "originals_linked": aliases, "problems": problems[:10], "dry_run": args.dry_run}, ensure_ascii=False, indent=2))
+    report = {"packages": {old_path: str(new) for old_path, new in pairs.items()}, "pages_relinked": len(changed),
+              "originals_linked": aliases, "problems": problems[:10], "dry_run": args.dry_run}
+    if not args.dry_run:
+        report["check"] = check_links(vault)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     if problems:
         print("打开原件的链接有建不了的：初筛包要和原文件在同一个磁盘上，不能是网盘或只读位置。")
+    if report.get("check", {}).get("broken"):
+        print("还有打不开的链接，见 check.examples。")
+        return 1
     return 0
+
+
+def check_links(vault: Path) -> dict[str, Any]:
+    """Every file: link and every [[link]] in the vault: does it open on this computer?"""
+    names = {p.name for p in vault.rglob("*") if p.is_file()}
+    stems = {p.stem for p in vault.rglob("*.md")}
+    files = broken = wiki = wiki_broken = 0
+    examples: list[str] = []
+    for page in vault.rglob("*.md"):
+        key = page.relative_to(vault).as_posix()
+        if key.startswith(ARCHIVE.as_posix()):
+            continue
+        text = page.read_text(encoding="utf-8", errors="replace")
+        for match in FILE_LINK.finditer(text):
+            files += 1
+            if not Path(link_path(match.group(0))).exists():
+                broken += 1
+                if len(examples) < 10:
+                    examples.append(f"{key} → {link_path(match.group(0))}")
+        for match in re.finditer(r"!?\[\[([^\]|#]+)", text):
+            wiki += 1
+            target = match.group(1).strip().split("/")[-1]
+            if target not in names and target not in stems:
+                wiki_broken += 1
+                if len(examples) < 10:
+                    examples.append(f"{key} → [[{target}]]")
+    return {"file_links": files, "broken": broken, "wiki_links": wiki, "wiki_broken": wiki_broken, "examples": examples}
 
 
 if __name__ == "__main__":
