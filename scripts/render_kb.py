@@ -21,7 +21,8 @@ from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
 from pictures import build_pictures, load_media, page_group, write_index as write_picture_index
-from products import Matcher, catalog as product_catalog, place_media, write_pages as write_product_pages
+from products import Matcher, catalog as product_catalog, place_media
+from site_view import write_site
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     BUILD_DIRECTORY,
@@ -53,6 +54,7 @@ PAGE_PICTURE_WIDTH = 360
 TABLE_SUMMARY = "产品表/00_产品表汇总.md"
 DECISION_LABELS = {"A": "A 原文保留", "B": "B 待清理", "C": "C 提取知识点", "D": "D 待定", "E": "E 排除", "web": "官网页面"}
 REASON_LABELS = {
+    "user_excluded": "用户指定不处理",
     "excluded": "初筛排除", "duplicate": "重复", "website_duplicate": "网页重复", "website_listing": "分类列表页",
     "third_party_material": "竞品或第三方资料", "writing_operations_material": "写作运营资料", "not_copied_restricted": "受限未复制",
     "no_extractable_content": "读不出可用内容", "unresolved_item": "初筛待定，未确认", "image_needs_review": "图片待识别",
@@ -548,6 +550,10 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
     else:
         parts.append("还没对照原图看（先做看图核对，才看得出文字层够不够）")
     read_path = build / "mineru-units" / f"{item}.json"
+    reviewed_path = build / 'reviewed-pages.json'
+    reviewed = load_json(reviewed_path).get(item, []) if reviewed_path.is_file() else []
+    if (build / 'mineru-drafts' / item / 'provenance.json').is_file() and reviewed:
+        parts.append(f"本样例已用 MinerU 初稿 + Agent 对照原页复核，共 {len(reviewed)} 页；原始初稿及核对依据已保存")
     if read_path.is_file() and load_json(read_path).get("source") == "mineru":
         native = defaultdict(str)
         record = load_json(read_path).get("units", [])
@@ -789,7 +795,8 @@ def main() -> int:
         published[doc_id], statuses[doc_id] = doc_path(doc), status
 
     write_table_summary(clean, visible, docs, statuses)
-    write_product_pages(build, products, match_product, docs, order, statuses, media, places, pictures_named, escape_cell)
+    # The site view also helps while only part is extracted: it shows what is there and what still waits.
+    write_site(build, config, routes, docs, order, statuses, originals, media, pictures_named, forbidden, escape_cell)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     write_name_maps(routes, docs, published, statuses, same_content)

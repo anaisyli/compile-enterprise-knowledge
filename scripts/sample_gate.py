@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from extract_blocks import package_title, route_asset
+from extract_blocks import configured_route, package_title
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json
 from samples import TYPES, gate, kind_of, load_decisions, save_gate
 
@@ -23,7 +23,7 @@ def entries_of(packages: list[Path], config: dict) -> list[dict]:
     found = []
     for package in packages:
         for asset in load_json(package / MANIFEST_NAME)["assets"]:
-            route = route_asset(asset, config.get("client_answers", {}))
+            route = configured_route(asset, config)
             if not (route["route"] == "kb" or route.get("reason") == "image_needs_review"):
                 continue
             _, folder = package_title(asset, route.get("tier", "T2"), config.get("doc_titles", {}))

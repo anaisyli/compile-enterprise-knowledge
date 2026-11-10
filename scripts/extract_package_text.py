@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3, ".xlsx": 2, ".xls": 2}
+READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000

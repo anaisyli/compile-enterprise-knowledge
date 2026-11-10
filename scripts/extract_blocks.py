@@ -168,6 +168,24 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
     return {"route": "hold", "reason": "unknown_decision"}
 
 
+def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Apply explicit user exclusions before cached extraction can route an item back in."""
+    item_id = asset["item_id"]
+    if item_id in config.get("excluded_items", {}):
+        return {"route": "skip", "reason": "user_excluded"}
+    # Keep exceptional, separately reviewed routing decisions in the build
+    # configuration.  The immutable preparation package is never edited.
+    override = (config.get("route_overrides") or {}).get(item_id)
+    if isinstance(override, dict) and override.get("route"):
+        result = {k: v for k, v in override.items() if k != "asset"}
+        result.setdefault("reason", "explicit_build_override")
+        return result
+    route = route_asset(asset, config.get("client_answers", {}))
+    if item_id in config.get("no_ocr_items", {}) and route.get("reason") == "image_needs_review":
+        return {"route": "media", "reason": "media_kept"}
+    return route
+
+
 TITLE_NOISE = [re.compile(p) for p in (r"\s*\(\d+\)$", r"[_\s-]*\d{8,}$", r"[\s_-]*副本$", r"^复制[_\s-]*")]
 FOLDERS = {"T3": "产品表", "T4": "业务要点"}
 
@@ -801,7 +819,7 @@ def main() -> int:
         text_dirs.append(ocr_dir)
 
     routes = {
-        asset["item_id"]: {**route_asset(asset, config["client_answers"]), "asset": asset}
+        asset["item_id"]: {**configured_route(asset, config), "asset": asset}
         for asset in assets
     }
     for item_id, route in routes.items():

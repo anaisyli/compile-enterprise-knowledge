@@ -16,6 +16,7 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from source_fidelity import reviewed_units
 
 from guard_blocks import EMAIL, FURNITURE, HARD_PATTERNS, LABELLED_PHONE, MOBILE_CN, ROW_PATTERNS, compile_terms
 from kb_common import (
@@ -53,7 +54,8 @@ def table_cells(line: str) -> list[str]:
 
 
 def squeeze(text: str) -> str:
-    return re.sub(r"\s+", "", text.replace(" ", ""))
+    # A protected dimension asterisk is identical source data after Markdown renders.
+    return re.sub(r"\s+", "", text.replace(" ", "").replace(r"\*", "*"))
 
 
 def ocr_format_key(text: str) -> str:
@@ -170,7 +172,8 @@ def main() -> int:
         item_id = doc["item_id"]
         if item_id not in units_by_item:
             dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
-            units_by_item[item_id] = squeeze(" ".join(u["text"] for u in load_units(dirs, item_id)))
+            units = reviewed_units(build, item_id, doc['source_sha256'], load_units(dirs, item_id))
+            units_by_item[item_id] = squeeze(" ".join(u["text"] for u in units))
         source = units_by_item[item_id]
         values = block["cells"].values() if block["kind"] == "row" else block["text"].splitlines()
         for value in values:
@@ -188,7 +191,8 @@ def main() -> int:
         accounted = squeeze("".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         accounted_ocr = ocr_format_key("\n".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
-        for unit in load_units(dirs, doc["item_id"]):
+        units = reviewed_units(build, doc['item_id'], doc['source_sha256'], load_units(dirs, doc['item_id']))
+        for unit in units:
             sheet = SHEET_LOCATOR.match(unit["locator"])
             if sheet and sheet.group(1) != "visible":
                 continue  # Hidden sheets never enter.

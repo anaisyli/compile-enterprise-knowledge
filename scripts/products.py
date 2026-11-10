@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""产品与方案素材总览: for each product and each solution, everything the client gave about it.
+"""Products and solutions named by the package's folders: which product a picture belongs to, and where it is filed.
 
 A client files the same product in several places: its pictures under 产品\\<大类>\\<产品>, the
 website's pictures under the page's title, the spec sheet as a PDF somewhere else. One page per
@@ -28,12 +28,11 @@ import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from kb_common import BUILD_DIRECTORY, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, safe_name, write_json, write_text
 
 
-HUB = "03_正式知识/80_产品与方案素材"
 PRODUCT_ROOT = re.compile(r"(?i)^(?:产品|产品资料|产品图片|产品图|products?)$")
 SOLUTION = re.compile(r"(?i)solutions?\b|解决方案")
 # Folder names that say what kind of picture, not which product.
@@ -194,119 +193,6 @@ def material_folders(place: dict[str, Any] | None, namer_forbidden: re.Pattern[s
     return [("其他" if namer_forbidden and namer_forbidden.search(p) else safe_name(p, "其他")) for p in parts]
 
 
-KIND_WORDS = {"product": "产品", "solution": "方案", "company": "公司"}
-
-
-def page_name(product: dict[str, Any]) -> str:
-    return safe_name(f"{KIND_WORDS.get(product['kind'], '产品')}素材-{product['name']}")
-
-
-def write_pages(build: Path, products: list[dict[str, Any]], match: Matcher, docs: dict[str, dict[str, Any]],
-                published: list[str], statuses: dict[str, str], media: list[dict[str, Any]], places: dict[str, dict[str, Any]],
-                pictures: dict[str, dict[str, Any]], escape: Callable[[str], str]) -> dict[str, Any]:
-    """One page per product or solution that has anything, an overview, and what matched nothing."""
-    hub = build / "vault" / HUB
-    by_product: dict[str, dict[str, Any]] = defaultdict(lambda: {"docs": [], "web": [], "pictures": defaultdict(list),
-                                                                  "outside": defaultdict(list), "videos": []})
-    for doc_id in published:
-        doc = docs[doc_id]
-        product = match(doc.get("original_name") or "", doc["title"], doc.get("package_path") or "")
-        if product:
-            by_product[product["name"]]["web" if doc.get("origin") == "website" else "docs"].append(doc)
-    unmatched: dict[str, Counter] = defaultdict(Counter)
-    for entry in media:
-        place = places.get(entry["item_id"], {})
-        product = place.get("product")
-        folder = "/".join(parts_of(entry["relpath"])[-3:]) or "根目录"
-        if not product:
-            unmatched[folder][VIDEO if place.get("kind") == VIDEO else "图片"] += 1
-            continue
-        group = by_product[product["name"]]
-        if place["kind"] == VIDEO:
-            group["videos"].append(entry)
-        elif entry.get("id") in pictures:
-            group["pictures"][place["kind"]].append(pictures[entry["id"]])
-        else:
-            group["outside"][str(Path(entry["package"]) / Path(entry["package_path"]).parent)].append(entry)
-    rows = []
-    for product in products:
-        group = by_product.get(product["name"])
-        if not group:
-            continue
-        counts = {"docs": len(group["docs"]), "web": len(group["web"]),
-                  "pictures": sum(len(v) for v in group["pictures"].values()) + sum(len(v) for v in group["outside"].values()),
-                  "videos": len(group["videos"])}
-        name = page_name(product)
-        write_text(hub / f"{name}.md", product_page(product, group, counts, statuses, pictures, escape))
-        rows.append((product, name, counts))
-    lines = [frontmatter({"doc_id": "HUB-overview", "title": "产品与方案素材总览", "layer": "素材总览", "status": "有效",
-                          "visibility": "internal", "generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}"}), "",
-             "# 产品与方案素材总览", "",
-             "> 每个产品、每个解决方案一页：客户给了哪些资料、官网有哪些页面、有哪些图片和视频。按名字和文件夹归类，不按内容猜；"
-             "归错或中英文名没合并的，在 kb-config.json 的 `products` 里写别名（见 SKILL.md）。", "",
-             "| 名称 | 类别 | 资料 | 官网页面 | 图片 | 视频 |", "| --- | --- | ---: | ---: | ---: | ---: |"]
-    rank = {"product": 0, "solution": 1, "company": 2}
-    for product, name, counts in sorted(rows, key=lambda r: (rank.get(r[0]["kind"], 3), r[0]["category"], r[0]["name"])):
-        lines.append(f"| [[{name}|{escape(product['name'])}]] | {escape(product['category'])} | {counts['docs']} | {counts['web']} "
-                     f"| {counts['pictures']} | {counts['videos']} |")
-    if unmatched:
-        lines += ["", "## 未归类的素材文件夹", "",
-                  "这些文件夹的名字里找不到任何产品或方案名。属于某个产品的，把文件夹里的名字加进那个产品的别名。", "",
-                  "| 文件夹（最后三层） | 内容 |", "| --- | --- |"]
-        for folder, kinds in sorted(unmatched.items()):
-            lines.append(f"| {escape(folder)} | {'、'.join(f'{k} {n}' for k, n in kinds.items())} |")
-    write_text(hub / "00_产品与方案素材总览.md", "\n".join(lines) + "\n")
-    return {"pages": len(rows), "unmatched_folders": len(unmatched)}
-
-
-def product_page(product: dict[str, Any], group: dict[str, Any], counts: dict[str, int], statuses: dict[str, str],
-                 pictures: dict[str, dict[str, Any]], escape: Callable[[str], str]) -> str:
-    kind = KIND_WORDS.get(product["kind"], "产品")
-    lines = [frontmatter({"doc_id": f"HUB-{squeeze(product['name'])[:40]}", "title": f"{product['name']} 素材总览", "layer": "素材总览",
-                          "status": "有效", "visibility": "internal", "generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}"}), "",
-             f"# {product['name']}：客户给的资料和素材", "",
-             f"> {kind}素材总览，自动汇总。类别：{product['category'] or '—'}；按这些名字归类：{'、'.join(product['aliases'])}。"
-             "回到 [[00_产品与方案素材总览]]。", "",
-             f"资料 {counts['docs']} 份 · 官网页面 {counts['web']} 页 · 图片 {counts['pictures']} 张 · 视频 {counts['videos']} 个", ""]
-    if group["docs"]:
-        lines += ["## 资料", ""]
-        lines += [f"- [[{Path(d['file_name']).stem}]]（{d.get('folder', '')}，{statuses.get(d['doc_id'], '')}）"
-                  for d in sorted(group["docs"], key=lambda d: d["title"])]
-        lines.append("")
-    if group["web"]:
-        lines += ["## 官网页面", ""]
-        lines += [f"- [[{Path(d['file_name']).stem}]]" + (f" · [原网页]({d['package_path']})" if str(d.get("package_path", "")).startswith("http") else "")
-                  for d in sorted(group["web"], key=lambda d: d["title"])]
-        lines.append("")
-    if group["pictures"] or group["outside"]:
-        lines += ["## 图片", ""]
-        order = [name for name, _ in PICTURE_KINDS] + [OTHER_PICTURES]
-        for picture_kind_name in sorted(group["pictures"], key=lambda k: order.index(k) if k in order else len(order)):
-            items = sorted(group["pictures"][picture_kind_name], key=lambda e: e["file"])
-            lines += [f"### {picture_kind_name}（{len(items)} 张）", ""]
-            lines.append(" ".join(f"![[{Path(e['file']).name}|150]]" for e in items[:GALLERY]))
-            if len(items) > GALLERY:
-                lines += ["", "其余：" + " · ".join(f"[[{Path(e['file']).name}]]" for e in items[GALLERY:])]
-            lines.append("")
-        if group["outside"]:
-            lines += ["### 留在初筛包里的图片", "", "较大的图片不复制进知识库，点“打开文件夹”看原图。", ""]
-            for folder, entries in sorted(group["outside"].items()):
-                lines.append(f"- {len(entries)} 张 · [打开文件夹]({Path(folder).resolve().as_uri()})")
-            lines.append("")
-    if group["videos"]:
-        lines += ["## 视频", "", "视频不复制进知识库，原件在初筛包。讲的内容转写以后才能当知识用。", "",
-                  "| 封面 | 文件 | 大小 | 时长 | 打开 |", "| --- | --- | ---: | --- | --- |"]
-        for entry in sorted(group["videos"], key=lambda e: e["relpath"]):
-            cover = pictures.get(entry.get("cover") or "")
-            shown = f"![[{Path(cover['file']).name}|120]]" if cover else ""
-            source = Path(entry["package"]) / entry["package_path"]
-            lines.append(f"| {shown} | {escape(Path(entry['relpath']).name)} "
-                         f"| {entry.get('bytes', 0) / 1024 / 1024:.1f} MB | {entry.get('duration', '')} "
-                         f"| [打开]({source.resolve().as_uri()}) · [文件夹]({source.parent.resolve().as_uri()}) |")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def propose(out: Path, config: dict[str, Any]) -> dict[str, Any]:
     build = out / BUILD_DIRECTORY
     media = load_json(build / "media.json") if (build / "media.json").is_file() else []
@@ -321,7 +207,8 @@ def propose(out: Path, config: dict[str, Any]) -> dict[str, Any]:
     lines = ["# 产品和方案清单（草稿）", "",
              "脚本从文件夹名、官网大类、画册和带 Solution/方案 的标题里读出来的名字。同一个产品的中英文名、型号会分成几条。",
              "把它整理好写进 kb-config.json 的 \"products\"：同一个产品合成一条，其他名字和型号写进 aliases；不是产品的删掉。", "",
-             '例：{"name": "壁挂广告机", "category": "广告机", "kind": "product", "aliases": ["Wall mounted Digital Signage", "DS20", "DS50"]}', "",
+             '例：{"name": "DS50系列", "category": "广告机", "sub": "Wall mounted Digital Signage", "aliases": ["DS50系列1", "DS50系列2", "DS50"]}', "",
+             "category 是大类，sub 是小类，name 是产品；没有 sub 时 name 就是小类。几轮资料（DS50系列1、DS50系列2）写成同一个产品的 aliases。", "",
              "| 名字 | 类别 | 产品/方案 | 来自 |", "| --- | --- | --- | --- |"]
     lines += [f"| {e['name']} | {e['category']} | {'方案' if e['kind'] == 'solution' else '产品'} | {'、'.join(e['from'])} |" for e in found]
     if left:

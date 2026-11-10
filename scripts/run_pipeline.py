@@ -96,16 +96,18 @@ def main() -> int:
     extract = [*sources, *repeat("--extract-status", args.extract_status), *ocr, *common,
                "--images", args.images, "--max-image-mb", args.max_image_mb]
     render = [*common, "--tiers", args.tiers, *(["--skip-t3-gate"] if args.skip_t3_gate else [])]
-    for script, arguments in (
+    stages = [
         ("extract_blocks.py", extract),
         # Pick the pages to look at beside their text; the model's answers come in on the next run.
         ("page_check.py", ["plan", *sources, *common]),
         ("guard_blocks.py", [*repeat("--text-dir", args.text_dir), *common]),
         ("render_kb.py", render),
-        ("curate.py", ["prepare", *common]),
-        ("curate.py", ["build", *common]),
-        ("verify_kb.py", [*sources, *ocr, *common]),
-    ):
+    ]
+    config = load_json(Path(args.config)) if args.config else {}
+    if config.get("build_stage") != "sources_only":
+        stages.extend([("curate.py", ["prepare", *common]), ("curate.py", ["build", *common])])
+    stages.append(("verify_kb.py", [*sources, *ocr, *common]))
+    for script, arguments in stages:
         code = step(script, *arguments)
         if code:
             return code

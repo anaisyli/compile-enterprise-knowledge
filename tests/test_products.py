@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""产品与方案素材总览: one page per product with its documents, pictures by kind, and videos."""
+"""Products read off the package's folders, and where their pictures are filed."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from products import HUB, Matcher, catalog, material_folders, place_media, proposed, write_pages  # noqa: E402
+from products import Matcher, catalog, material_folders, place_media, proposed  # noqa: E402
 
 BASE = "知识库（总）/建站资料/建站资料/建站资料/产品"
 
@@ -60,31 +60,6 @@ class ProductTests(unittest.TestCase):
         places = place_media(self.files, Matcher(catalog(config, self.files, {}, None)))
         self.assertEqual(places["m1"]["product"]["name"], "壁挂广告机")
         self.assertEqual(places["m9"]["product"]["name"], "Mini LED 智能屏")
-
-    def test_each_product_gets_a_page_with_documents_pictures_and_videos(self) -> None:
-        products = catalog({}, self.files, {}, None)
-        match = Matcher(products)
-        places = place_media(self.files, match)
-        docs = {"D1": {"doc_id": "D1", "title": "公司资料-Wall mounted Digital Signage 规格书", "file_name": "规格书.md", "folder": "公司资料",
-                       "package_path": "B/规格书.pdf"},
-                "W1": {"doc_id": "W1", "title": "广告机-壁挂", "file_name": "官网-壁挂.md", "folder": "官网页面/广告机", "origin": "website",
-                       "original_name": "Wall mounted Digital Signage-Smartline", "package_path": "https://example.com/wall"}}
-        pictures = {"img-1111111111111111.jpg": {"file": "资料包素材/广告机/Wall mounted Digital Signage/白底图/x-11111111.jpg"}}
-        with tempfile.TemporaryDirectory() as folder:
-            build = Path(folder)
-            result = write_pages(build, products, match, docs, ["D1", "W1"], {"D1": "有效", "W1": "有效"}, self.files, places,
-                                 pictures, lambda s: s)
-            page = (build / "vault" / HUB / "产品素材-Wall mounted Digital Signage.md").read_text(encoding="utf-8")
-            overview = (build / "vault" / HUB / "00_产品与方案素材总览.md").read_text(encoding="utf-8")
-        self.assertIn("[[规格书]]", page)
-        self.assertIn("[[官网-壁挂]] · [原网页](https://example.com/wall)", page)
-        self.assertIn("### 白底图（1 张）", page)
-        self.assertIn("![[x-11111111.jpg|150]]", page)
-        self.assertIn("## 视频", page)
-        self.assertIn("介绍.mp4", page)
-        self.assertIn("[[产品素材-Wall mounted Digital Signage|Wall mounted Digital Signage]]", overview)
-        self.assertIn("## 未归类的素材文件夹", overview)
-        self.assertGreater(result["pages"], 3)
 
 
 if __name__ == "__main__":
