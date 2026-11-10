@@ -101,10 +101,15 @@ class Products:
         # A person's names decide even inside the 产品 folder; names read off folders only find files elsewhere.
         self.configured: list[tuple[str, tuple[str, str, str]]] = []
         self.aliases: list[tuple[str, tuple[str, str, str]]] = []
+        # Folders a person named exactly: (小类 folder, folder) -> product. For names like 01…11, which as
+        # aliases would also match every date and number in other paths.
+        self.exact: dict[tuple[str, str], tuple[str, str, str]] = {}
         for item in config.get("products") or []:
             key = (item.get("category") or "产品", item.get("sub") or item["name"], item["name"] if item.get("sub") else "")
-            self.leaves[key] = {"rounds": set(), "aliases": [item["name"], *item.get("aliases", [])]}
+            self.leaves[key] = {"rounds": set(), "aliases": [item["name"], *item.get("aliases", [])], "note": item.get("note", "")}
             self.configured += [(squeeze(a), key) for a in [item["name"], *item.get("aliases", [])] if len(squeeze(a)) >= 2]
+            for folder in item.get("folders", []):
+                self.exact[(squeeze(item.get("sub") or ""), squeeze(folder))] = key
         self.aliases += self.configured
         self.questions: dict[str, set[str]] = defaultdict(set)
 
@@ -122,7 +127,7 @@ class Products:
         sub = self.clean(named[0]) if named else ""
         model = self.clean(round_base(named[1])) if len(named) > 1 else ""
         # A person's names rename a level; they never flatten the levels below it.
-        hit_model = self.by_alias([named[1]], self.configured) if len(named) > 1 else None
+        hit_model = (self.exact.get((squeeze(named[0]), squeeze(named[1]))) or self.by_alias([named[1]], self.configured)) if len(named) > 1 else None
         hit_sub = self.by_alias([named[0]], self.configured) if named else None
         if hit_model:
             key = hit_model
@@ -392,11 +397,16 @@ def write_pages(root: Path, tree: Products, pages: dict, home: dict[str, Any], p
                 stem = safe_name(f"建站-产品-{name.replace(' / ', '-')}")
                 rounds = sorted(tree.leaves.get(key, {}).get("rounds", set()))
                 note_text = f"客户分 {len(rounds)} 批给的资料：{'、'.join(rounds)}，下面合在一起。" if len(rounds) > 1 else ""
+                # Where the name came from, said where the name is shown: a name the AI read off file names is a guess.
+                named_by = tree.leaves.get(key, {}).get("note", "")
+                if named_by:
+                    note_text += f"名称说明：{named_by}（原文件夹：{'、'.join(rounds) or '—'}）。"
                 lines = header(f"product-{name}", f"产品 · {name}", note_text) + body(groups, escape, EXPECTED["product"])
                 write_text(root / "产品" / f"{stem}.md", "\n".join(lines).rstrip() + "\n")
                 counts[f"产品/{name}"] = {what: len(items) for what, items in groups.items()}
                 indent = "    " if model else "  "
-                tree_lines.append(f"{indent}- [[{stem}|{escape(model or sub or category)}]]：{progress(groups)}")
+                mark = f"（{named_by}）" if named_by else ""
+                tree_lines.append(f"{indent}- [[{stem}|{escape(model or sub or category)}]]{mark}：{progress(groups)}")
     questions_lines = [f"- {escape(where)} 下面的编号文件夹 {'、'.join(sorted(set(v)))}：是不同型号，还是同一产品分几批给的？" for where, v in tree.questions.items()]
     products = header("products", page_title("products")) + ["按客户建站资料里“产品”文件夹的层级：大类 / 小类 / 产品。", "", *tree_lines]
     if questions_lines:

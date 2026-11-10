@@ -108,6 +108,20 @@ class SiteViewTests(unittest.TestCase):
         self.assertNotIn("m10-", (site / "建站-首页 Home.md").read_text(encoding="utf-8"))
         self.assertIn("m10-", (site / "建站-关于我们-企业介绍 Company Profile.md").read_text(encoding="utf-8"))
 
+    def test_a_numbered_folder_named_exactly_says_who_named_it(self) -> None:
+        self.media.append(media("m11", "知识库（总）/杂项/微信图片_20260101/7.jpg", id="img-bbbbbbbbbbbbbbbb.jpg"))
+        self.pictures["img-bbbbbbbbbbbbbbbb.jpg"] = {"file": "资料包素材/x/m11-bbbbbbbb.jpg", "alt": "", "use": "可用于官网", "doc_id": "", "group": ""}
+        site = self.build_site({"products": [{"name": "01 立式自助机", "category": "自助服务广告机", "sub": "Self Services Kiosk",
+                                               "folders": ["01"], "note": "AI 根据文件名识别的名称，待确认"}]})
+        page = (site / "产品" / "建站-产品-自助服务广告机-Self Services Kiosk-01 立式自助机.md").read_text(encoding="utf-8")
+        self.assertIn("名称说明：AI 根据文件名识别的名称，待确认（原文件夹：01）", page)
+        self.assertIn("m4-", page)
+        overview = (site / "00_建站资料总览.md").read_text(encoding="utf-8")
+        self.assertIn("01 立式自助机]]（AI 根据文件名识别的名称，待确认）", overview)
+        self.assertNotIn("编号文件夹", overview)  # Answered, so no longer asked.
+        # “01” inside a date elsewhere does not pull that picture to the kiosk.
+        self.assertIn("m11-", (site / "建站-待归类 To Sort.md").read_text(encoding="utf-8"))
+
     def test_home_candidates_wait_for_a_person(self) -> None:
         out = self.build.parent / (self.build.name + "-run")
         build = out / "04_知识库构建"
