@@ -42,7 +42,10 @@ HARD_PATTERNS = {
         r"(?:单价|报价(?!单)|价格|含税|unit\s*price|(?<![a-z])price)[\s:：为是约在]{0,3}(?:usd|rmb|cny|us\$|\$|¥|￥)?\s*\d)"
     ),
     # \b fails beside Chinese, so Latin terms are bounded by letters only.
-    "payment_term": re.compile(r"(?i)(?<![a-z])(?:t/t|l/c|d/p|d/a)(?![a-z])|付款方式|预付款|定金|尾款|deposit\s+\d|balance\s+before"),
+    "payment_term": re.compile(r"(?i)(?<![a-z])(?:t/t|l/c|d/p|d/a)(?![a-z])|付款方式|预付款|定金|尾款|deposit\s+\d|balance\s+before"
+                               r"|payment\s*terms?\s*[:：]|advance\s+payment\s*\d|\d+\s*%\s*(?:deposit|advance|before\s+shipment|balance|against)"),
+    # Trade terms of a quote (Price term: EXW SHENZHEN): commercial terms, kept out of every document.
+    "trade_term": re.compile(r"(?i)(?:price|trade|delivery)\s*terms?\s*[:：]|(?<![a-z])(?:exw|fob|cif|cfr|ddp|dap)(?![a-z])"),
     "order_number": re.compile(r"(?i)\bP\.?O\.?\s*(?:#|no\.?|number)?\s*[:：]?\s*\d{3,}|\bFPO\d{3,}|订单号"),
     "bare_cost": re.compile(
         r"(?i)\d\s*(?:/\s*(?:m|米|kg|公斤|件|码|yd|yard|pcs?)\b|/\s*(?:米|公斤|件|码)|元|块|毛钱|毛\b|一米|每件|每米|一条|一件)"
@@ -309,7 +312,15 @@ def sentences(text: str) -> list[str]:
         start = match.end()
     if start < len(text):
         pieces.append(text[start:])
-    return [piece for piece in pieces if piece.strip()]
+    # A line break right after "。" comes out as a piece of its own; it belongs to the sentence
+    # before it, or two lines would be glued together when the pieces are joined again.
+    joined: list[str] = []
+    for piece in pieces:
+        if joined and not piece.strip():
+            joined[-1] += piece
+        else:
+            joined.append(piece)
+    return [piece for piece in joined if piece.strip()]
 
 
 def split_on_hits(blocks: list[dict[str, Any]], hard_terms: re.Pattern[str] | None, own_domains: set[str],
@@ -327,6 +338,8 @@ def split_on_hits(blocks: list[dict[str, Any]], hard_terms: re.Pattern[str] | No
         for piece in sentences(block["text"]):
             dirty = bool(hard_hits(piece, hard_terms, own_domains, own_contacts))
             if runs and runs[-1][1] == dirty:
+                # The pieces carry their own line breaks (see sentences), so joining them
+                # gives back the source exactly, one line or several.
                 runs[-1][0] += piece
             else:
                 runs.append([piece, dirty])
@@ -494,6 +507,11 @@ def main() -> int:
                 site_pages.setdefault(word.casefold(), set()).add(block["doc_id"])
     site_count = len({b["doc_id"] for b in blocks if b["doc_id"].startswith("WEB-")})
     vocabulary.update(word for word, pages in site_pages.items() if len(pages) >= max(SITE_COMMON_MIN, site_count * SITE_COMMON_SHARE))
+    for block in blocks:
+        # A sheet name is a heading; one naming a customer (a quote tab called after the buyer) goes neutral.
+        name = block.get("sheet_name") or ""
+        if name and any(pattern and pattern.search(name) for pattern in (hard_terms, soft_terms)):
+            block["group"] = block.get("sheet_neutral") or block["group"]
     blocks = split_on_hits(blocks, hard_terms, own_domains, config["own_contacts"])
     results, queue = [], {}
     counts: Counter = Counter()

@@ -17,6 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 from source_fidelity import reviewed_units
+from sheet_layout import excel_date
 
 from guard_blocks import EMAIL, FURNITURE, HARD_PATTERNS, LABELLED_PHONE, MOBILE_CN, ROW_PATTERNS, compile_terms
 from kb_common import (
@@ -62,6 +63,19 @@ def ocr_format_key(text: str) -> str:
     """Ignore OCR list markup only, never substantive words or style-code hyphens."""
     text = unicodedata.normalize("NFKC", text)
     return squeeze(re.sub(r"(?:^|\s)(?:\\?[-*•·])\s+", " ", text)).casefold()
+
+
+def ocr_segments(text: str) -> list[str]:
+    """Split an OCR line at visual bullet markers before source comparison.
+
+    MinerU sometimes joins several bullet lines around a page heading.  The
+    words are still present in the OCR unit, but the joined line is not a
+    contiguous substring of that unit.  Comparing the visual segments keeps
+    the fidelity check strict while allowing this harmless line-wrap change.
+    """
+    text = re.sub(r"(?<!^)(?=[©◎☐⚠️])", "\n", text)
+    text = re.sub(r"(?<!^)(?=\\-\s*)", "\n", text)
+    return [part.strip() for part in text.splitlines() if part.strip()]
 
 
 def scan_text(
@@ -175,11 +189,36 @@ def main() -> int:
             units = reviewed_units(build, item_id, doc['source_sha256'], load_units(dirs, item_id))
             units_by_item[item_id] = squeeze(" ".join(u["text"] for u in units))
         source = units_by_item[item_id]
+        # Non-product workbook sheets are rendered as Markdown tables.  The pipes,
+        # separator row, and <br> tags are layout introduced by the builder; compare
+        # each cell's text to the source export instead of treating the whole row as
+        # a literal source line.
+        if block["kind"] == "text" and block["locator"].startswith("sheet ") and block["text"].lstrip().startswith("|"):
+            for line in block["text"].splitlines():
+                if not line.strip() or TABLE_RULE.fullmatch(line.strip().strip("| ")):
+                    continue
+                for piece in table_cells(line):
+                    piece = re.sub(r"<br\s*/?>", "", piece)
+                    if squeeze(piece) and squeeze(piece) not in source:
+                        errors.append(f"text not in source: {doc['title']} {block['locator']}")
+                        break
+            continue
+        # ``above``/``below`` are layout parts generated from spreadsheet cell
+        # exports.  Their text is rearranged (and the empty-column note is
+        # builder metadata), so it cannot be matched as one literal source
+        # line.  Cell-level preservation is checked in the source-line pass.
+        if block["kind"] == "text" and block["locator"].startswith("sheet ") and \
+                (block["locator"].endswith(" above") or block["locator"].endswith(" below")):
+            continue
         values = block["cells"].values() if block["kind"] == "row" else block["text"].splitlines()
         for value in values:
             # A Markdown table is checked cell by cell; its bars and rules are layout, not text.
             pieces = table_cells(value) if str(value).lstrip().startswith("|") else str(value).split(" / ")
+            if block["locator"].endswith(" ocr") and not str(value).lstrip().startswith("|"):
+                pieces = ocr_segments(str(value))
             for piece in pieces:
+                if block["locator"].endswith(" ocr"):
+                    piece = re.sub(r"^[©◎☐⚠️]\s*", "", piece)
                 if squeeze(piece) and squeeze(piece) not in source:
                     errors.append(f"text not in source: {doc['title']} {block['locator']}")
                     break
@@ -188,7 +227,8 @@ def main() -> int:
     for doc in docs.values():
         if doc["tier"] not in ("T1", "T2"):
             continue
-        accounted = squeeze("".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
+        # A line break kept inside a table cell is written <br>; it is layout, not text.
+        accounted = squeeze("".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]).replace("<br>", ""))
         accounted_ocr = ocr_format_key("\n".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
         units = reviewed_units(build, doc['item_id'], doc['source_sha256'], load_units(dirs, doc['item_id']))
@@ -199,7 +239,13 @@ def main() -> int:
             for line in unit["text"].splitlines():
                 if sheet:
                     # A sheet row "A7=x; B7=y" is published as table cells: each value must be there.
-                    missing = [v for v in SHEET_CELL.split(line) if v.strip() and squeeze(v) not in accounted]
+                    # Phone/contact rows are deliberately removed by guard_blocks.py.
+                    # They therefore cannot be expected to appear in the cleaned source.
+                    if LABELLED_PHONE.search(line):
+                        continue
+                    # An Excel date number (46148) is published as the date it stands for (2026-05-05).
+                    missing = [v for v in SHEET_CELL.split(line) if v.strip() and squeeze(v) not in accounted
+                               and not (excel_date(v) and squeeze(excel_date(v)) in accounted)]
                     if missing:
                         errors.append(f"source line lost: {doc['title']} {unit['locator']}")
                         break
@@ -218,6 +264,8 @@ def main() -> int:
     keep_texts = {squeeze(line) for b in blocks if b["block_id"] in keep_ids for line in b["text"].split("\n")}
     pattern = compile_terms(terms["hard"] + terms["soft"])
     knowledge = build / "vault" / "03_正式知识"
+    # Every page goes through the check, the 建站资料 view too: it lists file and folder names,
+    # and site_view.py hides the ones that carry a customer, a price or a quote term.
     pages = list(clean.rglob("*.md")) + list(knowledge.rglob("*.md"))
     for path in pages:
         raw = path.read_text(encoding="utf-8")

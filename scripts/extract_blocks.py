@@ -25,6 +25,7 @@ from xml.etree import ElementTree as ET
 
 from fetch_website import module_for as web_module, page_kind as web_kind
 from extract_package_text import markdown_table
+from sheet_layout import lay_out
 from office import convert_office
 from collections import Counter, defaultdict
 from kb_common import (
@@ -523,15 +524,31 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                 continue
             sheets += 1
             rows = parse_sheet_rows(text)
+            # The sheet's own name is its heading (会议一体机, 点餐机); guard_blocks.py puts the neutral
+            # 表 n back when the name turns out to be a customer's.
+            names = {"sheet_name": sheet.group("name"), "sheet_neutral": f"表 {sheets}"}
+            group = f"表 {sheets} · {sheet.group('name')}"
+            laid = lay_out(rows, unit.get("merges", []))
+            if laid:
+                # Lines above the real header, the table, lines below: every word kept, only arranged.
+                below = ([f"（原表还有这些列，下面没有内容：{'、'.join(laid['empty'])}）"] if laid["empty"] else []) + laid["below"]
+                parts = [("above", "\n".join(laid["above"])), ("", markdown_table([laid["header"], *laid["body"]])),
+                         ("below", "\n".join(below))]
+                for part, part_text in parts:
+                    if part_text.strip():
+                        blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}{'|' + part if part else ''}"),
+                                       "doc_id": doc_id, "kind": "text", "group": group,
+                                       "locator": f"{unit['locator']} {part}".strip(), "text": part_text,
+                                       "ocr": False, "ai_read": False, "ai_checked": False, **names})
+                continue
             columns = sorted({c for row in rows.values() for c in row}, key=column_number)
             table = [[rows[n].get(c, "") for c in columns] for n in sorted(rows)]
             first_row = min(rows) if rows else 1
             header_end = max([first_row] + [int(m.group(2)) for merge in unit.get("merges", [])
                              if (m := re.fullmatch(r"[A-Z]+(\d+):[A-Z]+(\d+)", merge))
                              and int(m.group(1)) == first_row])
-            blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}"), "doc_id": doc_id, "kind": "text",
-                           # A sheet name can be a customer's, so the heading is neutral.
-                           "group": f"表 {sheets}", "locator": unit["locator"], "text": markdown_table(table) if table else text,
+            blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}"), "doc_id": doc_id, "kind": "text", **names,
+                           "group": group, "locator": unit["locator"], "text": markdown_table(table) if table else text,
                            "ocr": False, "ai_read": False, "ai_checked": False,
                            "table_layout": {"rows": sorted(rows), "columns": [column_number(c) for c in columns],
                                             "merges": unit.get("merges", []),

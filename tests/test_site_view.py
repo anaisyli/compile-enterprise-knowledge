@@ -122,6 +122,17 @@ class SiteViewTests(unittest.TestCase):
         # “01” inside a date elsewhere does not pull that picture to the kiosk.
         self.assertIn("m11-", (site / "建站-待归类 To Sort.md").read_text(encoding="utf-8"))
 
+    def test_names_with_a_price_or_a_customer_are_not_printed(self) -> None:
+        self.media.append(media("m12", "知识库（总）/报价 USD 5.8 每台/12.jpg", id="img-cccccccccccccccc.jpg"))
+        self.pictures["img-cccccccccccccccc.jpg"] = {"file": "资料包素材/x/m12-cccccccc.jpg", "alt": "", "use": "可用于官网", "doc_id": "", "group": ""}
+        self.routes["w2"] = {"source_relpath": "知识库（总）/Acme 询价/规格.docx", "route": "hold", "reason": "awaiting_sample",
+                             "display_name": "Acme 规格.docx", "package": "D:/包", "path": "B/Acme 询价/规格.docx"}
+        site = self.build_site()
+        everything = "\n".join(p.read_text(encoding="utf-8") for p in site.rglob("*.md"))
+        self.assertNotIn("USD 5.8", everything)
+        self.assertNotIn("Acme", everything)
+        self.assertIn("名字含客户或报价信息", everything)
+
     def test_home_candidates_wait_for_a_person(self) -> None:
         out = self.build.parent / (self.build.name + "-run")
         build = out / "04_知识库构建"

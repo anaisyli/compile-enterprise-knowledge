@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kb_common import BUILD_DIRECTORY, SKILL_VERSION, frontmatter, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from guard_blocks import HARD_PATTERNS
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
 
 ROOT = "03_正式知识/80_建站资料"
@@ -77,6 +78,14 @@ EXPECTED = {
 }
 
 
+def risky(text: str, forbidden: re.Pattern[str] | None) -> bool:
+    """A name not to print: a customer's or denied word, or a price, a payment or trade term."""
+    return bool(text) and (bool(forbidden and forbidden.search(text)) or any(p.search(text) for p in HARD_PATTERNS.values()))
+
+
+MASKED = "（名字含客户或报价信息，见对照表）"
+
+
 def page_title(key: str) -> str:
     cn, en = PAGES[key]
     return f"{cn} {en}" if cn != en else cn
@@ -114,7 +123,7 @@ class Products:
         self.questions: dict[str, set[str]] = defaultdict(set)
 
     def clean(self, name: str) -> str:
-        return "其他" if self.forbidden and self.forbidden.search(name) else name
+        return "其他" if risky(name, self.forbidden) else name
 
     def from_folders(self, relpath: str) -> tuple[tuple[str, str, str], str] | None:
         """(category, sub, product) and the round's folder, for a file under the 产品 folder."""
@@ -166,6 +175,9 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
                statuses: dict[str, str], originals: dict[str, str], media: list[dict[str, Any]], pictures: dict[str, dict[str, Any]],
                forbidden: re.Pattern[str] | None, escape: Callable[[str], str]) -> dict[str, Any]:
     tree = Products(config, forbidden)
+
+    def shown(name: str) -> str:
+        return MASKED if risky(name, forbidden) else name
     pages: dict[Any, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     reasons: dict[str, str] = {}
 
@@ -174,7 +186,7 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         found = tree.from_folders(relpath)
         if found:
             key, round_name = found
-            item["round"] = round_name
+            item["round"] = shown(round_name)
             pages[("product", key)][item["what"]].append(item)
             return
         segments = parts_of(relpath) + [Path(relpath).stem, title]
@@ -183,20 +195,20 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         chosen = next((k for k, words in (config.get("site_sections") or {}).items()
                        if k in PAGES and any(squeeze(w) in names for w in words)), None)
         if chosen:
-            item["round"] = (parts_of(relpath) or [""])[-1]
+            item["round"] = shown((parts_of(relpath) or [""])[-1])
             pages[chosen][item["what"]].append(item)  # A person put this folder in a section: that decides.
             return
         key = tree.by_alias(segments)
         if key:
-            item["round"] = (parts_of(relpath) or ["官网"])[-1]
+            item["round"] = shown((parts_of(relpath) or ["官网"])[-1])
             pages[("product", key)][item["what"]].append(item)
             return
         section = section_of(" ".join(segments))
         if section:
-            item["round"] = (parts_of(relpath) or [""])[-1]
+            item["round"] = shown((parts_of(relpath) or [""])[-1])
             pages[section][item["what"]].append(item)
         else:
-            item["round"] = "/".join(parts_of(relpath)[-2:]) or "根目录"
+            item["round"] = shown("/".join(parts_of(relpath)[-2:]) or "根目录")
             reasons.setdefault(item["round"], "文件夹名和标题里没有产品名或栏目名")
             pages["unsorted"][item["what"]].append(item)
 
@@ -229,11 +241,11 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
     for entry in media:
         relpath = entry["relpath"]
         folder_uri = (Path(entry["package"]) / entry["package_path"]).parent.resolve().as_uri()
-        hidden = bool(forbidden and forbidden.search(relpath))
+        hidden = risky(relpath, forbidden)
         if entry["kind"] in {"video", "audio"}:
             source = (Path(entry["package"]) / entry["package_path"]).resolve().as_uri()
             cover = pictures.get(entry.get("cover") or "")
-            place({"what": "videos", "name": "（名字含客户信息，见对照表）" if hidden else Path(relpath).name, "bytes": entry.get("bytes", 0),
+            place({"what": "videos", "name": MASKED if hidden else Path(relpath).name, "bytes": entry.get("bytes", 0),
                    "duration": entry.get("duration", ""), "open": "" if hidden else source, "folder_uri": "" if hidden else folder_uri,
                    "cover": cover["file"] if cover else "", "waiting": entry["status"] == "media_awaiting_client"}, relpath)
         elif picture_of.get(entry["item_id"]) in pictures:
@@ -242,7 +254,7 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
                    "kind": picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri}, relpath)
         else:
             reason = UNPROCESSED["media_awaiting_client"] if entry["status"] == "media_awaiting_client" else "图片较大，原图留在初筛包"
-            place({"what": "waiting", "name": "（名字含客户信息，见对照表）" if hidden else Path(relpath).name, "reason": reason,
+            place({"what": "waiting", "name": MASKED if hidden else Path(relpath).name, "reason": reason,
                    "open": "" if hidden else folder_uri}, relpath)
     published_items = {docs[d]["item_id"] for d in order}
     for item_id, route in routes.items():
@@ -250,10 +262,10 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         if item_id in published_items or route.get("route") == "media" or not reason or route.get("decision") == "E":
             continue
         relpath = route.get("source_relpath") or route.get("path") or ""
-        hidden = bool(forbidden and forbidden.search(relpath))
+        hidden = risky(relpath, forbidden)
         # A file with no path of its own (say, inside an archive) has no folder to open.
         source = Path(route["package"]) / route["path"] if route.get("package") and route.get("path") else None
-        place({"what": "waiting", "name": "（名字含客户信息，见对照表）" if hidden else (route.get("display_name") or Path(relpath).name),
+        place({"what": "waiting", "name": MASKED if hidden else (route.get("display_name") or Path(relpath).name),
                "reason": reason, "open": "" if hidden or not source else source.parent.resolve().as_uri()}, relpath)
 
     home = load_json(build / HOME_STATE) if (build / HOME_STATE).is_file() else {}

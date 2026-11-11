@@ -36,7 +36,9 @@ class ScreeningAdviceTests(Base):
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
         self.assertIn("| 面料 | 克重 |\n| --- | --- |\n| 摇粒绒 | 280GSM |", page)
         self.assertNotIn("A1=", page)
-        self.assertNotIn("某客户专用", page)  # A sheet name can be a customer's.
+        # The sheet's name is its heading; only a name the guard knows as a customer's is left out
+        # (test_sheet_layout covers that).
+        self.assertIn("## 表 1 · 某客户专用", page)
         self.assertNotIn("内部", page)
 
     def test_a_product_column_screening_marked_stays_marked_and_prices_still_go(self) -> None:
