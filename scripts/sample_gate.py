@@ -13,14 +13,18 @@ import json
 import sys
 from pathlib import Path
 
-from extract_blocks import configured_route, package_title
+from extract_blocks import configured_route, format_pairs, package_title
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json
 from samples import TYPES, gate, kind_of, load_decisions, save_gate
 
 
 def entries_of(packages: list[Path], config: dict) -> list[dict]:
     """Every file the build would read, with its kind: documents to extract and pictures to read."""
-    found = []
+    found, assets = [], {}
+    for package in packages:
+        assets.update({a["item_id"]: a for a in load_json(package / MANIFEST_NAME)["assets"]})
+    # A PDF beside its Word or PowerPoint original is not read when the original is: never the sample.
+    twins = format_pairs(assets)
     for package in packages:
         for asset in load_json(package / MANIFEST_NAME)["assets"]:
             route = configured_route(asset, config)
@@ -29,7 +33,8 @@ def entries_of(packages: list[Path], config: dict) -> list[dict]:
             _, folder = package_title(asset, route.get("tier", "T2"), config.get("doc_titles", {}))
             name = asset.get("display_name") or asset.get("path") or ""
             found.append({"item_id": asset["item_id"], "kind": kind_of(name, folder), "bytes": int(asset.get("byte_size") or 0),
-                          "folder": str(Path(asset.get("path") or "").parent.as_posix())})
+                          "folder": str(Path(asset.get("path") or "").parent.as_posix()),
+                          "twin": asset["item_id"] in twins})
     return found
 
 

@@ -167,7 +167,8 @@ def gate(entries: list[dict[str, Any]], config: dict[str, Any], decisions: dict[
     named = config.get("samples") or {}
     for kind, members in sorted(by_kind.items()):
         members.sort(key=lambda e: (e["bytes"], e["item_id"]))
-        sample = next((e for e in members if e["item_id"] == named.get(kind)), members[len(members) // 2])
+        pool = [e for e in members if not e.get("twin")] or members  # A PDF copy of a Word file shows little.
+        sample = next((e for e in members if e["item_id"] == named.get(kind)), pool[len(pool) // 2])
         confirmed = is_confirmed(kind, decisions, config)
         allowed += [e["item_id"] for e in members] if confirmed else [sample["item_id"]]
         folders: dict[str, int] = {}

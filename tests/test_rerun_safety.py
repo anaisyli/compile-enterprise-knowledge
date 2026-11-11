@@ -189,6 +189,31 @@ class RerunTests(Base):
         self.assertIn('"renamed": 1', result.stdout)
         self.assertFalse((self.vault / "02_源资料/10_净化原文/产品画册/产品画册-Catalog.md").exists())
 
+    def test_a_pdf_now_read_through_its_word_file_leaves_no_second_page(self) -> None:
+        # Built before the rule: the PDF had a page of its own, named with a _xxxxxx suffix.
+        path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["assets"] += [{**manifest["assets"][0], "item_id": "w1", "display_name": "规格书.docx", "path": "A/规格书.docx",
+                                "source_hash": "1" * 64, "pending_client_review": False, "pending_units": []},
+                               {**manifest["assets"][0], "item_id": "w2", "display_name": "规格书.pdf", "path": "A/旧/规格书.pdf",
+                                "source_hash": "2" * 64, "pending_client_review": False, "pending_units": []}]
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        for item, text in (("w1", "规格：350GSM，可机洗。"), ("w2", "规格：350GSM，\n可机洗。")):
+            (self.text / f"{item}.json").write_text(json.dumps({"item_id": item, "units": [{"locator": "page 1", "text": text}]},
+                                                               ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.make_vault()
+        self.assertEqual(self.publish().returncode, 0)
+        pages = lambda: sorted(p.name for p in (self.vault / "02_源资料/10_净化原文").rglob("*规格书*.md"))  # noqa: E731
+        self.assertEqual(len(pages()), 2)
+        manifest["assets"][-1]["path"] = "A/规格书.pdf"
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        result = self.publish()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"withdrawn": 0', result.stdout)
+        self.assertEqual(len(pages()), 1, pages())
+
     def test_old_receipt_gives_one_warning_and_archives_once(self) -> None:
         self.pipeline()
         self.make_vault()

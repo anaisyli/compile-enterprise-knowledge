@@ -261,6 +261,14 @@ def main() -> int:
     # A document whose path changed is the same document, not a withdrawn one.
     new_paths = {parse_frontmatter(path.read_text(encoding="utf-8")).get("doc_id"): key
                  for key, path in planned.items() if key.startswith(SOURCE.as_posix()) and path.suffix == ".md"}
+    # A PDF now read through its Word or PowerPoint original: its old page is that page, not withdrawn.
+    routes = load_json(build / "routes.json") if (build / "routes.json").is_file() else {}
+    for route in routes.values():
+        kept = routes.get(route.get("same_as") or "")
+        if route.get("reason") == "other_format" and kept and route.get("source_hash"):
+            page = new_paths.get(f"DOC-{kept.get('source_hash', '')[:10]}")
+            if page:
+                new_paths.setdefault(f"DOC-{route['source_hash'][:10]}", page)
     leaving = []
     for key in sorted(set(previous) - set(planned)):
         target = vault / key

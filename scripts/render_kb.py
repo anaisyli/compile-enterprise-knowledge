@@ -60,7 +60,7 @@ REASON_LABELS = {
     "no_extractable_content": "读不出可用内容", "unresolved_item": "初筛待定，未确认", "image_needs_review": "图片待识别",
     "unreadable_removal_location": "清理位置看不懂", "client_said_no": "客户说不用", "unknown_decision": "初筛分类不明",
     "website_needs_browser": "要用浏览器读取", "awaiting_sample": "等样例确认后提取",
-    "media_kept": "按文件夹保留的图片和视频", "media_awaiting_client": "整个文件夹待客户确认",
+    "media_kept": "按文件夹保留的图片和视频", "other_format": "同一份资料的另一种格式", "media_awaiting_client": "整个文件夹待客户确认",
 }
 VISIBLE = {"kept", "flagged", "pending_client"}
 # Inside each package: the knowledge base's name for every file beside its original name.
@@ -99,7 +99,8 @@ def doc_status(doc: dict[str, Any], blocks: list[dict[str, Any]], effective: set
     return "部分待客户确认" if pending else "有效"
 
 
-def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout: str = "", original: str = "") -> list[str]:
+def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout: str = "", original: str = "",
+                twin: str | None = None) -> list[str]:
     """Where a document came from. Original file names are not printed: they often name the
     customer a quote went to. The package's name map pairs each name here with the original."""
     tier = TIERS[doc["tier"]]
@@ -113,6 +114,10 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
         opener = f"[打开原件]({original})；" if original else ""
         rows.append(f"> - 原文件：{opener}在初筛包 `{doc.get('package_name') or '初筛包'}` 里，原名和位置见初筛包的 `{NAME_MAP_PAGE}`，"
                     f"按本页名字“{doc['title']}”查")
+        if twin is not None:
+            # The same document saved as PDF too; it is not read twice, but stays one click away.
+            rows.append("> - 同一份资料还有 PDF 版" + (f"：[打开原件]({twin})" if twin else "，在初筛包同一个文件夹里")
+                        + "；内容相同，没有另做一页")
     rows.append(f"> - 资料编号：`{doc['item_id']}`")
     if doc.get("pages"):
         rows.append(f"> - 页数：{doc['pages']}")
@@ -583,21 +588,39 @@ def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order:
     links: dict[str, str] = {}
     for doc_id in order:
         doc = docs[doc_id]
-        route = routes.get(doc["item_id"], {})
-        if not route.get("package") or not route.get("path"):
-            continue
-        source = Path(route["package"]) / route["path"]
-        alias = Path(route["package"]) / ALIAS_FOLDER / f"{Path(doc['file_name']).stem}{source.suffix}"
-        try:
-            if alias.exists() and not alias.samefile(source):
-                alias.unlink()  # The name now belongs to another file, or the original was replaced.
-            if not alias.exists():
-                alias.parent.mkdir(parents=True, exist_ok=True)
-                os.link(source, alias)
-            links[doc_id] = alias.resolve().as_uri()
-        except OSError:
-            continue
+        link = alias_link(routes.get(doc["item_id"], {}), Path(doc["file_name"]).stem)
+        if link:
+            links[doc_id] = link
     return links
+
+
+def alias_link(route: dict[str, Any], stem: str) -> str:
+    """The original's second name, <stem><its suffix>, in the package's alias folder; "" when none can be made."""
+    if not route.get("package") or not route.get("path"):
+        return ""
+    source = Path(route["package"]) / route["path"]
+    alias = Path(route["package"]) / ALIAS_FOLDER / f"{stem}{source.suffix}"
+    try:
+        if alias.exists() and not alias.samefile(source):
+            alias.unlink()  # The name now belongs to another file, or the original was replaced.
+        if not alias.exists():
+            alias.parent.mkdir(parents=True, exist_ok=True)
+            os.link(source, alias)
+        return alias.resolve().as_uri()
+    except OSError:
+        return ""
+
+
+def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str]) -> dict[str, str]:
+    """doc_id -> link to the PDF of the same document ("" when the PDF has no alias), for pages kept from Word or PowerPoint."""
+    page_of = {docs[d]["item_id"]: d for d in order}
+    twins: dict[str, str] = {}
+    for route in routes.values():
+        doc_id = page_of.get(route.get("same_as") or "")
+        if route.get("reason") == "other_format" and doc_id:
+            # The PDF's alias takes the page's name, so the two originals sort side by side.
+            twins[doc_id] = alias_link(route, Path(docs[doc_id]["file_name"]).stem)
+    return twins
 
 
 def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], published: dict[str, str],
@@ -624,6 +647,9 @@ def write_name_maps(routes: dict[str, Any], docs: dict[str, dict[str, Any]], pub
             fate = route["fate"]
         elif item_id in same_content and doc:
             fate = "内容和另一份相同，只发布了一份"
+        elif route.get("reason") == "other_format" and by_item.get(route.get("same_as") or ""):
+            doc = by_item[route["same_as"]]
+            fate = f"同一份资料的另一种格式，已用 {Path(routes[route['same_as']].get('path') or '').suffix or '原格式'} 版入库"
         elif doc:
             fate = f"已入库，{statuses[doc['doc_id']]}"
         else:
@@ -755,6 +781,7 @@ def main() -> int:
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
     originals = make_aliases(routes, docs, order)
+    twins = twin_links(routes, docs, order)
     # Pictures are named before pages are written, so every page links the same name.
     terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
     forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))
@@ -786,7 +813,8 @@ def main() -> int:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
-        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""))
+        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""),
+                           twins.get(doc_id))
         info = status_info.get(doc["item_id"], {})
         pictures = {page_group(info, page): name for page, name in info.get("page_images", {}).items()
                     if (doc_id, page_group(info, page)) not in unsafe and name in PICTURE_FILES}

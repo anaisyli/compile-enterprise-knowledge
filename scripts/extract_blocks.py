@@ -20,7 +20,7 @@ import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
 from fetch_website import module_for as web_module, page_kind as web_kind
@@ -197,6 +197,42 @@ def clean_name(name: str) -> str:
     return normalize_space(name.replace("_", " ")) or name
 
 
+# File names that say nothing about the file; the folder they sit in is added to the title.
+GENERIC_STEM = re.compile(r"(?i)^(?:页面文本|页面|文本|新建文本文档|新建\s*microsoft\s*\w+\s*文档|未命名|untitled|text|index|readme|content|page)$")
+# A document and its export: 规格书.docx beside 规格书.pdf, or a deck beside its PDF.
+SOURCE_FORMATS = {".docx", ".doc", ".pptx", ".ppt"}
+
+
+def format_pairs(assets: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    """PDF item_id -> the Word or PowerPoint files of the same name in the same folder."""
+    by_place: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for item_id, asset in assets.items():
+        path = Path(asset.get("source_relpath") or asset.get("path") or asset.get("display_name") or "")
+        by_place[(path.parent.as_posix().casefold(), normalize_space(path.stem).casefold())].append(item_id)
+    pairs: dict[str, list[str]] = {}
+    for members in by_place.values():
+        suffix = {i: extension_of(assets[i].get("display_name") or assets[i].get("path") or "") for i in members}
+        sources = sorted(i for i in members if suffix[i] in SOURCE_FORMATS)
+        if sources:
+            pairs.update({i: sources for i in members if suffix[i] == ".pdf"})
+    return pairs
+
+
+def other_formats(routes: dict[str, dict[str, Any]], readable: Callable[[str], bool]) -> dict[str, str]:
+    """PDF item_id -> the Word or PowerPoint file it is a copy of.
+
+    They are one document in two formats; reading both gave two pages that differ only in how
+    the text came out. The Word or PowerPoint file is the original and its text is exact, so it
+    is kept, unless it could not be read. A PDF still waiting for its sample is settled too."""
+    candidates = {i: r["asset"] for i, r in routes.items() if r["route"] == "kb" or r["reason"] == "awaiting_sample"}
+    twins = {}
+    for pdf, sources in format_pairs(candidates).items():
+        source = next((i for i in sources if routes[i]["route"] == "kb" and readable(i)), None)
+        if source:
+            twins[pdf] = source
+    return twins
+
+
 def package_title(asset: dict[str, Any], tier: str, overrides: dict[str, str]) -> tuple[str, str]:
     """Return (title, folder). Titles read 类别-名称 so a reader knows what a file is."""
     if asset["item_id"] in overrides:
@@ -205,6 +241,10 @@ def package_title(asset: dict[str, Any], tier: str, overrides: dict[str, str]) -
     if tier == "T3":
         return f"产品表-{asset['source_hash'][:8]}", FOLDERS["T3"]
     name = clean_name(source_stem(asset.get("display_name") or asset["item_id"]))
+    if GENERIC_STEM.match(name):
+        # 页面文本.txt in forty folders would be forty pages of the same name: the folder says which.
+        folder = Path(asset.get("source_relpath") or asset.get("path") or "").parent.name
+        name = f"{name}-{clean_name(folder)}" if folder else name
     if asset.get("asset_kind") == "image" or extension_of(asset.get("display_name") or "") in PICTURE_FILES:
         # A picture read by MinerU or the model is a picture, not a company document.
         return f"图片-{name}", "图片资料"
@@ -850,6 +890,10 @@ def main() -> int:
         for item_id, route in routes.items():
             if route["route"] == "kb" and item_id not in allowed:
                 route.update(route="hold", reason="awaiting_sample")
+    # One document in two formats goes in once; the PDF stays reachable from the kept page.
+    readable = lambda i: status.get(i, {}).get("status") in {"read_ok", "partial"} or bool(load_units(text_dirs, i))  # noqa: E731
+    for pdf, source in other_formats(routes, readable).items():
+        routes[pdf].update(route="skip", reason="other_format", same_as=source)
     reviewed_columns = build / "cell-review" / "sheet-columns.json"
     column_overrides = {**config.get("sheet_columns", {}), **(load_json(reviewed_columns) if reviewed_columns.is_file() else {})}
 
@@ -1101,6 +1145,8 @@ def main() -> int:
                 "source_hash": route["asset"].get("source_hash", ""),
                 "route": route["route"],
                 "reason": route["reason"],
+                # A PDF beside its Word or PowerPoint original: the item kept in its place.
+                "same_as": route.get("same_as"),
                 "tier": route.get("tier"),
                 "ocr_pages": route.get("ocr_pages", []),
                 "client_held_blocks": route.get("client_held_blocks", 0),

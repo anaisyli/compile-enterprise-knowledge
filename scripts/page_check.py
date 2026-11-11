@@ -124,9 +124,12 @@ def reasons_for(page: Any, text: str, codes: re.Pattern[str]) -> list[str]:
 
 
 def word_pictures(path: Path) -> list[tuple[str, bytes]]:
-    with zipfile.ZipFile(long_path(path)) as archive:
-        names = sorted(n for n in archive.namelist() if n.startswith("word/media/") and Path(n).suffix.casefold() in {".png", ".jpg", ".jpeg", ".gif", ".bmp"})
-        return [(n, archive.read(n)) for n in names if archive.getinfo(n).file_size >= MIN_PICTURE_BYTES]
+    try:
+        with zipfile.ZipFile(long_path(path)) as archive:
+            names = sorted(n for n in archive.namelist() if n.startswith("word/media/") and Path(n).suffix.casefold() in {".png", ".jpg", ".jpeg", ".gif", ".bmp"})
+            return [(n, archive.read(n)) for n in names if archive.getinfo(n).file_size >= MIN_PICTURE_BYTES]
+    except (zipfile.BadZipFile, OSError):
+        return []  # A damaged or mislabelled file has no pictures to check; its text was read or not on its own.
 
 
 def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: list[Path]) -> dict[str, Any]:

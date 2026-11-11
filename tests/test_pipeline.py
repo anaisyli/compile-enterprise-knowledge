@@ -431,6 +431,52 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(list(ledgers.rglob("02_知识库构建_*.md")))
         self.assertIn("本 Skill 自动登记", (ledgers / "10_待客户补充/01_待客户补充事项.md").read_text(encoding="utf-8"))
 
+    def add_assets(self, *added: dict) -> None:
+        path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["assets"].extend(added)
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        for item in added:
+            (self.package / item["path"]).parent.mkdir(parents=True, exist_ok=True)
+            (self.package / item["path"]).write_bytes(item["item_id"].encode())
+
+    def test_a_word_file_and_its_pdf_make_one_page(self) -> None:
+        self.add_assets(asset("w1", "规格书.docx", "A", "marketing"), asset("w2", "规格书.pdf", "A", "marketing"))
+        self.write_units("w1", [{"locator": "paragraph 1", "text": "SHERPA JACKET 规格：350GSM，可机洗。"}])
+        self.write_units("w2", [{"locator": "page 1", "text": "SHERPA JACKET 规格：350GSM，\n可机洗。"}])
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pages = [p for p in self.clean.rglob("*规格书*.md")]
+        self.assertEqual(len(pages), 1, pages)
+        card = pages[0].read_text(encoding="utf-8")
+        self.assertIn("同一份资料还有 PDF 版：[打开原件](", card)
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual((routes["w2"]["route"], routes["w2"]["reason"], routes["w2"]["same_as"]), ("skip", "other_format", "w1"))
+        names = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
+        self.assertIn("同一份资料的另一种格式，已用 .docx 版入库", names)
+        self.assertTrue((self.package / "审计记录/按知识库名字" / f"{pages[0].stem}.pdf").is_file())
+        verified = self.verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+
+    def test_the_pdf_is_kept_when_its_word_file_cannot_be_read(self) -> None:
+        self.add_assets(asset("w1", "规格书.docx", "A", "marketing"), asset("w2", "规格书.pdf", "A", "marketing"))
+        self.write_units("w2", [{"locator": "page 1", "text": "SHERPA JACKET 规格：350GSM，可机洗。"}])
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual(routes["w2"]["route"], "kb")
+        self.assertIn("350GSM", self.published_text())
+
+    def test_generic_file_names_take_their_folder_name(self) -> None:
+        self.add_assets(asset("t1", "页面文本.txt", "A", "marketing", path="A/官网/关于我们/页面文本.txt"),
+                        asset("t2", "页面文本.txt", "A", "marketing", path="A/官网/工厂实力/页面文本.txt"))
+        self.write_units("t1", [{"locator": "file", "text": "公司成立于2010年。"}])
+        self.write_units("t2", [{"locator": "file", "text": "工厂有三条生产线。"}])
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = sorted(p.stem for p in self.clean.rglob("*页面文本*.md"))
+        self.assertEqual(names, ["公司资料-页面文本-关于我们", "公司资料-页面文本-工厂实力"])
+
 
 if __name__ == "__main__":
     unittest.main()
