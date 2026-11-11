@@ -248,12 +248,13 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
             place({"what": "videos", "name": MASKED if hidden else Path(relpath).name, "bytes": entry.get("bytes", 0),
                    "duration": entry.get("duration", ""), "open": "" if hidden else source, "folder_uri": "" if hidden else folder_uri,
                    "cover": cover["file"] if cover else "", "waiting": entry["status"] == "media_awaiting_client"}, relpath)
-        elif picture_of.get(entry["item_id"]) in pictures:
-            picture = pictures[picture_of[entry["item_id"]]]
+        elif (entry.get("id") or picture_of.get(entry["item_id"])) in pictures:
+            picture = pictures[entry.get("id") or picture_of[entry["item_id"]]]
             place({"what": "pictures", "file": picture["file"], "alt": picture["alt"], "use": picture["use"],
-                   "kind": picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri}, relpath)
+                   "kind": entry.get("picture_kind") or picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri}, relpath)
         else:
-            reason = UNPROCESSED["media_awaiting_client"] if entry["status"] == "media_awaiting_client" else "图片较大，原图留在初筛包"
+            reason = (UNPROCESSED["media_awaiting_client"] if entry["status"] == "media_awaiting_client"
+                      else "图纸，没能转成图片" if entry["status"] == "drawing_unrendered" else "图片较大，原图留在初筛包")
             place({"what": "waiting", "name": MASKED if hidden else Path(relpath).name, "reason": reason,
                    "open": "" if hidden else folder_uri}, relpath)
     published_items = {docs[d]["item_id"] for d in order}

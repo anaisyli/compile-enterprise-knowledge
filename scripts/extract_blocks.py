@@ -806,6 +806,62 @@ def video_cover(source: Path, assets: Path, key: str) -> tuple[str, str]:
     return (name if (assets / name).is_file() else ""), duration
 
 
+# A drawing is looked at, not read: dimension sheets, six views, assembly drawings, renderings.
+DRAWING_NAME = re.compile(r"(?i)尺寸|六视图|三视图|视图|装配|图纸|效果图|外观图|结构图|dimension|drawing|render")
+# Documents that explain in words, whatever folder they sit in.
+NOT_DRAWING = re.compile(r"(?i)说明书|手册|技术参数|参数表|manual|guide|datasheet|brochure|画册|catalog")
+DRAWING_PAGES = 3
+DRAWING_MAX_PAGES = 6
+
+
+def drawing_kind(asset: dict[str, Any], units: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """"尺寸图" or "效果图" for a PDF that is a drawing, "" for one to read.
+
+    A drawing's text is dimension numbers and part labels; read out, it says nothing. Named
+    so (folder or file), or a short PDF whose text is nearly all numbers. The config can name
+    files either way: drawing_items / not_drawing_items."""
+    item_id = asset["item_id"]
+    path = asset.get("source_relpath") or asset.get("path") or asset.get("display_name") or ""
+    if extension_of(asset.get("display_name") or path) != ".pdf" or item_id in set(config.get("not_drawing_items", [])):
+        return ""
+    named = " ".join(Path(path).parts[-3:])
+    kind = "效果图" if re.search(r"效果|render", named, re.I) else "尺寸图"
+    if item_id in set(config.get("drawing_items", [])):
+        return kind
+    if NOT_DRAWING.search(named):
+        return ""
+    pages = {u["locator"].split()[1] for u in units if u.get("locator", "").startswith("page ")}
+    if len(pages) > DRAWING_MAX_PAGES:
+        return ""
+    if DRAWING_NAME.search(named):
+        return kind
+    text = "".join(u.get("text", "") for u in units)
+    words = len(re.findall(r"[一-鿿]", text)) + len(re.findall(r"[A-Za-z]{3,}", text))
+    numbers = len(re.findall(r"\d+(?:\.\d+)?", text))
+    return "尺寸图" if pages and len(pages) <= DRAWING_PAGES and numbers >= 10 and words < numbers else ""
+
+
+def drawing_pictures(source: Path, assets: Path, source_hash: str) -> list[str]:
+    """Each page of a drawing as a PNG in the build's assets; [] when the PDF cannot be drawn."""
+    try:
+        import pymupdf  # type: ignore[import-not-found]
+    except ImportError:
+        return []
+    names = []
+    try:
+        with pymupdf.open(long_path(source)) as pdf:
+            for number, page in enumerate(pdf, start=1):
+                if number > DRAWING_MAX_PAGES:
+                    break
+                name = f"img-{source_hash[:16]}-p{number}.png"
+                if not (assets / name).exists():
+                    page.get_pixmap(dpi=150).save(long_path(assets / name))
+                names.append(name)
+    except Exception:  # noqa: BLE001 - a damaged PDF stays a file to open, not a crash.
+        return []
+    return names
+
+
 def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Path, max_bytes: int) -> list[dict[str, Any]]:
     """Pictures and videos screening kept by folder. A usable picture up to the size limit is copied
     once into the build's assets under its content hash, the same name embedded pictures get, so
@@ -830,6 +886,15 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
         }
         suffix = extension_of(asset.get("display_name") or "")
         source = package_of[item_id] / (asset.get("path") or "")
+        if route["reason"] == "drawing":
+            # One picture per page, all in 90_素材 by the product's folders; the PDF stays to open.
+            pages = drawing_pictures(source, assets, asset.get("source_hash", "")) if asset.get("path") else []
+            media.extend({**entry, "kind": "image", "status": "media_kept", "drawing": True,
+                          "picture_kind": route.get("picture_kind", "尺寸图"), "id": name, "page": number}
+                         for number, name in enumerate(pages, start=1))
+            if not pages:
+                media.append({**entry, "kind": "document", "status": "drawing_unrendered"})
+            continue
         if (entry["kind"] == "image" and route["reason"] == "media_kept" and suffix in IMAGE_TYPES
                 and entry["bytes"] <= max_bytes and asset.get("path")):
             name = f"img-{asset['source_hash'][:16]}{suffix}"
@@ -902,6 +967,12 @@ def main() -> int:
         for item_id, route in routes.items():
             if route["route"] == "kb" and item_id not in allowed:
                 route.update(route="hold", reason="awaiting_sample")
+    # Drawings (dimension sheets, six views, assembly drawings) are material to look at, not text.
+    for item_id, route in routes.items():
+        if route["route"] == "kb":
+            kind = drawing_kind(route["asset"], load_units(text_dirs, item_id), config)
+            if kind:
+                route.update(route="media", reason="drawing", picture_kind=kind)
     # One document in two formats goes in once; the PDF stays reachable from the kept page.
     readable = lambda i: status.get(i, {}).get("status") in {"read_ok", "partial"} or bool(load_units(text_dirs, i))  # noqa: E731
     for pdf, source in other_formats(routes, readable).items():

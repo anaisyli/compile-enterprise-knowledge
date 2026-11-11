@@ -178,7 +178,7 @@ def place_media(media: list[dict[str, Any]], match: Matcher) -> dict[str, dict[s
     for entry in media:
         folders = "/".join(parts_of(entry["relpath"]))
         product = match(folders) or match(Path(entry["relpath"]).name)
-        places[entry["item_id"]] = {"product": product, "kind": picture_kind(entry["relpath"], entry["kind"])}
+        places[entry["item_id"]] = {"product": product, "kind": entry.get("picture_kind") or picture_kind(entry["relpath"], entry["kind"])}
     return places
 
 

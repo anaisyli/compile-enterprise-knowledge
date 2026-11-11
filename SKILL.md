@@ -50,6 +50,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    python scripts/run_pipeline.py <共用参数> --images all
    ```
 
+   - 图纸类 PDF（尺寸图、六视图、装配图、效果图；放在这类文件夹里或文件名这样写，或者三页以内、文字几乎全是数字的）按素材处理：不提取文字、不做看图核对，每页转成一张图进 `90_素材` 的“尺寸图 / 效果图”，建站视图挂到对应产品下。说明书、技术参数、画册照常提取。判错的在 kb-config.json 写 `drawing_items` / `not_drawing_items`（资料编号）。
    - 同一个文件夹里名字相同的 Word / PPT 和 PDF 当成同一份资料，只入库 Word / PPT 那份，来源卡片给出 PDF 版的“打开原件”；Word / PPT 读不出时才用 PDF。“页面文本”这类说明不了内容的文件名，后面加上所在文件夹名。
 
 2.5 **先提取样例，确认后再批量提取**（参照样本预处理的做法；这一步必须停下等用户）：

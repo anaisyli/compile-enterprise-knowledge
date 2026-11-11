@@ -307,6 +307,8 @@ def media_section(build: Path, entries: dict[str, dict[str, Any]], escape: Calla
             continue
         if entry["status"] == "media_awaiting_client":
             state = "待客户确认（整个文件夹）"
+        elif entry["status"] == "drawing_unrendered":
+            state = "图纸，没能转成图片（本机没装 PyMuPDF 或文件损坏），原件在初筛包"
         elif entry["kind"] == "image":
             state = "图片较大，原图在初筛包"
         else:

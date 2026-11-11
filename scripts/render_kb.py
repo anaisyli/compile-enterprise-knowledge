@@ -812,10 +812,14 @@ def main() -> int:
         route = routes.get(entry["item_id"])
         if not route:
             continue
-        if entry.get("id") in pictures_named:
+        if entry.get("drawing") and entry.get("id") in pictures_named:
+            route["fate"] = f"图纸，按素材处理，每页一张图：90_素材/{pictures_named[entry['id']]['file']} 等"
+        elif entry.get("id") in pictures_named:
             route["fate"] = f"进素材库：90_素材/{pictures_named[entry['id']]['file']}"
         elif entry["status"] == "media_awaiting_client":
             route["fate"] = "整个文件夹待客户确认，回复前不进素材库"
+        elif entry["status"] == "drawing_unrendered":
+            route["fate"] = "图纸，按素材处理；没能转成图片，原件留在初筛包"
         elif entry["kind"] == "image":
             route["fate"] = "图片较大，原图留在初筛包，素材索引里有文件夹链接"
         else:

@@ -550,6 +550,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(docs["d2"]["tier"], "T3")
         self.assertNotIn("USD7.30", self.published_text())
 
+    def test_a_drawing_pdf_goes_to_the_material_library_as_pictures(self) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+        self.add_assets(asset("g1", "15.6.pdf", "A", "marketing", path="A/自助机/尺寸图/15.6.pdf"))
+        pdf = pymupdf.open()
+        pdf.new_page().insert_text((72, 72), "356 220 45")
+        (self.package / "A/自助机/尺寸图/15.6.pdf").write_bytes(pdf.tobytes())
+        pdf.close()
+        self.write_units("g1", [{"locator": "page 1", "text": "356 220 45 12 8 300 150"}])
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual((routes["g1"]["route"], routes["g1"]["reason"]), ("media", "drawing"))
+        self.assertFalse([p for p in self.clean.rglob("*15.6*.md")])
+        pictures = json.loads((self.build / "pictures.json").read_text(encoding="utf-8"))
+        self.assertTrue(any("尺寸图" in e["file"] for e in pictures.values()), pictures)
+        self.assertIn("图纸，按素材处理", (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8"))
+        verified = self.verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
