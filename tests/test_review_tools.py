@@ -66,6 +66,14 @@ class ReviewToolTests(Base):
         self.assertEqual(media["p1"]["kind"], "image")  # A .psd is a picture to the material index.
         self.assertEqual(media["v1"]["kind"], "video")
 
+    def test_a_picture_named_only_jpg_is_still_a_picture(self) -> None:
+        self.add_assets(asset("p9", ".jpg", "D", "unknown", path="D/产品/LED/.jpg", source_relpath="产品/LED/.jpg"))
+        self.edit_config(d_keep=["p9"], sample_review=True)
+        self.built()
+        self.assertEqual(self.routes()["p9"]["reason"], "media_kept")
+        gate = json.loads((self.build / "sample-gate.json").read_text(encoding="utf-8"))
+        self.assertNotIn("other", gate.get("kinds", {}))
+
     def test_a_document_we_ask_about_waits_in_cus_until_the_client_answers(self) -> None:
         self.write_units("d1", [{"locator": "page 1", "text": "DS50 壁挂广告机说明书，含安装步骤。"}])
         self.edit_config(client_answers={"d1": "keep"}, ask_client={"d1": "参考整理稿，请公司确认是不是自己的资料"})

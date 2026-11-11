@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from kb_common import load_json, write_json
+from kb_common import file_extension, load_json, write_json
 
 
 DECISIONS = "sample-decisions.json"
@@ -62,7 +62,7 @@ TEXTS = {".txt", ".md", ".eml"}
 
 def kind_of(name: str, folder: str = "", tier: str = "") -> str:
     """The kind of a file by what it is: its extension, and for a PDF whether it is a catalog."""
-    suffix = Path(name or "").suffix.casefold()
+    suffix = file_extension(name)
     if suffix == ".pdf":
         return "catalog_pdf" if folder == "产品画册" else "pdf"
     if suffix in {".pptx", ".ppt"}:

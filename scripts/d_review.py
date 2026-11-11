@@ -29,7 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, TRIAGE_NAME, load_json, load_jsonl, unapproved_d, write_json, write_jsonl, write_text
+from kb_common import (BUILD_DIRECTORY, TRIAGE_NAME, file_extension, load_json, load_jsonl, unapproved_d, write_json,
+                       write_jsonl, write_text)
 
 
 FOLDER = "d-review"
@@ -158,7 +159,7 @@ def export(build: Path) -> dict[str, Any]:
             continue
         relpath = route.get("source_relpath") or route.get("path") or route.get("display_name") or ""
         name = Path(relpath).name
-        extension = Path(name).suffix.casefold()
+        extension = file_extension(name)
         hint = ("压缩包，一般不入库" if extension in ARCHIVES else
                 "系统或 Office 临时文件" if name.startswith("~$") or name == ".DS_Store" else
                 "图片、设计稿或视频：保留就进素材库" if extension in MEDIA else "文档：保留后入库是“待审”")

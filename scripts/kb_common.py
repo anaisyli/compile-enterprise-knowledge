@@ -174,6 +174,15 @@ def write_text(path: Path, text: str) -> None:
         handle.write(text)
 
 
+def file_extension(name: str) -> str:
+    """Lower-case extension. A file called just ".jpg" is a picture with no stem: Path gives it no
+    suffix, so the name itself is the extension. ".DS_Store" comes out as ".ds_store"."""
+    path = Path(name or "")
+    if not path.suffix and path.name.startswith(".") and path.name.count(".") == 1:
+        return path.name.casefold()
+    return path.suffix.casefold()
+
+
 def load_config(path: Path | None) -> dict[str, Any]:
     config = load_json(path) if path else {}
     if not isinstance(config, dict):

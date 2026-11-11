@@ -37,6 +37,7 @@ from kb_common import (
     ROLE_ORDER,
     TIERS,
     TRIAGE_NAME,
+    file_extension,
     load_config,
     load_json,
     load_jsonl,
@@ -122,7 +123,7 @@ IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 def extension_of(name: str) -> str:
-    return Path(name).suffix.casefold()
+    return file_extension(name)
 
 
 def media_kind(asset: dict[str, Any]) -> str | None:
