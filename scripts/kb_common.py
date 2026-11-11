@@ -7,9 +7,26 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+
+def _utf8_when_captured() -> None:
+    """Chinese output read through a pipe (an agent, a log file) is UTF-8, not the Windows code page.
+
+    A real console window is left alone: Python writes to it in Unicode already."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty() and (stream.encoding or "").replace("-", "").lower() != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+_utf8_when_captured()
+# Child processes (run_pipeline's steps, LibreOffice helpers) inherit the same choice.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 SKILL_VERSION = "0.1.0"
 

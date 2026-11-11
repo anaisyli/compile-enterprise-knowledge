@@ -8,12 +8,16 @@ online; their results sit in the build folder and are picked up here automatical
 from __future__ import annotations
 
 import argparse
+import atexit
+import os
+import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from kb_common import load_json
-from kb_state import restore
+from kb_common import load_json, write_json
+from kb_state import STATE, restore
 
 
 HERE = Path(__file__).resolve().parent
@@ -27,6 +31,76 @@ def step(script: str, *arguments: str) -> int:
 
 def repeat(flag: str, values: list[str]) -> list[str]:
     return [item for value in values for item in (flag, value)]
+
+
+def report_kept(kept: list[str], limit: int = 5) -> None:
+    """Which copies were not replaced. Thirty MinerU files saying the same thing hide the one that matters."""
+    kept = sorted(kept, key=lambda p: ("kb-config" not in p and "review-decisions" not in p, p))
+    for path in kept[:limit]:
+        print(f"   两边都有，按较新的那份保留或逐项合并：{path}")
+    if len(kept) > limit:
+        print(f"   …另有 {len(kept) - limit} 个文件同样处理（多是 MinerU 识别稿）")
+
+
+def merge_vault_config(config_path: Path, vault: Path) -> None:
+    """Settings that only the vault's copy has (a product list written after publishing, say) go into
+    the --config file before anything runs, so every step and the next publish see one config.
+
+    Where both copies have a setting, --config wins: it is the file the person is editing now. To
+    remove a setting, give it an empty value; a deleted one comes back from the vault."""
+    vault_config = vault / STATE / "kb-config.json"
+    if not vault_config.is_file() or not config_path.is_file():
+        return
+    mine, kept = load_json(config_path), load_json(vault_config)
+    if not isinstance(mine, dict) or not isinstance(kept, dict):
+        return
+    added = sorted(k for k in kept if k not in mine)
+    differ = sorted(k for k in kept if k in mine and kept[k] != mine[k])
+    if differ:
+        print(f"   运行目录的配置和知识库里的不一样，用运行目录的：{'、'.join(differ[:8])}{' 等' if len(differ) > 8 else ''}")
+    if not added:
+        return
+    backup = config_path.with_name(f"{config_path.stem}.{datetime.now():%Y%m%d-%H%M%S}.bak.json")
+    shutil.copy2(config_path, backup)
+    write_json(config_path, {**mine, **{k: kept[k] for k in added}})
+    print(f"   知识库的配置里有、运行目录的配置里没有，已补进 {config_path.name}：{'、'.join(added)}（原文件备份为 {backup.name}）")
+
+
+LOCK_NAME = ".run_pipeline.lock"
+
+
+def take_lock(run: Path) -> Path | None:
+    """One build at a time per run folder: two would overwrite each other's files halfway."""
+    run.mkdir(parents=True, exist_ok=True)
+    lock = run / LOCK_NAME
+    if lock.is_file():
+        try:
+            pid = int(lock.read_text(encoding="utf-8").split()[0])
+        except (ValueError, IndexError, OSError):
+            pid = 0
+        if pid and pid != os.getpid() and alive(pid):
+            print(f"这个运行目录已经有一次建库在跑（进程 {pid}）。等它跑完再来；确定它已经停了，删掉 {lock} 再重跑。")
+            return None
+    lock.write_text(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}\n", encoding="utf-8")
+    atexit.register(lambda: lock.unlink(missing_ok=True))
+    return lock
+
+
+def alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,15 +122,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if take_lock(Path(args.out).resolve()) is None:
+        return 3
     if args.vault:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
         restored = restore(Path(args.out).resolve(), Path(args.vault).resolve())
         print(f"== 从知识库恢复构建状态：{restored['restored']} 个文件", flush=True)
-        for path in restored["kept_newer_in_run"]:
-            print(f"   运行目录里的版本较新，保留不覆盖：{path}")
+        report_kept(restored["kept_newer_in_run"])
         build = Path(args.out).resolve() / "04_知识库构建"
         if not args.config and (build / "kb-config.json").is_file():
             args.config = str(build / "kb-config.json")
+        elif args.config:
+            merge_vault_config(Path(args.config).resolve(), Path(args.vault).resolve())
         if not args.package and (build / "run-info.json").is_file():
             args.package = load_json(build / "run-info.json")["packages"]
             missing = [p for p in args.package if not Path(p).is_dir()]

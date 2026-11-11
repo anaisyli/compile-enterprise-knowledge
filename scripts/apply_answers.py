@@ -181,6 +181,9 @@ def main() -> int:
                 config["client_answers_units"].setdefault(item_id, {})[record["location"]] = decision
             else:
                 config["client_answers"][item_id] = decision
+                # We asked this one ourselves (ask_client); now that it is answered, the answer decides.
+                if item_id in (config.get("ask_client") or {}):
+                    del config["ask_client"][item_id]
         applied.append({"id": record["id"], "decision": decision})
 
     # Read again on every build: only a real change touches the config, and a remark is kept once.

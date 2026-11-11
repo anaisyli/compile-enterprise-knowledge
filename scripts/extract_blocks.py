@@ -97,6 +97,10 @@ SHORT_TITLE = 20
 SAMPLE_ROWS = 4
 SERIAL = re.compile(r"\d{1,3}")
 PICTURE_FILES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+# Pictures nothing here can read or show, and video or sound: material to keep, never text to read.
+DESIGN_FILES = {".psd", ".heic", ".heif", ".tif", ".tiff", ".svg", ".eps"}
+VIDEO_FILES = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".flv", ".webm"}
+AUDIO_FILES = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
 SCREENING_REASONS = {"price_columns": "价格列", "quantity_columns": "数量列", "customer_block": "客户和业务员信息",
                      "customer_columns": "客户列", "cost_columns": "成本列", "notes_columns": "备注列"}
 # Phrases a compiled reference document uses about itself.
@@ -121,6 +125,20 @@ def extension_of(name: str) -> str:
     return Path(name).suffix.casefold()
 
 
+def media_kind(asset: dict[str, Any]) -> str | None:
+    """image / video / audio for a file that is material to look at, None for a document to read."""
+    extension = extension_of(asset.get("display_name") or asset.get("path") or "")
+    if asset.get("asset_kind") in {"video", "audio"}:
+        return asset["asset_kind"]
+    if extension in VIDEO_FILES:
+        return "video"
+    if extension in AUDIO_FILES:
+        return "audio"
+    if asset.get("asset_kind") == "image" or extension in PICTURE_FILES | DESIGN_FILES:
+        return "image"
+    return None
+
+
 def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str]:
     """Default deny: an item enters only through an explicit branch below."""
     answer = answers.get(asset["item_id"])
@@ -143,6 +161,10 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
         # The client's answer, or ours (d_keep / d_drop, read in configured_route) when the client
         # was not asked. Kept as a whole, nothing marked inside: read like B, 待审 until approved.
         if answer in {"keep", "keep_internal"}:
+            kept_by = "client" if answer == "keep" else "internal"
+            if media_kind(asset):
+                # A kept picture, design file or video is material for 90_素材, not a document to read.
+                return {"route": "media", "reason": "media_kept", "kept_by": kept_by}
             official = resource == "marketing" and extension in {".pdf", ".pptx"}
             reason = "resolved_by_answer" if answer == "keep" else "kept_internally"
             return {"route": "kb", "reason": reason, "tier": "T1" if official else "T2"}
@@ -174,11 +196,27 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
     return {"route": "hold", "reason": "unknown_decision"}
 
 
+def ask_client_route(asset: dict[str, Any], why: Any) -> dict[str, Any]:
+    """A file we send to the client: pictures and videos wait as material, documents as 🕒 pages."""
+    reason = why if isinstance(why, str) and why.strip() else "内部看过后，决定请客户确认能否使用"
+    if media_kind(asset):
+        return {"route": "media", "reason": "media_awaiting_client", "ask_reason": reason}
+    extension = extension_of(asset.get("display_name") or "")
+    official = asset.get("resource_type") == "marketing" and extension in {".pdf", ".pptx"}
+    return {"route": "kb", "reason": "awaiting_client", "tier": "T1" if official else "T2", "pending_all": True,
+            "ask_reason": reason}
+
+
 def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Apply explicit user exclusions before cached extraction can route an item back in."""
     item_id = asset["item_id"]
     if item_id in config.get("excluded_items", {}):
         return {"route": "skip", "reason": "user_excluded"}
+    asked = config.get("ask_client") or {}
+    if item_id in asked:
+        # We put this one to the client ourselves. It waits in CUS whatever was answered before;
+        # apply_answers takes it off this list when the client answers the build's question.
+        return ask_client_route(asset, asked[item_id])
     # Keep exceptional, separately reviewed routing decisions in the build
     # configuration.  The immutable preparation package is never edited.
     override = (config.get("route_overrides") or {}).get(item_id)
@@ -215,12 +253,33 @@ GENERIC_STEM = re.compile(r"(?i)^(?:页面文本|页面|文本|新建文本文�
 SOURCE_FORMATS = {".docx", ".doc", ".pptx", ".ppt"}
 
 
+PDF_FOLDER = re.compile(r"(?i)^(?:pdf|pdf版|pdf格式|pdf文件)$")
+
+
 def format_pairs(assets: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
-    """PDF item_id -> the Word or PowerPoint files of the same name in the same folder."""
+    """PDF item_id -> the Word or PowerPoint files of the same name in the same folder.
+
+    A PDF filed in a sibling folder called "PDF" (规格书/中文版/X.docx beside 规格书/PDF/X.pdf) is the
+    same document exported, so it pairs with the Word file of its parent folder's other children too."""
     by_place: dict[tuple[str, str], list[str]] = defaultdict(list)
     for item_id, asset in assets.items():
         path = Path(asset.get("source_relpath") or asset.get("path") or asset.get("display_name") or "")
         by_place[(path.parent.as_posix().casefold(), normalize_space(path.stem).casefold())].append(item_id)
+    by_parent: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for item_id, asset in assets.items():
+        path = Path(asset.get("source_relpath") or asset.get("path") or asset.get("display_name") or "")
+        by_parent[(path.parent.parent.as_posix().casefold(), normalize_space(path.stem).casefold())].append(item_id)
+    for members in by_parent.values():
+        pdfs = [i for i in members if PDF_FOLDER.match(Path(assets[i].get("source_relpath") or assets[i].get("path") or "").parent.name)]
+        if pdfs and len(members) > len(pdfs):
+            # Fold the PDF-folder copy into each Word or PowerPoint sibling's own place.
+            for pdf in pdfs:
+                for other in members:
+                    if other not in pdfs:
+                        path = Path(assets[other].get("source_relpath") or assets[other].get("path") or "")
+                        place = (path.parent.as_posix().casefold(), normalize_space(path.stem).casefold())
+                        if pdf not in by_place[place]:
+                            by_place[place].append(pdf)
     pairs: dict[str, list[str]] = {}
     for members in by_place.values():
         suffix = {i: extension_of(assets[i].get("display_name") or assets[i].get("path") or "") for i in members}
@@ -875,7 +934,8 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
         asset = route["asset"]
         entry = {
             "item_id": item_id,
-            "kind": asset.get("asset_kind"),
+            # A .psd kept from D is listed as asset_kind "document"; it is a picture to the material index.
+            "kind": media_kind(asset) or asset.get("asset_kind"),
             "relpath": asset.get("source_relpath") or asset.get("path") or "",
             "package": str(package_of[item_id]),
             "package_path": asset.get("path") or "",
@@ -1239,6 +1299,9 @@ def main() -> int:
                 # One client question covers a folder screening judged as a group.
                 "review_group": route["asset"].get("review_group"),
                 "review_question": route["asset"].get("review_question"),
+                # Why we put it to the client ourselves (ask_client), and who kept a D file.
+                "ask_reason": route.get("ask_reason"),
+                "kept_by": route.get("kept_by"),
             }
             for item_id, route in routes.items()
         },

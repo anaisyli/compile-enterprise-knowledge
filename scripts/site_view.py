@@ -223,8 +223,9 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         web = doc.get("origin") == "website"
         if web:
             relpath = f"官网/{doc.get('folder', '').split('/', 1)[-1]}/{doc.get('original_name') or doc['title']}.html"
+        displayed_status = "待客户确认" if route.get("reason") == "awaiting_client" else statuses.get(doc_id, "")
         item = {"what": "web" if web else "docs", "title": doc["title"], "stem": Path(doc["file_name"]).stem,
-                "status": statuses.get(doc_id, ""), "original": originals.get(doc_id) or (doc.get("package_path") if web else ""),
+                "status": displayed_status, "original": originals.get(doc_id) or (doc.get("package_path") if web else ""),
                 "folder": doc.get("folder", "")}
         place(item, relpath, doc.get("original_name") or "")
         if not web and (doc.get("folder") == "产品画册" or RESOURCE.search(f"{relpath} {doc['title']}")):
@@ -534,12 +535,14 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     archived: list[str] = []
     planned = {(Path(ROOT) / p.relative_to(site)).as_posix(): p for p in site.rglob("*.md")}
-    for key, source in planned.items():
+    for key in planned:
         target = vault / key
         if target.exists() and key not in files:
             raise SystemExit(f"目标位置已有不是本 Skill 写的文件，不覆盖：{key}")
         if target.exists() and normalized_hash(target) != files.get(key):
             raise SystemExit(f"这个页面被人改过，先把改动移到单独的文件再更新：{key}")
+    for key, source in planned.items():
+        target = vault / key
         if target.exists() and normalized_hash(target) != normalized_hash(source):
             archive(vault, key, stamp, archived)
         target.parent.mkdir(parents=True, exist_ok=True)

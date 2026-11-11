@@ -20,6 +20,7 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from governance import merge_ledger
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
@@ -223,7 +224,52 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vault", required=True, help="Project folder made by kb_project.py")
     parser.add_argument("--manage-skill", help="Optional manage-article-knowledge directory")
     parser.add_argument("--allow-withdraw", action="store_true", help="Publish even when many documents would become 已失效")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Write nothing: list what would become 已失效, be archived, renamed, added or changed")
     return parser.parse_args()
+
+
+def kept_warnings(kept: list[str], limit: int = 5) -> list[str]:
+    """Settings merged entry by entry say which entries differed; plain files, by folder, counted."""
+    # Config and decisions first: thirty MinerU files must not push kb-config.json out of sight.
+    settings = sorted((p for p in kept if "两边不一样" in p), key=lambda p: ("70_构建状态" not in p, p))
+    files = [p for p in kept if "两边不一样" not in p]
+    lines = [f"两份都有、内容不同，已逐项合并（不同的项用较新的那份）：{p}" for p in settings[:limit]]
+    if len(settings) > limit:
+        lines.append(f"…另有 {len(settings) - limit} 个设置文件同样逐项合并")
+    folders = Counter(str(Path(p.split("（", 1)[0]).parent) for p in files)
+    lines += [f"知识库里的版本比运行目录新，保留知识库的：{folder} 下 {n} 个文件" for folder, n in folders.most_common()]
+    return lines
+
+
+def dry_run_report(vault: Path, planned: dict[str, Path], previous: dict[str, str], new_paths: dict[str, str],
+                   material: set[str], leaving: list[str], live: int, allowed: bool) -> dict[str, Any]:
+    """What a publish would do, from the same lists the publish itself uses; nothing is written."""
+    added = sorted(k for k in planned if k not in previous and not (vault / k).exists())
+    changed = sorted(k for k, source in planned.items() if (vault / k).is_file() and k in previous
+                     and normalized_hash(vault / k) != normalized_hash(source))
+    renamed, drawings = [], []
+    for key in sorted(set(previous) - set(planned)):
+        target = vault / key
+        if not (key.startswith(SOURCE.as_posix()) and target.suffix == ".md" and target.is_file()):
+            continue
+        doc_id = parse_frontmatter(target.read_text(encoding="utf-8")).get("doc_id")
+        if doc_id in new_paths:
+            renamed.append(f"{key} → {new_paths[doc_id]}")
+        elif doc_id in material:
+            drawings.append(key)
+    folders = Counter(Path(key).relative_to(SOURCE).parts[0] for key in leaving)
+    stops = len(leaving) > max(WITHDRAW_LIMIT, live * WITHDRAW_SHARE) and not allowed
+    return {
+        "dry_run": True,
+        "would_stop": stops,
+        "withdrawn": len(leaving), "withdrawn_by_folder": dict(folders.most_common()), "withdrawn_files": leaving,
+        "renamed": len(renamed), "renamed_files": renamed,
+        "drawings_to_material": len(drawings), "drawing_files": drawings,
+        "added": len(added), "changed": len(changed),
+        "next": ("会因为撤下太多而停下：先看 withdrawn_files，确认确实要撤下再加 --allow-withdraw" if stops
+                 else "去掉 --dry-run 正式发布"),
+    }
 
 
 def main() -> int:
@@ -269,18 +315,24 @@ def main() -> int:
             page = new_paths.get(f"DOC-{kept.get('source_hash', '')[:10]}")
             if page:
                 new_paths.setdefault(f"DOC-{route['source_hash'][:10]}", page)
+    # A drawing now filed as pictures in 90_素材: its old text page goes to the archive, no 已失效 stub.
+    material = {f"DOC-{r['source_hash'][:10]}" for r in routes.values() if r.get("reason") == "drawing" and r.get("source_hash")}
     leaving = []
     for key in sorted(set(previous) - set(planned)):
         target = vault / key
         if key.startswith(SOURCE.as_posix()) and target.suffix == ".md" and target.is_file():
             fields = parse_frontmatter(target.read_text(encoding="utf-8"))
-            if fields.get("doc_id") and fields.get("status") != "已失效" and fields["doc_id"] not in new_paths:
+            if fields.get("doc_id") and fields.get("status") != "已失效" and fields["doc_id"] not in new_paths and fields["doc_id"] not in material:
                 leaving.append(key)
     live = sum(1 for key in previous if key.startswith(SOURCE.as_posix()) and key.endswith(".md"))
     if len(leaving) > max(WITHDRAW_LIMIT, live * WITHDRAW_SHARE) and not args.allow_withdraw:
         folders = Counter(Path(key).relative_to(SOURCE).parts[0] for key in leaving)
         raise SystemExit(f"这次发布会让 {len(leaving)} / {live} 份资料变成已失效（{'、'.join(f'{f} {n}' for f, n in folders.most_common())}）。"
                          "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
+    if args.dry_run:
+        print(json.dumps(dry_run_report(vault, planned, previous, new_paths, material, leaving, live, args.allow_withdraw),
+                         ensure_ascii=False, indent=2))
+        return 0
     written: dict[str, str] = {}
     renamed: list[str] = []
     moved = move_pictures(vault, build, previous, renamed)
@@ -349,6 +401,9 @@ def main() -> int:
         if parse_frontmatter(old).get("doc_id") in new_paths and key.startswith(SOURCE.as_posix()):
             archive(vault, key, stamp, archived, move=True)
             renamed.append(f"{key} → {new_paths[parse_frontmatter(old)['doc_id']]}")
+        elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id") in material:
+            archive(vault, key, stamp, archived, move=True)
+            renamed.append(f"{key} → 90_素材（图纸，改按素材处理，每页一张图）")
         elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id"):
             # Only documents this vault really published leave a 已失效 record.
             if parse_frontmatter(old).get("status") != "已失效":
@@ -373,7 +428,7 @@ def main() -> int:
     run_info = load_json(build / "run-info.json") if (build / "run-info.json").is_file() else {}
     update_project_info(vault, run_info.get("packages", []))
     state = save_state(run, vault)
-    warnings += [f"知识库里的版本比运行目录新，已保留：{path}" for path in state["kept_newer_in_vault"]]
+    warnings += kept_warnings(state["kept_newer_in_vault"])
     write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
                               "hash_mode": HASH_MODE, "files": written})
     index = build_index(vault)

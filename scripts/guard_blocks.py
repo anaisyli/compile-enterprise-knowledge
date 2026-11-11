@@ -124,6 +124,9 @@ SITE_MIN_PAGES = 8
 SITE_COMMON_MIN = 3
 SITE_COMMON_SHARE = 0.05
 SITE_REPEAT_SHARE = 0.8
+# A guessed customer name in this many documents is almost surely an ordinary word.
+WIDESPREAD_MIN = 5
+WIDESPREAD_SHARE = 0.03
 # Repetition alone proves nothing: catalogs repeat real specifications on every page.
 # Only a repeated line that also looks like a footer counts as page furniture.
 FURNITURE = re.compile(r"(?i)https?:|www\.|@|\b(?:tel|fax|whatsapp)\b|电话|^\d{1,3}$|^page\s*\d+$")
@@ -198,18 +201,44 @@ def build_terms(
     hard = {term for term in config["deny_terms"]} | set(decisions.get("deny_terms", []))
 
     soft: Counter = Counter()
+    # Guessed names: text above a table's header and words in quotation file names. A glossary's
+    # title rows or a file called "Touch Display Series.xlsx" land here too, so these can be let
+    # through when they turn out to be everywhere. A customer column or an email is not a guess.
+    guessed: set[str] = set()
+    certain: set[str] = set()
     for record in load_jsonl(build / "removed-terms.jsonl"):
         for line in record["term"].split(" / "):
             soft[normalize_space(line)] += 1
-    soft.update(terms_from_transactions(routes, text_dirs, own_domains))
-    soft.update(terms_from_file_names(routes))
+            (guessed if record.get("origin") == "above_table" else certain).add(normalize_space(line))
+    learned = terms_from_transactions(routes, text_dirs, own_domains)
+    soft.update(learned)
+    certain.update(learned)
+    from_names = terms_from_file_names(routes)
+    soft.update(from_names)
+    guessed.update(from_names)
 
     kept = sorted(
         term for term in soft
         if usable_term(term, own) and term.casefold() not in allowed and term not in hard
         and not (term.isascii() and all(word in vocabulary for word in term.casefold().split()))
+        and term.casefold() not in vocabulary
     )
-    return {"hard": sorted(hard), "soft": kept}
+    return {"hard": sorted(hard), "soft": kept, "guessed": sorted(t for t in kept if t in guessed and t not in certain)}
+
+
+def widespread_terms(guessed: list[str], blocks: list[dict[str, Any]]) -> dict[str, int]:
+    """Guessed names found in many documents: a customer is named in a few quotes, a spec word everywhere.
+
+    Returns term -> number of documents. These are let through and listed for a person to judge."""
+    documents = {b["doc_id"] for b in blocks}
+    floor = max(WIDESPREAD_MIN, int(len(documents) * WIDESPREAD_SHARE))
+    found: dict[str, int] = {}
+    for term in guessed:
+        pattern = re.compile(word_pattern(term), re.IGNORECASE)
+        seen = {b["doc_id"] for b in blocks if pattern.search(b["text"])}
+        if len(seen) >= floor:
+            found[term] = len(seen)
+    return found
 
 
 def compile_terms(terms: list[str]) -> re.Pattern[str] | None:
@@ -487,7 +516,10 @@ def main() -> int:
     repeated = strip_repeated_lines(blocks) + strip_site_furniture(blocks)
     vocabulary = load_vocabulary(config, decisions)
     terms = build_terms(build, routes, [Path(raw).resolve() for raw in args.text_dir], config, decisions, vocabulary)
-    write_json(build / "guard-terms.json", terms)
+    widespread = widespread_terms(terms.pop("guessed"), blocks)
+    terms["soft"] = [t for t in terms["soft"] if t not in widespread]
+    terms["widespread"] = sorted(widespread)
+    write_json(build / "guard-terms.json", {k: v for k, v in terms.items() if k != "widespread"})
     hard_terms = compile_terms(terms["hard"])
     soft_terms = compile_terms(terms["soft"])
     own_domains = {domain.casefold() for domain in config["own_domains"]}
@@ -517,8 +549,11 @@ def main() -> int:
     counts: Counter = Counter()
 
     def enqueue(term: str, kind: str, block: dict[str, Any]) -> None:
-        entry = queue.setdefault((kind, term.casefold()), {"term": term, "kind": kind, "blocks": 0, "examples": []})
+        entry = queue.setdefault((kind, term.casefold()), {"term": term, "kind": kind, "blocks": 0, "documents": 0,
+                                                           "examples": [], "_docs": set()})
         entry["blocks"] += 1
+        entry["_docs"].add(block["doc_id"])
+        entry["documents"] = len(entry["_docs"])
         if len(entry["examples"]) < 2:
             entry["examples"].append(block["text"][:120])
 
@@ -584,15 +619,29 @@ def main() -> int:
                 counts["paired_answer"] += 1
 
     write_jsonl(build / "blocks.jsonl", results)
-    ordered = sorted(queue.values(), key=lambda entry: entry["blocks"], reverse=True)
+    for term, documents in widespread.items():
+        queue[("widespread", term.casefold())] = {"term": term, "kind": "widespread", "blocks": 0, "documents": documents,
+                                                  "examples": [], "_docs": set()}
+    for entry in queue.values():
+        entry.pop("_docs", None)
+    # Most removed first: one word judged here can bring back hundreds of passages.
+    ordered = sorted(queue.values(), key=lambda entry: (entry["blocks"], entry["documents"]), reverse=True)
     write_jsonl(build / "review-queue.jsonl", ordered)
     lines = ["# 待判断的词", "",
-             "判断一次即可处理所有相关内容。普通词放行写进词表或 allow_terms；确认是客户或竞品的写进 deny_terms。", ""]
-    for kind, title in (("customer_name", "## 可能是客户名（相关内容已删除，普通词请放行）"),
-                        ("unverified_name", "## 没核实过的词（相关内容已入库并标 ⚠，确认是品牌、明星、IP 时登记处理）")):
+             "判断一次即可处理所有相关内容。普通词放行写进词表或 allow_terms；确认是客户或竞品的写进 deny_terms。",
+             "按删掉或标记的段数从多到少排，先看最上面的。", ""]
+    sections = (
+        ("customer_name", "## 可能是客户名（相关内容已删除，普通词请放行）"),
+        ("widespread", "## 像客户名、但出现在很多份资料里的词（多半是普通词，已放行；确认是客户的写进 deny_terms）"),
+        ("unverified_name", "## 没核实过的词（相关内容已入库并标 ⚠，确认是品牌、明星、IP 时登记处理）"),
+    )
+    for kind, title in sections:
         members = [entry for entry in ordered if entry["kind"] == kind]
         lines.extend(["", title, ""])
-        lines.extend(f"- {entry['term']}（{entry['blocks']} 处）：{entry['examples'][0]}" for entry in members)
+        for entry in members:
+            where = f"{entry['blocks']} 处，{entry['documents']} 份资料" if entry["blocks"] else f"出现在 {entry['documents']} 份资料里"
+            example = f"：{entry['examples'][0]}" if entry["examples"] else ""
+            lines.append(f"- {entry['term']}（{where}）{example}")
     write_text(build / "review-queue.md", "\n".join(lines) + "\n")
     print(
         json.dumps(

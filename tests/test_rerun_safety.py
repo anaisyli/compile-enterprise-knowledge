@@ -214,6 +214,27 @@ class RerunTests(Base):
         self.assertIn('"withdrawn": 0', result.stdout)
         self.assertEqual(len(pages()), 1, pages())
 
+    def test_a_page_now_filed_as_a_drawing_leaves_the_source_folder(self) -> None:
+        path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["assets"].append({**manifest["assets"][0], "item_id": "g1", "display_name": "15.6.pdf", "path": "A/资料/15.6.pdf",
+                                   "source_hash": "3" * 64, "pending_client_review": False, "pending_units": []})
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        (self.text / "g1.json").write_text(json.dumps({"item_id": "g1", "units": [{"locator": "page 1", "text": "规格 356 220"}]},
+                                                      ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.make_vault()
+        self.assertEqual(self.publish().returncode, 0)
+        pages = lambda: [p for p in (self.vault / "02_源资料/10_净化原文").rglob("*15.6*.md")]  # noqa: E731
+        self.assertEqual(len(pages()), 1)
+        manifest["assets"][-1]["path"] = "A/尺寸图/15.6.pdf"
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        result = self.publish()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"withdrawn": 0', result.stdout)
+        self.assertEqual(pages(), [])
+
     def test_old_receipt_gives_one_warning_and_archives_once(self) -> None:
         self.pipeline()
         self.make_vault()

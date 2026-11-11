@@ -117,7 +117,7 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
                     f"按本页名字“{doc['title']}”查")
         if twin is not None:
             # The same document saved as PDF too; it is not read twice, but stays one click away.
-            rows.append("> - 同一份资料还有 PDF 版" + (f"：[打开原件]({twin})" if twin else "，在初筛包同一个文件夹里")
+            rows.append("> - 同一份资料还有 PDF 版" + (f"：[打开原件]({twin})" if twin else "，在初筛包同一个文件夹或旁边的 PDF 文件夹里")
                         + "；内容相同，没有另做一页")
     rows.append(f"> - 资料编号：`{doc['item_id']}`")
     if doc.get("pages"):
@@ -820,6 +820,9 @@ def main() -> int:
             route["fate"] = "整个文件夹待客户确认，回复前不进素材库"
         elif entry["status"] == "drawing_unrendered":
             route["fate"] = "图纸，按素材处理；没能转成图片，原件留在初筛包"
+        elif entry["kind"] == "image" and Path(entry.get("relpath") or "").suffix.casefold() not in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            suffix = Path(entry.get("relpath") or "").suffix or "这种格式"
+            route["fate"] = f"{suffix} 设计稿或特殊格式图片，知识库里显示不了，原件留在初筛包，素材索引里有文件夹链接"
         elif entry["kind"] == "image":
             route["fate"] = "图片较大，原图留在初筛包，素材索引里有文件夹链接"
         else:

@@ -302,12 +302,14 @@ def main() -> int:
     # A knowledge layer left half written must not look finished.
     warnings: list[str] = []
     d_path = build / "review-decisions.json"
-    waiting_d = unapproved_d(routes, load_json(d_path) if d_path.is_file() else {})
+    # Counted as pages, like docs.jsonl: one file kept in three folders is one document to approve.
+    waiting_d = {routes[i].get("source_hash") or i for i in unapproved_d(routes, load_json(d_path) if d_path.is_file() else {})}
     if waiting_d:
         warnings.append(f"{len(waiting_d)} 份保留的 D 类还没批准，现在是“待审”：看过原文没问题，把资料编号写进 review-decisions.json 的 approve_docs")
-    undecided_d = [i for i, r in routes.items() if r.get("decision") == "D" and r.get("reason") == "unresolved_item"]
+    undecided_d = {r.get("source_hash") or i for i, r in routes.items() if r.get("decision") == "D" and r.get("reason") == "unresolved_item"}
     if undecided_d:
-        warnings.append(f"{len(undecided_d)} 份 D 类还没决定要不要用：问客户，或者看过后写进 kb-config.json 的 d_keep / d_drop")
+        warnings.append(f"{len(undecided_d)} 份 D 类还没决定要不要用：看过后写进 kb-config.json 的 d_keep / d_drop，"
+                        "要问客户的写进 ask_client")
     topics_path = build / "curation" / "topics.json"
     topics = load_json(topics_path) if topics_path.is_file() else []
     topics = [t for t in topics if t.get("blocks")]  # A topic with no source text has nothing to write.

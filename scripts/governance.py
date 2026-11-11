@@ -160,9 +160,10 @@ def build(
                   "question": f"《{doc['title']}》{'整份文件' if hold.startswith('整份文件') else hold}能否公开使用？"}
                  for hold, _ in holds]
         title = f"《{doc['title']}》能否进知识库" if whole else f"《{doc['title']}》{len(holds)} 处内容能否公开"
+        why = (routes.get(doc["item_id"]) or {}).get("ask_reason") or "初筛时标记为待客户确认。"
         add("CUS", f"pending:{doc['item_id']}", short(title, 60), f"{sum(c for _, c in holds)} 段", "等待客户回复",
             "内容运营 → 客户",
-            ["- 为什么问：初筛时标记为待客户确认。", f"- 回复前：已入来源层并标 🕒，整理页不引用。来源：{link(doc)}", "",
+            [f"- 为什么问：{why}", f"- 回复前：已入来源层并标 🕒，整理页不引用。来源：{link(doc)}", "",
              "| 位置 | 段数 |", "| --- | ---: |"] + [f"| {short(hold)} | {count} |" for hold, count in holds], items)
     # Pictures and videos screening sent to the client as a whole folder: one question, one answer.
     folders: dict[str, list[str]] = defaultdict(list)
@@ -175,9 +176,11 @@ def build(
         place = str(Path(routes[ids[0]].get("path") or "").parent.as_posix())
         items = [{"key": "folder", "item_id": ",".join(ids), "location": "", "question": question,
                   "name": f"{name}（文件夹，{len(ids)} 个文件）", "place": place}]
+        asked = next((routes[i]["ask_reason"] for i in ids if routes[i].get("ask_reason")), "")
         add("CUS", f"media:{folder}", short(f"文件夹《{name}》{len(ids)} 个素材能否公开使用", 60), f"{len(ids)} 个",
             "等待客户回复", "内容运营 → 客户",
-            ["- 为什么问：初筛时抽看了样本，整个文件夹标记为待客户确认（常见于客户现场照片，能看到客户的标志）。",
+            [f"- 为什么问：{asked}" if asked else
+             "- 为什么问：初筛时抽看了样本，整个文件夹标记为待客户确认（常见于客户现场照片，能看到客户的标志）。",
              "- 回复前：这些图片不进 90_素材，视频不列为可用素材。客户回答一次，对整个文件夹生效。"], items)
     images = sorted(i for i, r in routes.items() if r["route"] == "hold" and r["reason"] == "image_needs_review")
     if images:
@@ -274,7 +277,8 @@ def build(
     undecided = [f"{show(r['display_name'])}（资料编号 `{i}`）" for i, r in sorted(routes.items())
                  if r.get("decision") == "D" and r["reason"] == "unresolved_item"]
     mat("d_undecided", "D 类待决定的资料", undecided, "份", "待知识库专员判断",
-        "问客户（客户确认表），或者看过原件后写进 kb-config.json 的 d_keep / d_drop；保留的入库后是“待审”，看过没问题写 approve_docs",
+        "看过原件后写进 kb-config.json 的 d_keep / d_drop；要客户定的写进 ask_client（进 CUS 和客户确认表）；"
+        "保留的文档入库后是“待审”，看过没问题写 approve_docs；保留的图片和视频直接进素材",
         "客户回答或资料更新时")
     failed = [f"{show(s['display_name'])}（{s['status']}，资料编号 `{item}`）" for item, s in extract_status.items()
               if s.get("status") in {"hash_mismatch", "missing_file", "failed", "needs_pdf_reader", "needs_libreoffice"}]
