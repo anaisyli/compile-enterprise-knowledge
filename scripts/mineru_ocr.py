@@ -60,7 +60,7 @@ def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool =
             left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" else []
             if left:
                 reasons.append(f"{len(left)} 页没有文字层或文字很少，还没人读过")
-            if route["route"] == "hold" and route["reason"] in {"unresolved_item", "no_extractable_content"}:
+            if route["route"] == "hold" and route["reason"] == "no_extractable_content":
                 reasons.append("文件读不出文字")
         if reasons:
             path = package_paths[item_id]

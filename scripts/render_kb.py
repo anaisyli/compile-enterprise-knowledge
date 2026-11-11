@@ -24,8 +24,8 @@ from pictures import build_pictures, load_media, page_group, write_index as writ
 from products import Matcher, catalog as product_catalog, place_media
 from site_view import write_site
 from guard_blocks import HARD_PATTERNS, compile_terms
-from d_review import unreviewed as unreviewed_d
 from kb_common import (
+    unapproved_d,
     BUILD_DIRECTORY,
     CLEAN_DIRECTORY,
     ROLE_LABELS,
@@ -58,10 +58,10 @@ REASON_LABELS = {
     "user_excluded": "用户指定不处理",
     "excluded": "初筛排除", "duplicate": "重复", "website_duplicate": "网页重复", "website_listing": "分类列表页",
     "third_party_material": "竞品或第三方资料", "writing_operations_material": "写作运营资料", "not_copied_restricted": "受限未复制",
-    "no_extractable_content": "读不出可用内容", "unresolved_item": "初筛待定，未确认", "image_needs_review": "图片待识别",
+    "no_extractable_content": "读不出可用内容", "unresolved_item": "D 类待决定（客户和内部都还没定）", "image_needs_review": "图片待识别",
     "unreadable_removal_location": "清理位置看不懂", "client_said_no": "客户说不用", "unknown_decision": "初筛分类不明",
     "website_needs_browser": "要用浏览器读取", "awaiting_sample": "等样例确认后提取",
-    "media_kept": "按文件夹保留的图片和视频", "other_format": "同一份资料的另一种格式", "media_awaiting_client": "整个文件夹待客户确认",
+    "media_kept": "按文件夹保留的图片和视频", "dropped_internally": "D 类，内部判断不用", "other_format": "同一份资料的另一种格式", "media_awaiting_client": "整个文件夹待客户确认",
 }
 VISIBLE = {"kept", "flagged", "pending_client"}
 # Inside each package: the knowledge base's name for every file beside its original name.
@@ -92,8 +92,8 @@ def doc_path(doc: dict[str, Any]) -> str:
 def doc_status(doc: dict[str, Any], blocks: list[dict[str, Any]], effective: set[str]) -> str:
     if doc.get("role") == "reference":
         return "参考稿"
-    if doc["tier"] not in effective or doc.get("d_unreviewed"):
-        return "待审"  # A kept D file counts once someone has marked what inside cannot be used.
+    if doc["tier"] not in effective or doc.get("d_unapproved"):
+        return "待审"  # A kept D file counts once someone who looked at it has approved it.
     pending = sum(1 for b in blocks if b["status"] == "pending_client")
     if pending and pending == len(blocks):
         return "待客户确认"
@@ -130,8 +130,10 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
     rows.append(f"> - 状态：{status}" + (f"；相关事项：{'、'.join(issue_links)}" if issue_links else ""))
     rows.append("> - 本文件只删除不改写；删除了什么见《内容清理记录》。")
     if doc.get("decision") == "D":
-        rows.append("> - 初筛 D 类，客户同意保留。" + ("⚠ 还没做 D 类复核（逐段看哪里不能用），复核前是“待审”。"
-                                                  if doc.get("d_unreviewed") else "已做 D 类复核，不能用的段已删，要问的在待客户确认里。"))
+        who = "内部判断保留" if doc.get("d_by") == "internal" else "客户同意保留"
+        rows.append(f"> - 初筛 D 类，{who}。" + ("⚠ D 类，用前看原文：初筛没标出哪里不能用，只自动删了价格、客户名、联系方式和付款条款；"
+                                                "有人看过没问题后写进 review-decisions.json 的 approve_docs，才算有效。"
+                                                if doc.get("d_unapproved") else "已有人看过并批准。"))
     if doc.get("role") == "reference":
         rows.append("> - ⚠ 参考整理稿：这份是从别家公开资料或旧稿整理出来的参考，不是公司自己的资料。"
                     "里面的参数、款式不能直接当公司事实用；整理页引用时带 ⚠，并找公司自己的资料印证。")
@@ -729,9 +731,11 @@ def main() -> int:
 
     routes = load_json(build / "routes.json")
     docs = {doc["doc_id"]: doc for doc in load_jsonl(build / "docs.jsonl")}
-    waiting_d = set(unreviewed_d(build, routes))
+    decisions_path = build / "review-decisions.json"
+    waiting_d = set(unapproved_d(routes, load_json(decisions_path) if decisions_path.is_file() else {}))
     for doc in docs.values():
-        doc["d_unreviewed"] = doc["item_id"] in waiting_d
+        doc["d_unapproved"] = doc["item_id"] in waiting_d
+        doc["d_by"] = "internal" if routes.get(doc["item_id"], {}).get("reason") == "kept_internally" else "client"
     blocks = load_jsonl(build / "blocks.jsonl")
     by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for block in blocks:

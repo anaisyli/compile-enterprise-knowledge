@@ -140,11 +140,14 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
     if decision == "E":
         return {"route": "skip", "reason": "excluded"}
     if decision == "D":
-        if answer == "keep":
-            # Kept as a whole, but nobody marked what inside cannot be used: read like B, then
-            # reviewed passage by passage (d_review.py); 待审 until that review is written.
+        # The client's answer, or ours (d_keep / d_drop, read in configured_route) when the client
+        # was not asked. Kept as a whole, nothing marked inside: read like B, 待审 until approved.
+        if answer in {"keep", "keep_internal"}:
             official = resource == "marketing" and extension in {".pdf", ".pptx"}
-            return {"route": "kb", "reason": "resolved_by_answer", "tier": "T1" if official else "T2"}
+            reason = "resolved_by_answer" if answer == "keep" else "kept_internally"
+            return {"route": "kb", "reason": reason, "tier": "T1" if official else "T2"}
+        if answer == "drop_internal":
+            return {"route": "skip", "reason": "dropped_internally"}
         return {"route": "hold", "reason": "unresolved_item"}
     if decision == "B":
         # B says the file needs cleaning, not what it is: a spec sheet in Word is read as a document.
@@ -183,7 +186,14 @@ def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str,
         result = {k: v for k, v in override.items() if k != "asset"}
         result.setdefault("reason", "explicit_build_override")
         return result
-    route = route_asset(asset, config.get("client_answers", {}))
+    answers = config.get("client_answers", {})
+    if asset.get("decision") == "D" and item_id not in answers:
+        # Not asked, or not answered yet: we may decide ourselves; the client's answer wins.
+        if item_id in set(config.get("d_drop", [])):
+            answers = {**answers, item_id: "drop_internal"}
+        elif item_id in set(config.get("d_keep", [])):
+            answers = {**answers, item_id: "keep_internal"}
+    route = route_asset(asset, answers)
     if item_id in config.get("no_ocr_items", {}) and route.get("reason") == "image_needs_review":
         return {"route": "media", "reason": "media_kept"}
     return route

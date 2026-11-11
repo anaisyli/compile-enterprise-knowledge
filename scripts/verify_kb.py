@@ -20,8 +20,8 @@ from source_fidelity import reviewed_units
 from sheet_layout import excel_date
 
 from guard_blocks import EMAIL, FURNITURE, HARD_PATTERNS, LABELLED_PHONE, MOBILE_CN, ROW_PATTERNS, compile_terms
-from d_review import unreviewed as unreviewed_d
 from kb_common import (
+    unapproved_d,
     BUILD_DIRECTORY,
     CLEAN_DIRECTORY,
     load_config,
@@ -301,9 +301,13 @@ def main() -> int:
 
     # A knowledge layer left half written must not look finished.
     warnings: list[str] = []
-    waiting_d = unreviewed_d(build, routes)
+    d_path = build / "review-decisions.json"
+    waiting_d = unapproved_d(routes, load_json(d_path) if d_path.is_file() else {})
     if waiting_d:
-        warnings.append(f"{len(waiting_d)} 份客户同意保留的 D 类还没做 D 类复核，现在是“待审”：看 04_知识库构建/d-review/README.md")
+        warnings.append(f"{len(waiting_d)} 份保留的 D 类还没批准，现在是“待审”：看过原文没问题，把资料编号写进 review-decisions.json 的 approve_docs")
+    undecided_d = [i for i, r in routes.items() if r.get("decision") == "D" and r.get("reason") == "unresolved_item"]
+    if undecided_d:
+        warnings.append(f"{len(undecided_d)} 份 D 类还没决定要不要用：问客户，或者看过后写进 kb-config.json 的 d_keep / d_drop")
     topics_path = build / "curation" / "topics.json"
     topics = load_json(topics_path) if topics_path.is_file() else []
     topics = [t for t in topics if t.get("blocks")]  # A topic with no source text has nothing to write.

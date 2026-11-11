@@ -268,9 +268,14 @@ def build(
     ocr = [f"{doc['title']}（第 {'、'.join(map(str, left))} 页尚无可检索文字）" for i, r in routes.items()
            if r["route"] == "kb" and r.get("ocr_pages") and (doc := by_item.get(i))
            and (left := remaining_ocr_pages(build_dir, i, r["ocr_pages"]))]
-    unread = [show(r["display_name"]) for r in routes.values() if r["route"] == "hold" and r["reason"] in {"no_extractable_content", "unresolved_item"}]
+    unread = [show(r["display_name"]) for r in routes.values() if r["route"] == "hold" and r["reason"] == "no_extractable_content"]
     mat("ocr", "需要核对或补充文字提取的资料", ocr + unread, "份", "等待材料或工具",
         "核对页面内容；需要补识别时运行 mineru_ocr.py plan，批准后 run", "资料更新或 Token 失效时")
+    undecided = [f"{show(r['display_name'])}（资料编号 `{i}`）" for i, r in sorted(routes.items())
+                 if r.get("decision") == "D" and r["reason"] == "unresolved_item"]
+    mat("d_undecided", "D 类待决定的资料", undecided, "份", "待知识库专员判断",
+        "问客户（客户确认表），或者看过原件后写进 kb-config.json 的 d_keep / d_drop；保留的入库后是“待审”，看过没问题写 approve_docs",
+        "客户回答或资料更新时")
     failed = [f"{show(s['display_name'])}（{s['status']}，资料编号 `{item}`）" for item, s in extract_status.items()
               if s.get("status") in {"hash_mismatch", "missing_file", "failed", "needs_pdf_reader", "needs_libreoffice"}]
     mat("extract", "提取失败的资料", failed, "份", "待知识库专员判断", "按状态补 pypdf、LibreOffice，或换回原文件", "重新提取后仍失败")
@@ -479,7 +484,7 @@ def cleanup_record(build_dir: Path, blocks: list[dict[str, Any]], docs: dict[str
               "quoted_terms": "给客户的报价条件",
               "order_number": "订单号", "email": "外部邮箱", "phone": "电话", "denied_term": "竞品或禁用词",
               "quantity": "数量或包装", "material_usage": "单耗或用料", "internal_note": "业务备注",
-              "customer_name": "可能的客户名", "paired_answer": "被删问题的答案", "reviewer_dropped": "人工判断删除", "d_review_dropped": "D 类复核删除"}
+              "customer_name": "可能的客户名", "paired_answer": "被删问题的答案", "reviewer_dropped": "人工判断删除"}
     totals: dict[str, int] = defaultdict(int)
     per_doc: dict[str, list[str]] = defaultdict(list)
     for block in blocks:

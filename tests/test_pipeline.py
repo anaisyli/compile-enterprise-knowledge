@@ -477,52 +477,66 @@ class PipelineTests(unittest.TestCase):
         names = sorted(p.stem for p in self.clean.rglob("*页面文本*.md"))
         self.assertEqual(names, ["公司资料-页面文本-关于我们", "公司资料-页面文本-工厂实力"])
 
-    def keep_d(self) -> None:
+    def keep_d(self, how: str = "client") -> None:
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        config["client_answers"] = {**config.get("client_answers", {}), "d1": "keep"}
+        if how == "client":
+            config["client_answers"] = {**config.get("client_answers", {}), "d1": "keep"}
+        else:
+            config[how] = ["d1"]
         self.config.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         self.write_units("d1", [{"locator": "page 1", "text": "SHERPA JACKET 350GSM，可机洗。"},
-                                {"locator": "page 2", "text": "这批是给北欧连锁的秋季专供款。"},
-                                {"locator": "page 3", "text": "已通过 OEKO-TEX 认证。"}])
+                                {"locator": "page 2", "text": "已通过 OEKO-TEX 认证。"}])
 
-    def test_a_kept_d_file_waits_for_its_review(self) -> None:
+    def d_page(self) -> str:
+        return next(p for p in self.clean.rglob("*.md") if "`d1`" in p.read_text(encoding="utf-8")).read_text(encoding="utf-8")
+
+    def test_an_undecided_d_file_stays_out_and_is_listed_to_decide(self) -> None:
+        self.write_units("d1", [{"locator": "page 1", "text": "未决定款 ZX-777 可机洗。"}])
+        result = self.run_pipeline()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ZX-777", self.published_text())
+        self.assertIn("D 类待决定的资料", self.ledger("20_源资料处理/01_源资料处理台账.md"))
+        self.assertIn("d_keep / d_drop", self.verify().stdout)
+
+    def test_a_kept_d_file_is_pending_review_until_approved(self) -> None:
         self.keep_d()
         result = self.run_pipeline()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        page = next(p for p in self.clean.rglob("*.md") if "d1" in p.read_text(encoding="utf-8"))
-        text = page.read_text(encoding="utf-8")
-        self.assertIn('status: "待审"', text)
-        self.assertIn("还没做 D 类复核", text)
-        task = (self.build / "d-review/d1.md").read_text(encoding="utf-8")
-        self.assertIn("北欧连锁", task)
-        self.assertIn("没读过", task)
-        self.assertIn("D 类复核", self.verify().stdout)
-        self.assertNotIn("北欧连锁", (self.build / "exports/blocks-public.jsonl").read_text(encoding="utf-8"))
-
-    def test_the_d_review_removes_and_asks(self) -> None:
-        self.keep_d()
-        self.run_pipeline()
-        blocks = {b["locator"]: b["block_id"] for b in map(json.loads, (self.build / "blocks.jsonl").read_text(encoding="utf-8").splitlines())
-                  if b["doc_id"] == "DOC-d1d1d1d1d1"}
-        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
-        (self.build / "d-review/d1.json").write_text(json.dumps({
-            "item_id": "d1", "source_hash": routes["d1"]["source_hash"], "reviewed": True,
-            "drop": [{"block": blocks["page 2"], "why": "客户专供款"}],
-            "ask": [{"block": blocks["page 3"], "question": "认证还有效吗？"}]}, ensure_ascii=False), encoding="utf-8")
-        result = self.run_pipeline()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        text = self.published_text()
-        self.assertNotIn("北欧连锁", text)
-        self.assertIn("SHERPA JACKET 350GSM", text)
-        page = next(p for p in self.clean.rglob("*.md") if "d1" in p.read_text(encoding="utf-8")).read_text(encoding="utf-8")
+        page = self.d_page()
+        self.assertIn('status: "待审"', page)
+        self.assertIn("客户同意保留", page)
+        self.assertIn("⚠ D 类，用前看原文", page)
+        self.assertNotIn("OEKO-TEX", (self.build / "exports/blocks-public.jsonl").read_text(encoding="utf-8"))
+        self.assertIn("approve_docs", self.verify().stdout)
+        self.decide(approve_docs=["d1"])
+        self.assertEqual(self.run_pipeline().returncode, 0)
+        page = self.d_page()
         self.assertNotIn('status: "待审"', page)
-        self.assertIn("已做 D 类复核", page)
-        statuses = {b["block_id"]: b["status"] for b in map(json.loads, (self.build / "blocks.jsonl").read_text(encoding="utf-8").splitlines())}
-        self.assertEqual((statuses[blocks["page 2"]], statuses[blocks["page 3"]]), ("removed", "pending_client"))
-        self.assertFalse((self.build / "d-review/d1.md").exists() and "page 1" in (self.build / "d-review/README.md").read_text(encoding="utf-8"))
+        self.assertIn("已有人看过并批准", page)
         verified = self.verify()
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        self.assertNotIn("D 类复核", verified.stdout)
+        self.assertNotIn("approve_docs", verified.stdout)
+
+    def test_we_can_keep_or_drop_a_d_file_ourselves(self) -> None:
+        self.keep_d("d_keep")
+        self.assertEqual(self.run_pipeline().returncode, 0)
+        self.assertIn("内部判断保留", self.d_page())
+        self.keep_d("d_drop")
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config.pop("d_keep", None)
+        self.config.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.run_pipeline().returncode, 0)
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual((routes["d1"]["route"], routes["d1"]["reason"]), ("skip", "dropped_internally"))
+
+    def test_the_clients_answer_wins_over_ours(self) -> None:
+        self.keep_d("d_keep")
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["client_answers"] = {"d1": "drop"}
+        self.config.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.run_pipeline().returncode, 0)
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual(routes["d1"]["reason"], "client_said_no")
 
     def test_a_kept_d_workbook_is_cleaned_row_by_row_like_b(self) -> None:
         self.add_assets(asset("d2", "客户款式表.xlsx", "D", "product"))

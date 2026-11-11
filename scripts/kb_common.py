@@ -170,6 +170,15 @@ def load_config(path: Path | None) -> dict[str, Any]:
     return config
 
 
+def unapproved_d(routes: dict[str, Any], decisions: dict[str, Any]) -> list[str]:
+    """Kept D files nobody has approved yet. Screening could not tell whether they may be used and
+    marked nothing inside them, so they stay 待审 until a person or the AI that looked writes their
+    item id (or DOC id) into review-decisions.json approve_docs."""
+    approved = set(decisions.get("approve_docs", []))
+    return sorted(i for i, r in routes.items() if r.get("decision") == "D" and r.get("route") == "kb"
+                  and i not in approved and f"DOC-{(r.get('source_hash') or '')[:10]}" not in approved)
+
+
 EXCEL_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 

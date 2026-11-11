@@ -45,7 +45,7 @@ MODEL_CODE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,4}(?![0-9])")
 KIND_FOLDER = re.compile("|".join(p.pattern.replace("(?i)", "") for _, p in PICTURE_KINDS)
                          + r"|实拍|规格书|说明书|视频|图片|照片|图$|^新建文件夹|^new folder|^未命名|^untitled|副本$|^copy of", re.I)
 RESOURCE = re.compile(r"(?i)画册|catalog|brochure|目录|规格书|规格|spec|datasheet|说明书|manual|guide|下载|download")
-UNPROCESSED = {"awaiting_sample": "等样例确认后提取", "unresolved_item": "初筛待定，还没确认", "no_extractable_content": "读不出文字",
+UNPROCESSED = {"awaiting_sample": "等样例确认后提取", "unresolved_item": "D 类待决定", "no_extractable_content": "读不出文字",
                "image_needs_review": "图片还没识别文字", "media_awaiting_client": "整个文件夹待客户确认", "needs_libreoffice": "要 LibreOffice 才能读",
                "failed": "提取失败", "awaiting_client": "待客户确认"}
 

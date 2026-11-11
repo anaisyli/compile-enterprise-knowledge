@@ -101,8 +101,6 @@ def main() -> int:
         # Pick the pages to look at beside their text; the model's answers come in on the next run.
         ("page_check.py", ["plan", *sources, *common]),
         ("guard_blocks.py", [*repeat("--text-dir", args.text_dir), *common]),
-        # Kept D files: one review task each, with screening's reason; answers apply on the next run.
-        ("d_review.py", ["prepare", *common]),
         ("render_kb.py", render),
     ]
     config = load_json(Path(args.config)) if args.config else {}
