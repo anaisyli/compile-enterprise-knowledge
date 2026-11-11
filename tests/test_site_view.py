@@ -25,6 +25,33 @@ def media(item_id: str, relpath: str, kind: str = "image", **extra) -> dict:
 
 
 class SiteViewTests(unittest.TestCase):
+    def test_retained_large_images_and_designs_are_usable_originals_not_pending(self) -> None:
+        self.media += [
+            {"item_id": "large", "kind": "image", "status": "media_kept", "relpath": f"{BASE}/广告机/Wall mounted Digital Signage/DS50系列1/详情图/大图.jpeg",
+             "package": "D:/包", "package_path": "D/大图.jpeg", "bytes": 60_000_000},
+            {"item_id": "design", "kind": "image", "status": "media_kept", "relpath": f"{BASE}/广告机/Wall mounted Digital Signage/DS50系列1/详情图/设计稿.psd",
+             "package": "D:/包", "package_path": "D/设计稿.psd", "bytes": 80_000_000}]
+        site = self.build_site()
+        page = (site / "产品" / "建站-产品-广告机-Wall mounted Digital Signage-DS50系列.md").read_text(encoding="utf-8")
+        self.assertIn("## 已保留的原件素材（原位置）", page)
+        self.assertIn("| 大图.jpeg | 图片 | 57.2 MB | " + f"{BASE}/广告机/Wall mounted Digital Signage/DS50系列1/详情图 | 已确认可用 |", page)
+        self.assertIn("| 设计稿.psd | 设计稿 | 76.3 MB |", page)
+        self.assertIn("[打开原件](file:///D:/", page)
+        pending = page.split("## 相关但还没处理的文件", 1)[-1] if "## 相关但还没处理的文件" in page else ""
+        self.assertNotIn("设计稿.psd", pending)
+        self.assertNotIn("大图.jpeg", pending)
+
+    def test_kept_videos_are_usable_and_waiting_ones_are_pending(self) -> None:
+        self.media.append(media("m8", f"{BASE}/广告机/Wall mounted Digital Signage/DS20/现场/现场.mp4", kind="video",
+                                status="media_awaiting_client"))
+        site = self.build_site()
+        page = (site / "产品" / "建站-产品-广告机-Wall mounted Digital Signage-DS20.md").read_text(encoding="utf-8")
+        videos, pending = page.split("## 视频", 1)[1].split("## 相关但还没处理的文件", 1)
+        self.assertIn("| 介绍.mp4 | 视频 | 2.9 MB |", videos)
+        self.assertIn("| 已确认可用 |", videos)
+        self.assertNotIn("现场.mp4", videos)
+        self.assertIn("| 现场.mp4 | 待客户确认（整个文件夹） |", pending)
+
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

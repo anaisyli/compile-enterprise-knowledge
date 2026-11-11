@@ -23,6 +23,31 @@ CONFIG = {"style_prefixes": ["ANSP"], "categories": {"wall-tapestry": "挂毯"}}
 
 
 class PictureTests(unittest.TestCase):
+    def test_large_size_classification_repair_preserves_the_given_basename(self) -> None:
+        old = "资料包素材/广告机/Wall mounted Digital Signage/尺寸图/DS50-aabbccdd.jpg"
+        item = {"id": "img-aabbccddeeff0011.jpg", "folder": "资料包素材/广告机/Wall mounted Digital Signage/详情图",
+                "source_relpath": "DS50/大尺寸/中文版/DS50详情中文版/1.jpg", "label": "1", "prefix": "DS50",
+                "alt": "DS50", "use": PUBLIC}
+        saved = {item["id"]: {"file": old, "named_by": FROM_SOURCE}}
+        result = pictures.assign([item], saved, {}, Namer(CONFIG, None))
+        self.assertEqual(result[item["id"]]["file"], old.replace("/尺寸图/", "/详情图/"))
+        item["source_relpath"] = "DS50/普通组/详情图/1.jpg"
+        self.assertEqual(pictures.assign([item], saved, {}, Namer(CONFIG, None))[item["id"]]["file"], old)
+
+    def test_retained_originals_are_usable_unless_waiting(self) -> None:
+        design = {"kind": "image", "status": "media_kept", "relpath": "产品/X1/主图.psd", "bytes": 3 * 1024 * 1024}
+        record = pictures.retained_record(design)
+        self.assertEqual((record["name"], record["kind"], record["size"], record["folder"], record["status"]),
+                         ("主图.psd", "设计稿", "3.0 MB", "产品/X1", "已确认可用"))
+        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/大图.jpg"})["note"], "大文件，见原位置")
+        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/.jpg", "bytes": 46428})["note"], "图片已保留，原件见原位置")
+        video = pictures.retained_record({**design, "kind": "video", "relpath": "产品/宣传片.mp4"})
+        self.assertEqual((video["kind"], video["status"]), ("视频", "已确认可用"))
+        self.assertIn("待转写", video["note"])
+        waiting = {**design, "kind": "video", "status": "media_awaiting_client", "relpath": "Acme 现场/1.mp4"}
+        self.assertEqual(pictures.retained_record(waiting)["status"], "待客户确认")
+        self.assertEqual(pictures.retained_record(waiting, re.compile("Acme"))["folder"], pictures.MASKED_NAME)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.build = Path(self.temp.name) / "build"
@@ -141,6 +166,25 @@ class PictureTests(unittest.TestCase):
         self.assertIn(new, previous)
         self.assertEqual(follow_picture_links(vault, moved, set()), 1)
         self.assertIn("![[报价单参考图-LADIES TANK TOP-aaaaaaaa.png|200]]", note.read_text(encoding="utf-8"))
+
+    def test_corrected_folder_moves_an_already_named_picture_without_duplicate(self) -> None:
+        from kb_state import STATE
+        vault = Path(self.temp.name) / "vault"
+        old = "资料包素材/广告机/Wall mounted Digital Signage/尺寸图/DS50-aaaaaaaa.png"
+        new = old.replace("/尺寸图/", "/详情图/")
+        original = vault / "03_正式知识/90_素材" / old
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b"image")
+        state = vault / STATE / "picture-names.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"img-aaaaaaaaaaaaaaaa.png": {"file": old}}), encoding="utf-8")
+        (self.build / "pictures.json").write_text(json.dumps({"img-aaaaaaaaaaaaaaaa.png": {"file": new}}), encoding="utf-8")
+        previous = {f"03_正式知识/90_素材/{old}": "digest"}
+        renamed = []
+        self.assertEqual(move_pictures(vault, self.build, previous, renamed), {})
+        self.assertFalse(original.exists())
+        self.assertEqual((vault / "03_正式知识/90_素材" / new).read_bytes(), b"image")
+        self.assertEqual(len(renamed), 1)
 
 
 class WebsitePictureTests(unittest.TestCase):

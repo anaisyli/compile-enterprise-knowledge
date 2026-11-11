@@ -28,9 +28,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import BUILD_DIRECTORY, SKILL_VERSION, frontmatter, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from kb_common import BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
 from guard_blocks import HARD_PATTERNS
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
+from pictures import CONFIRMED_MEDIA, retained_record
 
 ROOT = "03_正式知识/80_建站资料"
 OVERVIEW = "00_建站资料总览"
@@ -243,21 +244,24 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         relpath = entry["relpath"]
         folder_uri = (Path(entry["package"]) / entry["package_path"]).parent.resolve().as_uri()
         hidden = risky(relpath, forbidden)
-        if entry["kind"] in {"video", "audio"}:
-            source = (Path(entry["package"]) / entry["package_path"]).resolve().as_uri()
+        copied = (entry.get("id") or picture_of.get(entry["item_id"])) in pictures
+        record = None if copied else retained_record(entry, forbidden)
+        if record and record["status"] != CONFIRMED_MEDIA:
+            # Waiting for the client or a rendering: only these are not yet usable material.
+            reason = f"{record['status']}（整个文件夹）" if entry["status"] == "media_awaiting_client" else f"{record['kind']}{record['note']}"
+            place({"what": "waiting", "name": record["name"], "reason": reason, "open": record["folder_uri"]}, relpath)
+        elif entry["kind"] in {"video", "audio"}:
             cover = pictures.get(entry.get("cover") or "")
-            place({"what": "videos", "name": MASKED if hidden else Path(relpath).name, "bytes": entry.get("bytes", 0),
-                   "duration": entry.get("duration", ""), "open": "" if hidden else source, "folder_uri": "" if hidden else folder_uri,
-                   "cover": cover["file"] if cover else "", "waiting": entry["status"] == "media_awaiting_client"}, relpath)
-        elif (entry.get("id") or picture_of.get(entry["item_id"])) in pictures:
+            place({"what": "videos", **record, "duration": entry.get("duration", ""), "cover": cover["file"] if cover else ""}, relpath)
+        elif copied:
             picture = pictures[entry.get("id") or picture_of[entry["item_id"]]]
             place({"what": "pictures", "file": picture["file"], "alt": picture["alt"], "use": picture["use"],
-                   "kind": entry.get("picture_kind") or picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri}, relpath)
+                   "kind": entry.get("picture_kind") or picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri,
+                   "drawing_original": (Path(entry["package"]) / entry["package_path"]).resolve().as_uri()
+                       if entry.get("drawing") and not hidden else "",
+                   "original_name": Path(relpath).name if entry.get("drawing") and not hidden else ""}, relpath)
         else:
-            reason = (UNPROCESSED["media_awaiting_client"] if entry["status"] == "media_awaiting_client"
-                      else "图纸，没能转成图片" if entry["status"] == "drawing_unrendered" else "图片较大，原图留在初筛包")
-            place({"what": "waiting", "name": MASKED if hidden else Path(relpath).name, "reason": reason,
-                   "open": "" if hidden else folder_uri}, relpath)
+            place({"what": "originals", **record}, relpath)
     published_items = {docs[d]["item_id"] for d in order}
     for item_id, route in routes.items():
         reason = UNPROCESSED.get(route.get("reason") or "") or UNPROCESSED.get(route.get("status") or "")
@@ -285,7 +289,8 @@ def cus_questions(build: Path) -> list[str]:
 def progress(groups: dict[str, list]) -> str:
     docs = len(groups.get("docs", []))
     return (f"资料 {docs} 份 · 官网页面 {len(groups.get('web', []))} 页 · 图片 {len(groups.get('pictures', []))} 张 · "
-            f"视频 {len(groups.get('videos', []))} 个 · 还没处理 {len(groups.get('waiting', []))} 个")
+            f"视频 {len(groups.get('videos', []))} 个 · 还没处理 {len(groups.get('waiting', []))} 个"
+            + (f" · 原位置素材 {len(groups['originals'])} 个" if groups.get("originals") else ""))
 
 
 def body(groups: dict[str, list], escape: Callable[[str], str], expected: list[tuple[str, str]] | None = None) -> list[str]:
@@ -315,14 +320,27 @@ def body(groups: dict[str, list], escape: Callable[[str], str], expected: list[t
             folders = sorted({i["folder_uri"] for i in items if i.get("folder_uri")})
             if folders:
                 lines += ["", "原图所在文件夹：" + " · ".join(f"[打开]({uri})" for uri in folders[:6]) + (" 等" if len(folders) > 6 else "")]
+            drawings = sorted({(i.get("original_name", ""), i["drawing_original"]) for i in items if i.get("drawing_original")})
+            if drawings:
+                lines += ["", "图纸预览用于浏览，尺寸细节请打开原 PDF：" + " · ".join(f"[{escape(name)}]({uri})" for name, uri in drawings)]
             lines.append("")
     if groups.get("videos"):
-        lines += ["## 视频", "", "| 封面 | 文件 | 大小 | 时长 | 打开 |", "| --- | --- | ---: | --- | --- |"]
+        lines += ["## 视频", "", "原件留在初筛包，已确认可用；视频里讲的内容转写以前不出知识点。", "",
+                  "| 封面 | 名称 | 类型 | 大小 | 时长 | 原位置 | 确认状态 | 打开 |", "| --- | --- | --- | ---: | --- | --- | --- | --- |"]
         for item in sorted(groups["videos"], key=lambda i: i["name"]):
             cover = f"![[{Path(item['cover']).name}|100]]" if item.get("cover") else ""
             links = " · ".join(filter(None, [f"[视频]({item['open']})" if item.get("open") else "", f"[文件夹]({item['folder_uri']})" if item.get("folder_uri") else ""]))
-            lines.append(f"| {cover} | {escape(item['name'])}{'（待客户确认）' if item.get('waiting') else ''} "
-                         f"| {item['bytes'] / 1024 / 1024:.1f} MB | {item.get('duration', '')} | {links or '见对照表'} |")
+            lines.append(f"| {cover} | {escape(item['name'])} | {item['kind']} | {item['size']} | {item.get('duration', '')} "
+                         f"| {escape(item['folder'])} | {item['status']} | {links or '见对照表'} |")
+        lines.append("")
+    if groups.get("originals"):
+        lines += ["## 已保留的原件素材（原位置）", "", "较大的图片和设计稿没有复制进知识库，原件留在初筛包，已确认可用，点击链接查看。", "",
+                  "| 名称 | 类型 | 大小 | 原位置 | 确认状态 | 备注 | 原件 |", "| --- | --- | ---: | --- | --- | --- | --- |"]
+        for item in sorted(groups["originals"], key=lambda i: i["name"]):
+            links = " · ".join(filter(None, [f"[打开原件]({item['open']})" if item.get("open") else "",
+                                             f"[文件夹]({item['folder_uri']})" if item.get("folder_uri") else ""]))
+            lines.append(f"| {escape(item['name'])} | {item['kind']} | {item['size']} | {escape(item['folder'])} "
+                         f"| {item['status']} | {item['note']} | {links or '见对照表'} |")
         lines.append("")
     if groups.get("waiting"):
         lines += ["## 相关但还没处理的文件", "", "| 文件 | 为什么还没处理 | 原件 |", "| --- | --- | --- |"]

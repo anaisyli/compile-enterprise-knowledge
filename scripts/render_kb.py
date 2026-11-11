@@ -820,13 +820,15 @@ def main() -> int:
             route["fate"] = "整个文件夹待客户确认，回复前不进素材库"
         elif entry["status"] == "drawing_unrendered":
             route["fate"] = "图纸，按素材处理；没能转成图片，原件留在初筛包"
+        elif entry["kind"] == "image" and Path(entry.get("relpath") or "").name.casefold() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            route["fate"] = "图片素材已收录，原件见原位置，建站页及素材索引有链接"
         elif entry["kind"] == "image" and Path(entry.get("relpath") or "").suffix.casefold() not in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
             suffix = Path(entry.get("relpath") or "").suffix or "这种格式"
-            route["fate"] = f"{suffix} 设计稿或特殊格式图片，知识库里显示不了，原件留在初筛包，素材索引里有文件夹链接"
+            route["fate"] = f"{suffix} 设计稿或特殊格式图片，已确认可用，知识库里显示不了，原件留在初筛包，素材索引里逐个列出"
         elif entry["kind"] == "image":
-            route["fate"] = "图片较大，原图留在初筛包，素材索引里有文件夹链接"
+            route["fate"] = "大文件，见原位置，已确认可用，素材索引里逐个列出"
         else:
-            route["fate"] = "视频或音频，原件留在初筛包，内容待转写"
+            route["fate"] = "视频或音频，已确认可用，原件留在初筛包，内容待转写"
     for doc_id in order:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
@@ -847,7 +849,7 @@ def main() -> int:
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     write_name_maps(routes, docs, published, statuses, same_content)
     write_json(build / "samples-waiting.json", write_plan_page(build, routes, docs, published, statuses, originals, config, status_info))
-    write_picture_index(build, pictures_named, docs, escape_cell)
+    write_picture_index(build, pictures_named, docs, escape_cell, forbidden)
     write_exports(build, visible, docs, styles, statuses)
     write_jsonl(build / "docs.jsonl", docs.values())
     write_json(build / "published.json", published)

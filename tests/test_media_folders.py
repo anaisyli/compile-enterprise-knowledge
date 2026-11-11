@@ -88,8 +88,12 @@ class MediaFolderTests(unittest.TestCase):
 
         index = (self.build / "vault/03_正式知识/90_素材/00_素材索引.md").read_text(encoding="utf-8")
         self.assertIn("## 留在初筛包里的素材", index)
-        self.assertIn("| 建站资料/产品/X100/渲染视频 | 视频 1 个 | 已保留，内容待转写 |", index)
-        self.assertIn("| 建站资料/产品/X100/实拍图 | 图片 2 个 | 待客户确认（整个文件夹） |", index)
+        self.assertIn("| 宣传片.mp4 | 视频 | 0 KB | 建站资料/产品/X100/渲染视频 | 已确认可用 | 内容待转写，转写前不出知识点 |", index)
+        self.assertIn("| 建站资料/产品/X100/实拍图 | 图片 2 个 | 0 KB | 待客户确认 |", index)
+        with (self.build / "vault/03_正式知识/90_素材/00_素材清单.csv").open(encoding="utf-8-sig", newline="") as handle:
+            listed = {row["编号"]: row for row in csv.DictReader(handle)}
+        self.assertEqual((listed["v1"]["类型"], listed["v1"]["确认状态"], listed["v1"]["能否用于官网"]), ("视频", "已确认可用", "可用于官网"))
+        self.assertEqual(listed["p1"]["确认状态"], "待客户确认")
 
         with (self.build / "客户确认表.csv").open(encoding="utf-8-sig", newline="") as handle:
             rows = [row for row in csv.DictReader(handle) if "实拍图" in row["原文件名"]]
@@ -99,7 +103,7 @@ class MediaFolderTests(unittest.TestCase):
 
         name_map = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
         self.assertIn("进素材库：90_素材/资料包素材/X100/效果图/", name_map)
-        self.assertIn("视频或音频，原件留在初筛包", name_map)
+        self.assertIn("视频或音频，已确认可用，原件留在初筛包", name_map)
 
         verified = self.run_script("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
                                    "--out", str(self.out), "--config", str(self.config))

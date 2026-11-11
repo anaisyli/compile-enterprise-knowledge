@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from guard_blocks import HARD_PATTERNS
 from products import material_folders
 
 
@@ -203,7 +204,8 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         location = "/".join(media_folders(entry["relpath"], namer)) or "根目录"
         if entry.get("id"):
             add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
-                alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem, location=location)
+                alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem, location=location,
+                source_relpath=entry["relpath"])
         if entry.get("cover"):
             add(entry["cover"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=f"{label}-封面" if label else "视频封面",
                 alt=f"视频封面：{' '.join(p for p in (prefix, label) if p)}", use=PUBLIC, english_source=stem, location=location)
@@ -243,6 +245,10 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
         # A name stays once given; only a plain numbered name gives way to a better one.
         if old and old.get("file") and not (old.get("named_by") == NUMBERED and named_by != NUMBERED):
             file, named_by = old["file"], old.get("named_by", named_by)
+            # Repair the former 大尺寸 -> 尺寸图 mistake without changing the given basename.
+            if ("大尺寸" in item.get("source_relpath", "") and Path(file).parent.name == "尺寸图"
+                    and Path(item["folder"]).name in {"详情图", "效果图"}):
+                file = f"{item['folder']}/{Path(file).name}"
         entries[item["id"]] = {**item, "file": file, "named_by": named_by, "alt": alt or label, "more": 0,
                                "english": english_name({**item, "alt": alt or label}, namer, suffix)}
     taken: dict[str, str] = {}
@@ -254,7 +260,8 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
     return entries
 
 
-def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str, dict[str, Any]], escape: Callable[[str], str]) -> None:
+def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str, dict[str, Any]], escape: Callable[[str], str],
+                forbidden: re.Pattern[str] | None = None) -> None:
     """One page for people, one CSV for the website team; no previews, thousands of pictures make Obsidian crawl."""
     counts = defaultdict(int)
     for entry in entries.values():
@@ -268,7 +275,7 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
              f"- **{INTERNAL}**：报价单、产品表里的图（多是买家询价时发来的款式）和整页截图，不要上官网。",
              f"- 名字是“{NUMBERED}”的，旁边没有能用的文字；可以让 AI 看图起名（pictures.py export / collect）。",
              f"- **{MEDIA_ROOT}**：初筛抽看样本后按文件夹整批保留的图片（比如建站资料里的渲染图、白底图），"
-             "放在原来的文件夹下（保留最后三层），名字取自文件夹和原文件名。视频、音频和较大的图片见最后一节。",
+             "放在原来的文件夹下（保留最后三层），名字取自文件夹和原文件名。视频、音频、较大的图片和设计稿留在初筛包，逐个列在最后一节。",
              f"- 建站用的清单（含英文文件名）：[[00_素材清单.csv]]。", ""]
     by_folder: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries.values():
@@ -284,52 +291,107 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
             lines.append(f"| [[{Path(entry['file']).name}]] | {escape(entry['alt'])} | {entry['use']} | {entry['named_by']} | {link} "
                          f"| {escape(entry['location'])} |")
         lines.append("")
-    lines += media_section(build, entries, escape)
+    retained = retained_media(build, entries, forbidden)
+    lines += retained_section(retained, escape)
     write_text(build / "vault" / INDEX, "\n".join(lines).rstrip() + "\n")
     target = build / "vault" / LIST_CSV
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["文件", "说明（alt）", "能否用于官网", "英文文件名建议", "名字来自", "出处", "位置", "编号"])
+        writer.writerow(["文件", "说明（alt）", "能否用于官网", "英文文件名建议", "名字来自", "出处", "位置", "编号",
+                         "类型", "大小", "原位置", "确认状态", "备注"])
         for entry in sorted(entries.values(), key=lambda e: e["file"]):
             source = docs[entry["doc_id"]]["title"] if entry["doc_id"] in docs else "资料包原文件夹"
+            asset = build / "assets" / entry["id"]
+            origin = Path(entry.get("source_relpath") or "").parent.as_posix() if entry.get("source_relpath") else ""
             writer.writerow([entry["file"], entry["alt"], entry["use"], entry["english"], entry["named_by"],
-                             source, entry["location"], entry["id"]])
+                             source, entry["location"], entry["id"], "图片", file_size(asset.stat().st_size) if asset.is_file() else "",
+                             origin, entry["use"], ""])
+        # Originals left in the package are material too: the website team needs to know they exist.
+        for record in retained:
+            use = PUBLIC if record["status"] == CONFIRMED_MEDIA else record["status"]
+            writer.writerow([record["name"], "", use, "", "原文件名", "初筛包原文件（没有复制进知识库）", "", record["entry"]["item_id"],
+                             record["kind"], record["size"], record["folder"], record["status"], record["note"]])
 
 
-def media_section(build: Path, entries: dict[str, dict[str, Any]], escape: Callable[[str], str]) -> list[str]:
-    """What screening kept by folder but the vault does not hold: video, audio, pictures above the
-    size limit, and folders waiting for the client. One row per original folder, with a link that
-    opens it in the package, because thousands of rows help nobody."""
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    for entry in load_media(build):
-        if entry.get("id") in entries:
-            continue
-        if entry["status"] == "media_awaiting_client":
-            state = "待客户确认（整个文件夹）"
-        elif entry["status"] == "drawing_unrendered":
-            state = "图纸，没能转成图片（本机没装 PyMuPDF 或文件损坏），原件在初筛包"
-        elif entry["kind"] == "image":
-            state = "图片较大，原图在初筛包"
-        else:
-            state = "已保留，内容待转写"
-        folder = str(Path(entry["package_path"]).parent.as_posix())
-        groups[(entry["package"], folder, state)].append(entry)
-    if not groups:
+CONFIRMED_MEDIA, AWAITING_MEDIA, UNRENDERED_MEDIA = "已确认可用", "待客户确认", "待转图"
+SHOWN_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MASKED_NAME = "（名字含客户或报价信息，见对照表）"
+RETAINED_COLUMNS = ["名称", "类型", "大小", "原位置", "确认状态", "备注"]
+
+
+def file_size(size: int) -> str:
+    return f"{size / 1024 / 1024:.1f} MB" if size >= 1024 * 1024 else f"{max(size, 0) / 1024:.0f} KB"
+
+
+def retained_record(entry: dict[str, Any], forbidden: re.Pattern[str] | None = None) -> dict[str, Any]:
+    """One original screening kept that stays in the preparation package instead of 90_素材:
+    a video or audio, a picture too large or in a format the vault cannot show, a drawing not
+    rendered, or a folder still waiting for the client. Kept and not waiting means usable."""
+    relpath = entry.get("relpath") or ""
+    suffix = Path(relpath).suffix.casefold()
+    if entry.get("status") == "drawing_unrendered":
+        kind, note = "图纸", "没能转成图片"
+    elif entry.get("kind") in {"video", "audio"}:
+        kind, note = KIND_LABELS[entry["kind"]], "内容待转写，转写前不出知识点"
+    elif suffix == ".psd":
+        kind, note = "设计稿", "设计稿已保留，原件见原位置"
+    elif entry.get("kind") == "image" and Path(relpath).name.casefold() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        kind, note = "图片", "图片已保留，原件见原位置"
+    elif entry.get("kind") == "image" and suffix not in SHOWN_IMAGES:
+        kind, note = "图片", f"{suffix or '这种格式'} 知识库里显示不了"
+    elif entry.get("kind") == "image":
+        kind, note = "图片", "大文件，见原位置"
+    else:
+        kind, note = "素材", ""
+    status = {"media_awaiting_client": AWAITING_MEDIA, "drawing_unrendered": UNRENDERED_MEDIA}.get(entry.get("status"), CONFIRMED_MEDIA)
+    folder = Path(relpath).parent.as_posix()
+    hidden = bool(relpath) and (bool(forbidden and forbidden.search(relpath)) or any(p.search(relpath) for p in HARD_PATTERNS.values()))
+    source = Path(entry["package"]) / entry["package_path"] if entry.get("package") and entry.get("package_path") else None
+    return {"name": MASKED_NAME if hidden else Path(relpath).name, "kind": kind, "bytes": entry.get("bytes") or 0,
+            "size": file_size(entry.get("bytes") or 0), "folder": MASKED_NAME if hidden else (folder if folder != "." else "根目录"),
+            "status": status, "note": note, "open": "" if hidden or not source else source.resolve().as_uri(),
+            "folder_uri": "" if hidden or not source else source.parent.resolve().as_uri()}
+
+
+def retained_media(build: Path, entries: dict[str, dict[str, Any]], forbidden: re.Pattern[str] | None = None) -> list[dict[str, Any]]:
+    """Every kept original not copied into 90_素材, with its record, in a stable order."""
+    records = [{**retained_record(e, forbidden), "entry": e} for e in load_media(build) if e.get("id") not in entries]
+    return sorted(records, key=lambda r: (r["status"] != CONFIRMED_MEDIA, r["folder"], r["name"]))
+
+
+def retained_section(records: list[dict[str, Any]], escape: Callable[[str], str], heading: str = "##") -> list[str]:
+    """Usable originals one row each; what still waits (the client, a rendering) one row per folder,
+    because the client answers per folder and such folders can hold hundreds of photos."""
+    if not records:
         return []
-    lines = ["## 留在初筛包里的素材", "",
-             "视频、音频和较大的图片不复制进知识库，原件在初筛包里，点“打开文件夹”就能看。视频里讲的内容转写以后才能当知识用。"
-             "待客户确认的文件夹，客户回复“保留”后重跑，图片会进上面的素材文件夹。", "",
-             "| 原来的文件夹 | 内容 | 状态 | 打开文件夹 |", "| --- | --- | --- | --- |"]
-    for (package, folder, state), members in sorted(groups.items(), key=lambda kv: (kv[0][2], kv[0][1])):
-        kinds = defaultdict(int)
-        for entry in members:
-            kinds[KIND_LABELS.get(entry["kind"], entry["kind"])] += 1
-        original = str(Path(members[0]["relpath"]).parent.as_posix())
-        what = "、".join(f"{label} {count} 个" for label, count in kinds.items())
-        uri = (Path(package) / folder).resolve().as_uri()
-        lines.append(f"| {escape(original if original != '.' else '根目录')} | {what} | {state} | [打开文件夹]({uri}) |")
-    return [*lines, ""]
+    usable = [r for r in records if r["status"] == CONFIRMED_MEDIA]
+    waiting = [r for r in records if r["status"] != CONFIRMED_MEDIA]
+    lines = [f"{heading} 留在初筛包里的素材", "",
+             "视频、音频、较大的图片和设计稿不复制进知识库，原件留在初筛包。初筛按文件夹保留、不用等客户确认的，都算已确认可用。", ""]
+    if usable:
+        lines += [f"{heading}# 已确认可用（{len(usable)} 个）", "",
+                  "| " + " | ".join(RETAINED_COLUMNS) + " | 打开 |", "|" + " --- |" * (len(RETAINED_COLUMNS) + 1)]
+        for r in usable:
+            links = " · ".join(filter(None, [f"[原件]({r['open']})" if r["open"] else "", f"[文件夹]({r['folder_uri']})" if r["folder_uri"] else ""]))
+            lines.append(f"| {escape(r['name'])} | {r['kind']} | {r['size']} | {escape(r['folder'])} | {r['status']} | {r['note']} | {links or '见对照表'} |")
+        lines.append("")
+    if waiting:
+        groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+        for r in waiting:
+            groups[(r["folder"], r["status"], r["folder_uri"])].append(r)
+        lines += [f"{heading}# 还没处理（{len(waiting)} 个）", "",
+                  "待客户确认的，客户回复“保留”后重跑就算可用，图片会进上面的素材文件夹；没能转成图片的图纸，原件照常可以打开。", "",
+                  "| 原位置 | 内容 | 大小 | 确认状态 | 打开 |", "| --- | --- | ---: | --- | --- |"]
+        for (folder, status, uri), members in sorted(groups.items()):
+            kinds: dict[str, int] = defaultdict(int)
+            for r in members:
+                kinds[r["kind"]] += 1
+            what = "、".join(f"{k} {n} 个" for k, n in kinds.items())
+            size = file_size(sum(r["bytes"] for r in members))
+            lines.append(f"| {escape(folder)} | {what} | {size} | {status} | {f'[打开文件夹]({uri})' if uri else '见对照表'} |")
+        lines.append("")
+    return lines
 
 
 def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]],
