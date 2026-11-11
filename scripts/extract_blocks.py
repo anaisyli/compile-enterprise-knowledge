@@ -141,6 +141,8 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
         return {"route": "skip", "reason": "excluded"}
     if decision == "D":
         if answer == "keep":
+            # Kept as a whole, but nobody marked what inside cannot be used: read like B, then
+            # reviewed passage by passage (d_review.py); 待审 until that review is written.
             official = resource == "marketing" and extension in {".pdf", ".pptx"}
             return {"route": "kb", "reason": "resolved_by_answer", "tier": "T1" if official else "T2"}
         return {"route": "hold", "reason": "unresolved_item"}
@@ -945,7 +947,7 @@ def main() -> int:
         }
         item_blocks: list[dict[str, Any]] = []
         sheet_units = [u for u in units if SHEET_UNIT.match(u["locator"])]
-        if asset.get("decision") == "B" and sheet_units:
+        if asset.get("decision") in {"B", "D"} and sheet_units:
             # A workbook screening wants cleaned: a sheet whose header names product columns is read
             # row by row, so prices and customers go cell by cell; any other sheet is the table it is.
             rules, unreadable = parse_actions(triage.get(item_id, {}).get("actions", []))

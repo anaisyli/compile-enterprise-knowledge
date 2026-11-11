@@ -16,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from d_review import marks as d_marks
 from kb_common import (
     BUILD_DIRECTORY,
     ROLE_ORDER,
@@ -478,6 +479,8 @@ def main() -> int:
     decisions = load_json(decisions_path) if decisions_path.is_file() else {}
     keep_blocks = set(decisions.get("keep_blocks", []))
     drop_blocks = set(decisions.get("drop_blocks", []))
+    # What the review of kept D files marked: passages that cannot be used, and ones to ask about.
+    d_drop, d_ask = d_marks(build, routes)
 
     blocks = load_jsonl(build / "blocks-raw.jsonl")
     cell_decisions = {r["cell_key"]: r for r in load_jsonl(build / "cell-review" / "decisions.jsonl")}
@@ -526,12 +529,18 @@ def main() -> int:
         hard, customers, unvetted = scan_block(block, hard_terms, soft_terms, own_domains, config["own_contacts"], vocabulary)
         block["hold_reasons"], block["flags"] = [], []
         trusted = block["block_id"] in keep_blocks or block.get("part_of") in keep_blocks
+        asked = d_ask.get(block["block_id"]) or d_ask.get(block.get("part_of") or "")
+        if asked:
+            block["client_hold"] = f"D 类复核：{asked}"
         if block["kind"] == "row" and not ({"description", "fabric", "style"} & set(block["cells"])):
             block["status"], block["hold_reasons"] = "dropped", ["reviewer_dropped_cells"]
         elif not block["text"] or (block["kind"] == "text" and garbled(block["text"])):
             block["status"], block["hold_reasons"] = "dropped", ["empty_or_garbled"]
         elif block["block_id"] in drop_blocks or block.get("part_of") in drop_blocks:
             block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped"]
+        elif block["block_id"] in d_drop or block.get("part_of") in d_drop:
+            why = d_drop.get(block["block_id"]) or d_drop.get(block.get("part_of"))
+            block["status"], block["hold_reasons"] = "removed", [f"d_review_dropped:{why}"]
         elif hard:
             # Prices, contacts, orders, and competitors are cleaned out, as screening decided.
             block["status"], block["hold_reasons"] = "removed", hard

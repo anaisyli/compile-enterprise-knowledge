@@ -43,6 +43,10 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
                 if item.is_file():
                     relative = item.relative_to(root)
                     found.append((build / directory / relative, vault / STATE / directory / relative))
+    # Answers of the D-class review; the task pages are made again from the build.
+    for root in (build / "d-review", vault / STATE / "d-review"):
+        for item in root.glob("*.json") if root.is_dir() else []:
+            found.append((build / "d-review" / item.name, vault / STATE / "d-review" / item.name))
     for root in (build / "curation", vault / STATE / "curation"):
         for page in root.glob("*/page.md") if root.is_dir() else []:
             slug = page.parent.name

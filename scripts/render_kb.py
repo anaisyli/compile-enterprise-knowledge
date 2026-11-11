@@ -24,6 +24,7 @@ from pictures import build_pictures, load_media, page_group, write_index as writ
 from products import Matcher, catalog as product_catalog, place_media
 from site_view import write_site
 from guard_blocks import HARD_PATTERNS, compile_terms
+from d_review import unreviewed as unreviewed_d
 from kb_common import (
     BUILD_DIRECTORY,
     CLEAN_DIRECTORY,
@@ -91,8 +92,8 @@ def doc_path(doc: dict[str, Any]) -> str:
 def doc_status(doc: dict[str, Any], blocks: list[dict[str, Any]], effective: set[str]) -> str:
     if doc.get("role") == "reference":
         return "参考稿"
-    if doc["tier"] not in effective:
-        return "待审"
+    if doc["tier"] not in effective or doc.get("d_unreviewed"):
+        return "待审"  # A kept D file counts once someone has marked what inside cannot be used.
     pending = sum(1 for b in blocks if b["status"] == "pending_client")
     if pending and pending == len(blocks):
         return "待客户确认"
@@ -128,6 +129,9 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
     rows.append(f"> - 来源级别：{doc['tier']} {tier['label']}（只说明来源，不等于每句都已核实）")
     rows.append(f"> - 状态：{status}" + (f"；相关事项：{'、'.join(issue_links)}" if issue_links else ""))
     rows.append("> - 本文件只删除不改写；删除了什么见《内容清理记录》。")
+    if doc.get("decision") == "D":
+        rows.append("> - 初筛 D 类，客户同意保留。" + ("⚠ 还没做 D 类复核（逐段看哪里不能用），复核前是“待审”。"
+                                                  if doc.get("d_unreviewed") else "已做 D 类复核，不能用的段已删，要问的在待客户确认里。"))
     if doc.get("role") == "reference":
         rows.append("> - ⚠ 参考整理稿：这份是从别家公开资料或旧稿整理出来的参考，不是公司自己的资料。"
                     "里面的参数、款式不能直接当公司事实用；整理页引用时带 ⚠，并找公司自己的资料印证。")
@@ -725,6 +729,9 @@ def main() -> int:
 
     routes = load_json(build / "routes.json")
     docs = {doc["doc_id"]: doc for doc in load_jsonl(build / "docs.jsonl")}
+    waiting_d = set(unreviewed_d(build, routes))
+    for doc in docs.values():
+        doc["d_unreviewed"] = doc["item_id"] in waiting_d
     blocks = load_jsonl(build / "blocks.jsonl")
     by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for block in blocks:

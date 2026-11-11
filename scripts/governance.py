@@ -479,7 +479,7 @@ def cleanup_record(build_dir: Path, blocks: list[dict[str, Any]], docs: dict[str
               "quoted_terms": "给客户的报价条件",
               "order_number": "订单号", "email": "外部邮箱", "phone": "电话", "denied_term": "竞品或禁用词",
               "quantity": "数量或包装", "material_usage": "单耗或用料", "internal_note": "业务备注",
-              "customer_name": "可能的客户名", "paired_answer": "被删问题的答案", "reviewer_dropped": "人工判断删除"}
+              "customer_name": "可能的客户名", "paired_answer": "被删问题的答案", "reviewer_dropped": "人工判断删除", "d_review_dropped": "D 类复核删除"}
     totals: dict[str, int] = defaultdict(int)
     per_doc: dict[str, list[str]] = defaultdict(list)
     for block in blocks:
