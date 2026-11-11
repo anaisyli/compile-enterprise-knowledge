@@ -91,8 +91,9 @@ def merge_objects(source: Path, target: Path, kept: list[str]) -> bool:
 
     A whole-file "newer wins" lost a product list a person wrote into the vault, because a run
     folder's older config was saved later. Now an entry only one side has is kept; where both
-    have it and differ, the newer file's value is used and the other is reported. Both copies
-    end up the same."""
+    have it and differ, the newer file's value is used and the other is reported. Only the
+    target is written: restoring must not touch the published vault, saving must not touch
+    the run folder."""
     left, right = json_object(source), json_object(target)
     if left is None or right is None:
         return False
@@ -102,12 +103,10 @@ def merge_objects(source: Path, target: Path, kept: list[str]) -> bool:
     if lost:
         kept.append(f"{target}（{'、'.join(lost[:5])} 两边不一样，用较新的那份）")
     text = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
-    changed = False
-    for path in (source, target):
-        if path.read_text(encoding="utf-8") != text and json_object(path) != merged:
-            write_text(path, text)
-            changed = True
-    return changed
+    if json_object(target) == merged:
+        return False
+    write_text(target, text)
+    return True
 
 
 def copy_newer(source: Path, target: Path, kept: list[str]) -> bool:

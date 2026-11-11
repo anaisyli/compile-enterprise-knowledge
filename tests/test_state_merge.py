@@ -44,7 +44,9 @@ class StateMergeTests(unittest.TestCase):
         self.assertEqual(merged["categories"], {"a": "新"})  # Both had it: the newer file wins, and it is said.
         self.assertTrue(merged["sample_review"])
         self.assertTrue(any("categories" in line for line in report["kept_newer_in_vault"]))
-        # The run folder now has the product list too, so the next build uses it.
+        # Saving writes the vault only; the next build gets the product list when it restores.
+        self.assertNotIn("products", json.loads(self.run_config.read_text(encoding="utf-8")))
+        restore(self.run, self.vault)
         self.assertEqual(json.loads(self.run_config.read_text(encoding="utf-8"))["products"], [{"name": "DS50系列"}])
 
     def test_restore_merges_the_same_way(self) -> None:
@@ -53,6 +55,8 @@ class StateMergeTests(unittest.TestCase):
         restore(self.run, self.vault)
         merged = json.loads(self.run_config.read_text(encoding="utf-8"))
         self.assertEqual(merged, {"company": "视领", "site_sections": {"home": ["首页"]}})
+        # Restoring reads the published vault; it never writes it (the vault may be read-only).
+        self.assertEqual(json.loads(self.vault_config.read_text(encoding="utf-8")), {"site_sections": {"home": ["首页"]}})
 
 
 if __name__ == "__main__":
