@@ -497,9 +497,9 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
     receipt_path = vault / RECEIPT
     if not receipt_path.is_file():
         raise SystemExit("知识库里没有发布记录，先正常发布一次。")
-    # The run's config and the one kept in the vault, merged entry by entry like a publish does:
-    # a product list written into the vault after that run still counts.
-    copies = [p for p in (build / "kb-config.json", vault / "05_数据与审核/70_构建状态/kb-config.json") if p.is_file()]
+    # Merge the build snapshot, the vault copy, and the run's current config entry by entry.
+    copies = [p for p in (build / "kb-config.json", vault / "05_数据与审核/70_构建状态/kb-config.json",
+                          out / "kb-config.json") if p.is_file()]
     config: dict[str, Any] = {}
     for path in sorted(copies, key=lambda p: p.stat().st_mtime):
         config.update(load_json(path))
