@@ -225,6 +225,7 @@ class WebsiteTests(Base):
 
     def tearDown(self) -> None:
         self.server.shutdown()
+        self.server.server_close()
         super().tearDown()
 
     def crawl(self) -> list[dict]:

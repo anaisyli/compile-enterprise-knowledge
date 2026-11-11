@@ -106,6 +106,13 @@
 - `d_keep` / `d_drop`：D 类我们自己定，资料编号列表。保留的文档按 B 类读、入库“待审”；保留的图片、设计稿（psd、heic、tif 等）、视频和音频直接进素材（`media_kept`），不当文档读。客户的回答优先。
 - `ask_client`：要客户定的，`{"<item_id>": "为什么问（写进 CUS）"}`，A–D 类都可以。图片和视频按文件夹问一次（`media_awaiting_client`），文档整份标 🕒（`awaiting_client`），都进 CUS 和《客户确认表》。在这里的条目优先于以前的回答和 `route_overrides`；客户在本次建库的《客户确认表》里回答后，`apply_answers.py` 会把它从 `ask_client` 里拿掉，回答随即生效。
 - `drawing_items` / `not_drawing_items`：图纸判断改判，资料编号列表。
+- `products`：建站视图的产品清单，人确认后写，优先于文件夹名。`[{"name": "DS50系列", "category": "广告机", "sub": "Wall mounted Digital Signage", "aliases": ["DS50系列1", "DS50系列2", "DS50"], "folders": ["01"], "note": "AI 根据文件夹里的文件名识别的名称，待确认"}]`：
+  - `category` 大类、`sub` 小类、`name` 产品；没有 `sub` 时 `name` 就是小类。
+  - `aliases` 放批次名、型号码、对不上产品的官网截图文件夹名。
+  - 01–11 这类编号文件夹不写进 `aliases`（会误配到别处的日期和数字），用 `folders` 写完整的文件夹名。
+  - `note` 会显示在页面和总览上；名字是 AI 猜的时写上，用户确认后删掉。
+  - 只改名字和合并，不压平下面的层级：给“Interactive flat panel”改名，它下面的 ST、SY、T 系列照样各自一页。
+- `site_sections`：规则分错或分不了、又不是产品的文件夹，指定到栏目，`{"home": ["Smart Board Manufacturer Smartline"], "services": ["ODM和OEM"]}`。按完整的文件夹名或标题对上才算（不会把“About Us-Smart Board Manufacturer Smartline”也算进首页）。栏目编号：home、about-profile、about-factory、about-rnd、about-certs、about-exhibitions、solutions、services、cases、resources、blog、faq、contact。
 - `excluded_items`：`{"<item_id>": "理由"}`，这几份不读、不入库，优先于一切。
 - `no_ocr_items`：`{"<item_id>": "理由"}`，单张图片只当素材，不做识别。
 - `route_overrides`：`{"<item_id>": {"route": "kb|media|skip|hold", "reason": "…", "tier": "T2"}}`，单份资料的去向直接指定，优先于客户回答和 `d_keep` / `d_drop`（只排在 `excluded_items`、`ask_client` 之后）。只用于上面这些都表达不了的例外；常见情况用 `d_keep`、`d_drop`、`ask_client`，不然客户的回答会被它挡住。reason 用 `media_kept` 才会把图片复制进 90_素材。
@@ -516,11 +523,14 @@
 
 - **栏目**（中英对照）：首页 Home、关于我们 About Us（企业介绍 Company Profile、工厂与生产 Factory、研发 R&D、资质认证 Certificates、展会 Exhibitions 五个子页）、产品 Products、解决方案 Solutions、服务 Services、案例 Cases、资源中心 Resources、博客 / 新闻 Blog & News、FAQ、联系我们 Contact Us、待归类 To Sort；总览页 `00_建站资料总览.md`。
 - **产品**：初筛包里 `产品`（或 `产品资料`、`products`）文件夹下按层级：大类 / 小类 / 产品。说内容的文件夹（白底图、实拍图、规格书、英文版、“1.上架推广资料”）不算层级。末尾是批次号的（“DS50系列1”“DS50系列2”“第二批”“(2)”“新版”）合成一个产品，页上写“客户分 N 批给的资料”；字母后直接跟数字的是型号（DS20），不算批次。全是数字的文件夹（01–11）看不出是型号还是批次，列在总览“要人确认的”。kb-config.json 的 `products`（`name`、`category`、`sub`、`aliases`）优先于文件夹名。小类名、产品名和其中的型号码（DS50）也用来把产品文件夹以外的东西找回这个产品：别处的规格书、官网截图文件夹、官网页面；在路径里越深的文件夹越优先，同一层取最长的名字。
+- **产品清单要人确认**：`products.py propose --out <运行目录> --config <kb-config.json>` 按文件夹列出产品清单草稿，写 `04_知识库构建/products/README.md`。AI 结合总览“要人确认的”整理成 kb-config.json 的 `products`（格式见“kb-config.json”），给用户过目后重跑。
 - **人指定栏目**：kb-config.json 的 `site_sections`（栏目编号 → 文件夹名或标题列表），按完整名字对上的先算，优先于栏目规则和产品名。
 - **其他栏目**：按文件夹名、文件名、标题里的词，依次判断首页、案例、解决方案、服务、FAQ、博客、联系我们、关于我们的五个子页。画册和名字里有规格书、说明书、catalog、spec、manual 的文档另外列进资源中心（同一个文件，两处都是链接）。都对不上的进待归类，写原因。
 - **每页**：进度一行；已处理的文件（净化原文、打开原件、状态、来自哪个文件夹或批次）；官网页面；图片按类型分节（每类显示前 8 张，其余列链接，附原图所在文件夹）；视频（封面、大小、时长、打开）；相关但还没处理的文件（等样例确认后提取、初筛待定、读不出文字、图片还没识别、整个文件夹待客户确认，最多列 200 个）；还缺什么（产品页：白底图、实物图、规格书、视频；关于我们：介绍文字、工厂照片、证书图片等）。报价单图片和整页截图是内部材料，不进这个视图；E 类排除的不出现。
 - **FAQ**：没有 FAQ 文件也保留，列出“待补充问题”（客户确认表里的问题）。
 - **首页候选**：`site_view.py home-candidates export` 从产品主图、白底图、效果图里列候选，AI 挑后 `collect` 存进 `site-home.json`（发布时存进知识库）；页上标“候选，待确认”，人把 `confirmed` 改成 `true` 后标“已确认”。
+- **视频**：不复制进知识库；装了 ffmpeg 时每个视频加一张封面和时长。
+- **只更新建站视图**：`site_view.py update --out <上次发布用的运行目录> --vault <项目目录>` 用上次建库的结果重排，只写 `80_建站资料`，不提取、不读图、不上传，来源层、台账、素材都不动；人改过的建站页拒绝覆盖。改了产品清单、首页候选后用它刷新最快。上次没有的东西（没提取的文件内容、新功能收的图）要等正常建库。
 - **隐私**：路径或文件名里有客户名、禁用词的，不显示原名、不给链接，写“见对照表”。
 - 案例图片可以直接公开使用，不另外标。
 
@@ -535,6 +545,7 @@
 | 官网一个月没读 | 重跑 `fetch_website.py` |
 | 词表或规则更新 | 直接重跑 |
 | 每月 | `kb_status.py --monthly` 更新总览，写体检报告 |
+| 知识库和初筛包换了位置（发给同事、换电脑） | `kb_relink.py --vault <知识库> --package <初筛包新位置>`：把“打开原件/打开文件夹/对照表”这些带完整路径的链接改到新位置，重建硬链接，更新构建记录里的初筛包路径。打包时跳过初筛包的 `审计记录/按知识库名字/` |
 
 ## 和 manage-article-knowledge 一起用
 
