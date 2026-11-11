@@ -38,7 +38,7 @@ SOLUTION = re.compile(r"(?i)solutions?\b|解决方案")
 # Folder names that say what kind of picture, not which product.
 PICTURE_KINDS = [
     ("白底图", re.compile(r"(?i)白底|white\s*(?:background|bg)")),
-    ("尺寸图", re.compile(r"(?i)尺寸|dimension|drawing")),
+    ("尺寸图", re.compile(r"(?i)(?<![大小])尺寸|六视图|三视图|装配图|图纸|dimension|drawing")),
     ("效果图", re.compile(r"(?i)效果|渲染|render")),
     ("场景图", re.compile(r"(?i)场景|scene|应用|application")),
     ("实物图", re.compile(r"(?i)实物|实拍|real\s*shot|actual|photo")),
@@ -83,8 +83,12 @@ def parts_of(relpath: str) -> list[str]:
 def picture_kind(relpath: str, kind: str) -> str:
     if kind in {"video", "audio"}:
         return VIDEO
-    folders = " ".join(parts_of(relpath)[-3:])
-    return next((name for name, pattern in PICTURE_KINDS if pattern.search(folders)), OTHER_PICTURES)
+    # The nearest explicit material folder wins; 大尺寸/小尺寸 describe a product group.
+    for folder in reversed(parts_of(relpath)[-3:]):
+        for name, pattern in PICTURE_KINDS:
+            if pattern.search(folder):
+                return name
+    return OTHER_PICTURES
 
 
 def site_suffix(titles: list[str]) -> re.Pattern[str] | None:

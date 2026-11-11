@@ -140,7 +140,7 @@ def media_kind(asset: dict[str, Any]) -> str | None:
     return None
 
 
-def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str]:
+def route_asset(asset: dict[str, Any], answers: dict[str, str], confirmed_client: bool = False) -> dict[str, str]:
     """Default deny: an item enters only through an explicit branch below."""
     answer = answers.get(asset["item_id"])
     extension = extension_of(asset.get("display_name") or "")
@@ -154,7 +154,7 @@ def route_asset(asset: dict[str, Any], answers: dict[str, str]) -> dict[str, str
         return {"route": "skip", "reason": asset.get("copy_status") or "not_copied"}
     if resource in THIRD_PARTY_TYPES:
         return {"route": "skip", "reason": "third_party_material"}
-    if resource in OPERATIONS_TYPES:
+    if resource in OPERATIONS_TYPES and not (confirmed_client and answer == "keep" and decision == "D"):
         return {"route": "skip", "reason": "writing_operations_material"}
     if decision == "E":
         return {"route": "skip", "reason": "excluded"}
@@ -232,7 +232,8 @@ def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str,
             answers = {**answers, item_id: "drop_internal"}
         elif item_id in set(config.get("d_keep", [])):
             answers = {**answers, item_id: "keep_internal"}
-    route = route_asset(asset, answers)
+    confirmation = (config.get("client_answer_confirmations") or {}).get(item_id) or {}
+    route = route_asset(asset, answers, confirmed_client=confirmation.get("decision") == "keep" and bool(confirmation.get("cus_id")))
     if item_id in config.get("no_ocr_items", {}) and route.get("reason") == "image_needs_review":
         return {"route": "media", "reason": "media_kept"}
     return route
@@ -872,6 +873,7 @@ DRAWING_NAME = re.compile(r"(?i)尺寸|六视图|三视图|视图|装配|图纸|
 NOT_DRAWING = re.compile(r"(?i)说明书|手册|技术参数|参数表|manual|guide|datasheet|brochure|画册|catalog")
 DRAWING_PAGES = 3
 DRAWING_MAX_PAGES = 6
+DRAWING_PREVIEW_EDGE = 3000
 
 
 def drawing_kind(asset: dict[str, Any], units: list[dict[str, Any]], config: dict[str, Any]) -> str:
@@ -915,7 +917,8 @@ def drawing_pictures(source: Path, assets: Path, source_hash: str) -> list[str]:
                     break
                 name = f"img-{source_hash[:16]}-p{number}.png"
                 if not (assets / name).exists():
-                    page.get_pixmap(dpi=150).save(long_path(assets / name))
+                    scale = min(150 / 72, (DRAWING_PREVIEW_EDGE - 1) / max(page.rect.width, page.rect.height))
+                    page.get_pixmap(matrix=pymupdf.Matrix(scale, scale)).save(long_path(assets / name))
                 names.append(name)
     except Exception:  # noqa: BLE001 - a damaged PDF stays a file to open, not a crash.
         return []
@@ -957,7 +960,9 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
                 media.append({**entry, "kind": "document", "status": "drawing_unrendered"})
             continue
         if (entry["kind"] == "image" and route["reason"] == "media_kept" and suffix in IMAGE_TYPES
-                and entry["bytes"] <= max_bytes and asset.get("path")):
+                and entry["bytes"] <= max_bytes and asset.get("path")
+                and Path(asset.get("display_name") or "").suffix):
+            # An original named only .jpg has no useful stem: retain its original-location record.
             name = f"img-{asset['source_hash'][:16]}{suffix}"
             target = assets / name
             if not target.exists():

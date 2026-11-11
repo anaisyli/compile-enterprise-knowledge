@@ -19,6 +19,46 @@ from test_pipeline import asset  # noqa: E402
 
 
 class ReviewToolTests(Base):
+    def test_explicit_answer_releases_only_its_awaiting_route_overrides(self) -> None:
+        self.edit_config(route_overrides={"doc": {"route": "kb", "reason": "awaiting_client"},
+                                          "photo": {"route": "media", "reason": "media_awaiting_client"},
+                                          "kept": {"route": "media", "reason": "media_kept"},
+                                          "other": {"route": "skip", "reason": "excluded"}}, d_drop=["other"])
+        self.build.mkdir(parents=True, exist_ok=True)
+        (self.build / "governance.json").write_text(json.dumps({"CUS": [{"items": [
+            {"sub_id": "CUS-1.1", "item_id": "doc,photo,kept", "location": "", "question": "能否公开使用"}]}]}), encoding="utf-8")
+        with (self.build / "客户确认表.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["编号", "回答"])
+            writer.writeheader()
+            writer.writerow({"编号": "CUS-1.1", "回答": "保留"})
+        result = run("apply_answers.py", "--out", str(self.out), "--config", str(self.config), "--release-awaiting-overrides")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = self.config_value()
+        self.assertEqual(set(config["route_overrides"]), {"kept", "other"})
+        self.assertEqual(config["d_drop"], ["other"])
+        self.assertTrue(all(config["client_answers"][item] == "keep" for item in ("doc", "photo", "kept")))
+        self.assertEqual(config["client_answer_confirmations"]["doc"], {"decision": "keep", "cus_id": "CUS-1.1"})
+
+    def test_current_explicit_client_confirmation_overrides_an_old_operations_label(self) -> None:
+        from extract_blocks import configured_route
+        item = {"item_id": "xmy", "decision": "D", "resource_type": "seo_ops", "display_name": "XMY.pptx"}
+        config = {"client_answers": {"xmy": "keep"}}
+        self.assertEqual(configured_route(item, config)["reason"], "writing_operations_material")
+        config["client_answer_confirmations"] = {"xmy": {"decision": "keep", "cus_id": "P-010-CUS-009.1"}}
+        self.assertEqual(configured_route(item, config)["reason"], "resolved_by_answer")
+
+    def test_answer_can_be_reapplied_after_its_registered_cus_is_resolved(self) -> None:
+        self.build.mkdir(parents=True, exist_ok=True)
+        (self.build / "governance.json").write_text('{"CUS": []}', encoding="utf-8")
+        (self.build / "governance-ids.json").write_text('{"CUS": {"pending:doc": 1}}', encoding="utf-8")
+        with (self.build / "客户确认表.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["编号", "回答"])
+            writer.writeheader()
+            writer.writerow({"编号": "P-998-CUS-001.1", "回答": "保留"})
+        result = run("apply_answers.py", "--out", str(self.out), "--config", str(self.config), "--release-awaiting-overrides")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.config_value()["client_answer_confirmations"]["doc"]["cus_id"], "P-998-CUS-001.1")
+
     def setUp(self) -> None:
         super().setUp()
         self.clear_catalog_pending()

@@ -139,6 +139,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="kb-config.json to update")
     parser.add_argument("--answers", help="Filled 客户确认表.csv of the build (default), or the screening "
                         "package's 客户确认表.xlsx")
+    parser.add_argument("--release-awaiting-overrides", action="store_true",
+                        help="For an explicitly confirmed build CSV, remove its obsolete awaiting-client route overrides")
+    parser.add_argument("--previous-config", help="Optional config backup from before these CUS answers, to recover exact folder membership after resolution")
     return parser.parse_args()
 
 
@@ -152,6 +155,8 @@ def main() -> int:
     config.setdefault("client_answers_units", {})
     records: dict[str, dict[str, Any]] = {}
     if answers_path.suffix.casefold() == ".xlsx":
+        if args.release_awaiting_overrides:
+            raise SystemExit("解除待确认路由仅适用于本次建库的客户确认 CSV，不能用于旧初筛回答")
         # The screening workbook can be read before the first build.
         applied, notes, unclear = apply_screening(answers_path, config)
         rows: list[dict[str, str]] = []
@@ -159,6 +164,26 @@ def main() -> int:
         # Each answerable row has its own number (P-007-CUS-002.1), even inside a grouped entry.
         records = {item["sub_id"]: {**item, "id": item["sub_id"]}
                    for r in load_json(build / "governance.json").get("CUS", []) for item in r.get("items", [])}
+        if args.release_awaiting_overrides:
+            # Resolved CUS entries disappear from governance.json; their registered IDs persist.
+            registry_path = build / "governance-ids.json"
+            registry = load_json(registry_path).get("CUS", {}) if registry_path.is_file() else {}
+            package_info = build / "run-info.json"
+            packages = load_json(package_info).get("packages", []) if package_info.is_file() else []
+            assets = [asset for package in packages for asset in load_json(Path(package) / MANIFEST_NAME).get("assets", [])]
+            prior_overrides = load_json(Path(args.previous_config)).get("route_overrides", {}) if args.previous_config else {}
+            for key, number in registry.items():
+                sub_id = f"{config['project_id']}-CUS-{number:03d}.1"
+                if sub_id in records:
+                    continue
+                group = key.removeprefix("media:")
+                members = ([key.removeprefix("pending:")] if key.startswith("pending:") else
+                           [a["item_id"] for a in assets
+                            if (a.get("source_relpath") or "").replace("\\", "/").startswith(group + "/")
+                            and prior_overrides.get(a["item_id"], {}).get("reason") == "media_awaiting_client"]
+                           if key.startswith("media:") else [])
+                if members:
+                    records[sub_id] = {"id": sub_id, "item_id": ",".join(members), "location": ""}
         with answers_path.open(encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
         applied, notes, unclear = [], [], []
@@ -176,10 +201,19 @@ def main() -> int:
         if decision is None:
             unclear.append({"id": record["id"], "answer": answer})
             continue
+        if args.release_awaiting_overrides:
+            confirmations = config.setdefault("client_answer_confirmations", {})
+            for item_id in [i for i, value in confirmations.items() if value.get("cus_id") == record["id"]]:
+                del confirmations[item_id]
         for item_id in record["item_id"].split(","):
             if record.get("location"):
                 config["client_answers_units"].setdefault(item_id, {})[record["location"]] = decision
             else:
+                if args.release_awaiting_overrides:
+                    override = (config.get("route_overrides") or {}).get(item_id) or {}
+                    if override.get("reason") in {"awaiting_client", "media_awaiting_client"}:
+                        del config["route_overrides"][item_id]
+                    config.setdefault("client_answer_confirmations", {})[item_id] = {"decision": decision, "cus_id": record["id"]}
                 config["client_answers"][item_id] = decision
                 # We asked this one ourselves (ask_client); now that it is answered, the answer decides.
                 if item_id in (config.get("ask_client") or {}):

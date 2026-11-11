@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from products import Matcher, catalog, material_folders, place_media, proposed  # noqa: E402
+from products import Matcher, catalog, material_folders, picture_kind, place_media, proposed  # noqa: E402
 
 BASE = "知识库（总）/建站资料/建站资料/建站资料/产品"
 
@@ -22,6 +22,12 @@ def media(item_id: str, relpath: str, kind: str = "image", **extra) -> dict:
 
 
 class ProductTests(unittest.TestCase):
+    def test_large_size_group_does_not_override_nearest_material_folder(self) -> None:
+        self.assertEqual(picture_kind("DS50/大尺寸/中文版/DS50详情中文版/1.jpg", "image"), "详情图")
+        self.assertEqual(picture_kind("DS50/大尺寸/中文版/1.jpg", "image"), "其他图片")
+        self.assertEqual(picture_kind("DS50/尺寸图/渲染图/1.jpg", "image"), "效果图")
+        self.assertEqual(picture_kind("DS50/装配图/1.png", "image"), "尺寸图")
+
     files = [
         media("m1", f"{BASE}/广告机/Wall mounted Digital Signage/DS20/白底图/1.jpg", id="img-1111111111111111.jpg"),
         media("m2", f"{BASE}/广告机/Outdoor Wall mounted Digital Signage/实物图/2.jpg", id="img-2222222222222222.jpg"),

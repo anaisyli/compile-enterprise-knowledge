@@ -61,6 +61,19 @@ class DrawingTests(unittest.TestCase):
             (root / "bad.pdf").write_bytes(b"not a pdf")
             self.assertEqual(drawing_pictures(root / "bad.pdf", root, "cd" * 32), [])
 
+    def test_huge_cad_page_has_a_bounded_preview(self) -> None:
+        import pymupdf
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with pymupdf.open() as pdf:
+                pdf.new_page(width=17323, height=12251).insert_text((72, 72), "dimension 1100 mm")
+                pdf.save(root / "cad.pdf")
+            names = drawing_pictures(root / "cad.pdf", root, "ef" * 32)
+            self.assertEqual(len(names), 1)
+            image = pymupdf.Pixmap(root / names[0])
+            self.assertLessEqual(max(image.width, image.height), 3000)
+            self.assertGreater(max(image.width, image.height), 2900)
+
 
 if __name__ == "__main__":
     unittest.main()

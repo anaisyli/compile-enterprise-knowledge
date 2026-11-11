@@ -25,7 +25,7 @@ from typing import Any
 from governance import merge_ledger
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
 from kb_index import build as build_index
-from kb_state import save as save_state
+from kb_state import STATE, save as save_state
 from samples import PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
 
 
@@ -88,18 +88,25 @@ def move_pictures(vault: Path, build: Path, previous: dict[str, str], renamed: l
     pages people wrote follow. Returns old file name -> new file name."""
     moved: dict[str, str] = {}
     pictures = pictures_of(build)
+    saved_path = vault / STATE / "picture-names.json"
+    saved = load_json(saved_path) if saved_path.is_file() else {}
+    old_ids = {entry["file"]: picture_id for picture_id, entry in saved.items() if entry.get("file")}
     for key in sorted(previous):
         path = Path(key)
-        if not key.startswith(ASSETS.as_posix() + "/") or path.name not in pictures:
+        if not key.startswith(ASSETS.as_posix() + "/"):
             continue
-        new_key = (ASSETS / pictures[path.name]["file"]).as_posix()
+        picture_id = path.name if path.name in pictures else old_ids.get(path.relative_to(ASSETS).as_posix())
+        if picture_id not in pictures:
+            continue
+        new_key = (ASSETS / pictures[picture_id]["file"]).as_posix()
         if new_key == key or not (vault / key).is_file():
             continue
         if not (vault / new_key).exists():
             (vault / new_key).parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(vault / key), vault / new_key)
             previous[new_key] = previous.pop(key)
-            moved[path.name] = Path(new_key).name
+            if path.name != Path(new_key).name:
+                moved[path.name] = Path(new_key).name
             renamed.append(f"{key} → {new_key}")
     return moved
 
