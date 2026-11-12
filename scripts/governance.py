@@ -215,6 +215,7 @@ def build(
 
     # ---- ANM: risks inside material that is already in use
     unverified: dict[str, set[str]] = defaultdict(set)
+    term_labels: dict[str, str] = {}
     reports: set[str] = set()
     ai_pages: set[str] = set()
     references: set[str] = set()
@@ -225,7 +226,9 @@ def build(
         for flag in block.get("flags", []):
             if flag["type"] == "unverified_name":
                 for term in flag["terms"]:
-                    unverified[term].add(link(doc))
+                    key = term.casefold()
+                    term_labels.setdefault(key, term)
+                    unverified[key].add(link(doc))
             elif flag["type"] == "report_page":
                 reports.add(link(doc, block["group"]))
             elif flag["type"] in {"ai_read", "ai_added"}:
@@ -252,7 +255,7 @@ def build(
                   "- 现在怎么处理：内容已入库，原文旁标 ⚠；整理页引用时必须带 ⚠。",
                   "- 怎么关闭：普通词写进行业词表或 allow_terms；确认是品牌、IP 的保持标记，并决定能否对外使用。", "",
                   "| 词 | 出现在 |", "| --- | --- |"]
-        detail += [f"| {short(term, 30)} | {'、'.join(sorted(pages)[:3])}{' 等' if len(pages) > 3 else ''} |"
+        detail += [f"| {short(term_labels[term], 30)} | {'、'.join(sorted(pages)[:3])}{' 等' if len(pages) > 3 else ''} |"
                    for term, pages in sorted(unverified.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
         anm_ids["unverified_name"] = add("ANM", "unverified_name", f"{len(unverified)} 个没核实过的词出现在已生效资料里",
                                          f"{len(unverified)} 个词", "待判断", "知识库专员", detail)
@@ -440,16 +443,23 @@ def merge_ledger(old_text: str, new_text: str) -> str:
     # 1. The table: human columns come from the old ledger; vanished entries are kept.
     out: list[str] = []
     last_row = max((i for i, line in enumerate(new_text.splitlines())
-                    if line.strip().startswith("|") and line.strip().strip("|").split("|")[0].strip() in new_rows), default=None)
+                    if line.strip().startswith("|") and (line.strip().strip("|").split("|")[0].strip() in new_rows
+                                                        or line.strip().startswith("| 无 |"))), default=None)
     for index, line in enumerate(new_text.splitlines()):
         record_id = line.strip().strip("|").split("|")[0].strip() if line.strip().startswith("|") else ""
         if record_id in new_rows and record_id in old_rows:
             cells = list(new_rows[record_id])
             for column in HUMAN_COLUMNS:
                 if column in new_header and column in old_header:
-                    cells[new_header.index(column)] = old_rows[record_id][old_header.index(column)]
+                    value = old_rows[record_id][old_header.index(column)]
+                    # This is an automatic historical state. A fresh machine finding reopens it;
+                    # explicit human closed states and all human notes still win.
+                    if column != "当前阶段" or value != SOLVED_STAGE:
+                        cells[new_header.index(column)] = value
             line = row_line(cells)
-        out.append(line)
+        # An empty machine table still needs an insertion point for resolved history.
+        if not (old_rows and not new_rows and line.strip().startswith("| 无 |")):
+            out.append(line)
         if index == last_row:
             for gone, old in sorted(old_rows.items()):
                 if gone in new_rows:

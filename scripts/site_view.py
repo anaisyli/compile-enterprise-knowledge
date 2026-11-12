@@ -548,6 +548,10 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
         import shutil
         shutil.rmtree(site)
     write_site(build, config, routes, docs, order, statuses, originals, media, pictures, forbidden, escape_cell)
+    from refresh_navigation import Links, build_files, obsidian_prefix
+    site_links = Links(build_files(out), obsidian_prefix(vault))
+    for page in site.rglob("*.md"):
+        write_text(page, site_links.rewrite(page.read_text(encoding="utf-8")))
     receipt = load_json(receipt_path)
     files: dict[str, str] = receipt.setdefault("files", {})
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

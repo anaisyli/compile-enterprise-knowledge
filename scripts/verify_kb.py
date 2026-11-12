@@ -302,8 +302,13 @@ def main() -> int:
     # A knowledge layer left half written must not look finished.
     warnings: list[str] = []
     d_path = build / "review-decisions.json"
-    # Counted as pages, like docs.jsonl: one file kept in three folders is one document to approve.
-    waiting_d = {routes[i].get("source_hash") or i for i in unapproved_d(routes, load_json(d_path) if d_path.is_file() else {})}
+    # Report the status actually rendered: reference drafts are not pending originals.
+    statuses = load_json(build / "statuses.json")
+    unapproved_hashes = {routes[i].get("source_hash") or i
+                         for i in unapproved_d(routes, load_json(d_path) if d_path.is_file() else {})}
+    waiting_d = {docs[d].get("source_sha256") or docs[d]["item_id"] for d in published
+                 if statuses.get(d) == "待审"
+                 and (docs[d].get("source_sha256") or docs[d]["item_id"]) in unapproved_hashes}
     if waiting_d:
         warnings.append(f"{len(waiting_d)} 份保留的 D 类还没批准，现在是“待审”：看过原文没问题，把资料编号写进 review-decisions.json 的 approve_docs")
     undecided_d = {r.get("source_hash") or i for i, r in routes.items() if r.get("decision") == "D" and r.get("reason") == "unresolved_item"}
@@ -322,7 +327,6 @@ def main() -> int:
     usage_path = build / "curation-used.json"
     if usage_path.is_file() and load_json(usage_path):
         cited = {d for page in load_json(usage_path).values() for d in page["sources"]}
-        statuses = load_json(build / "statuses.json")
         idle = [docs[d]["title"] for d in published if statuses.get(d) == "有效" and docs[d]["tier"] in ("T1", "T2") and d not in cited]
         if idle:
             warnings.append(f"{len(idle)} 份有效资料没有被任何整理页引用：{'、'.join(idle[:8])}{' 等' if len(idle) > 8 else ''}")
@@ -369,6 +373,28 @@ def main() -> int:
     rng = random.Random(args.seed)
     sample = rng.sample(kept, min(args.sample, len(kept)))
     lines = ["# 抽样核对", "", "把每一条和原件对照，看提取有没有错、有没有不该进库的内容。", ""]
+    usage = load_json(usage_path) if usage_path.is_file() else {}
+    if usage:
+        lines.extend(["## 整理页全文", ""])
+        for name, page in usage.items():
+            path = build / "vault" / "03_正式知识" / "10_客户知识" / page["module"] / f"{name}.md"
+            lines.append(f"- [ ] {page.get('title', name)}｜{path}")
+        cited = {d for page in usage.values() for d in page["sources"] if d in published}
+        candidates = sorted(cited)
+        d_candidates = [d for d in candidates if docs[d].get("decision") == "D"]
+        selected = rng.sample(d_candidates, min(8, len(d_candidates)))
+        remaining = [d for d in candidates if d not in selected]
+        selected += rng.sample(remaining, min(max(0, 15 - len(selected)), len(remaining)))
+        if len(selected) < 15:
+            remaining = sorted(d for d in published if d not in selected)
+            selected += rng.sample(remaining, min(15 - len(selected), len(remaining)))
+        lines.extend(["", "## 来源全文对照", ""])
+        for doc_id in selected:
+            doc = docs[doc_id]
+            lines.extend([f"- [ ] {doc['title']}｜{doc_id}",
+                          f"  - 净化原文：{clean / published[doc_id]}",
+                          f"  - 原件：{doc.get('package_name', '')}/{doc['package_path']}"])
+        lines.extend(["", "## 段落抽查", ""])
     for block in sample:
         doc = docs[block["doc_id"]]
         lines.append(f"- [ ] {doc['title']}｜{doc['package_path']}｜{block['locator']}")

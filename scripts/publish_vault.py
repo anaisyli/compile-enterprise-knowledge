@@ -39,7 +39,7 @@ OLD_TODO = Path("01_工作台/20_当前待办.md")
 OLD_REGISTER = Path("02_源资料/知识库资料台账.md")
 MARKER = "<!-- compile-enterprise-knowledge -->"
 LEDGER_ROOT = "05_数据与审核/30_异常与待决定/"
-TABLE_RULE = re.compile(r"^:?-{3,}:?$")
+TABLE_RULE = re.compile(r"^:?-{2,}:?$")
 HASH_MODE = "normalized-v1"
 # More 已失效 records than this in one publish usually means missing input, not retired documents.
 WITHDRAW_LIMIT = 5
@@ -310,6 +310,8 @@ def main() -> int:
     if unsure:
         warnings.append(f"旧版发布记录无法分辨格式调整和人工修改：{unsure} 个文件按新内容发布，被替换的旧版都在本次归档里")
 
+    from refresh_navigation import STATUS_PAGES, normalize_build
+    normalize_build(run, vault)
     planned = planned_files(run)
     # A document whose path changed is the same document, not a withdrawn one.
     new_paths = {parse_frontmatter(path.read_text(encoding="utf-8")).get("doc_id"): key
@@ -401,8 +403,9 @@ def main() -> int:
         target = vault / key
         if not target.is_file():
             continue
-        if key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT):
-            written[key] = normalized_hash(target)  # Pictures and ledgers are never removed.
+        if key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT) or key in STATUS_PAGES:
+            # Pictures and ledgers are never removed; kb_status rewrites the overview pages right after.
+            written[key] = normalized_hash(target)
             continue
         old = target.read_text(encoding="utf-8") if target.suffix == ".md" else ""
         if parse_frontmatter(old).get("doc_id") in new_paths and key.startswith(SOURCE.as_posix()):
