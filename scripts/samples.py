@@ -83,7 +83,9 @@ def doc_type(doc: dict[str, Any]) -> str:
         return "website"
     if doc.get("origin") == "points":
         return "points"
-    return kind_of(doc.get("original_name") or "", doc.get("folder", ""), doc.get("tier", ""))
+    # The catalog flag, not the folder: a kind confirmed once stays confirmed when folders are renamed.
+    catalog = doc["catalog"] if "catalog" in doc else doc.get("folder") == "产品画册"
+    return kind_of(doc.get("original_name") or "", "产品画册" if catalog else "", doc.get("tier", ""))
 
 
 def load_gate(build: Path) -> dict[str, Any]:

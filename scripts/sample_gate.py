@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from extract_blocks import configured_route, format_pairs, package_title
+from extract_blocks import configured_route, format_pairs, is_catalog
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json
 from samples import TYPES, gate, kind_of, load_decisions, save_gate
 
@@ -30,9 +30,9 @@ def entries_of(packages: list[Path], config: dict) -> list[dict]:
             route = configured_route(asset, config)
             if not (route["route"] == "kb" or route.get("reason") == "image_needs_review"):
                 continue
-            _, folder = package_title(asset, route.get("tier", "T2"), config.get("doc_titles", {}))
+            catalog = is_catalog(asset, route.get("tier", "T2"), config.get("doc_titles", {}))
             name = asset.get("display_name") or asset.get("path") or ""
-            found.append({"item_id": asset["item_id"], "kind": kind_of(name, folder), "bytes": int(asset.get("byte_size") or 0),
+            found.append({"item_id": asset["item_id"], "kind": kind_of(name, "产品画册" if catalog else ""), "bytes": int(asset.get("byte_size") or 0),
                           "folder": str(Path(asset.get("path") or "").parent.as_posix()),
                           "twin": asset["item_id"] in twins})
     return found

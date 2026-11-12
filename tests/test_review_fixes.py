@@ -49,7 +49,7 @@ class ReviewFixTests(Base):
     def test_a_compiled_reference_is_marked_and_kept_out_of_the_facts(self) -> None:
         self.reference_draft()
         self.assertEqual(self.pipeline().returncode, 0)
-        page = next(self.clean.rglob("公司资料-公司简介.md")).read_text(encoding="utf-8")
+        page = next(self.clean.rglob("公司介绍-公司简介.md")).read_text(encoding="utf-8")
         self.assertIn('status: "参考稿"', page)
         self.assertIn("参考整理稿", page)
         anm = next((self.build / "vault").rglob("01_源文与事实异常台账.md")).read_text(encoding="utf-8")
@@ -70,7 +70,7 @@ class ReviewFixTests(Base):
                          + [{"locator": "para 9", "text": "可提供 SGS test report。"}])
         self.edit_config(client_answers={"a2": "keep"})
         self.pipeline()
-        page = next(self.clean.rglob("公司资料-公司简介.md")).read_text(encoding="utf-8")
+        page = next(self.clean.rglob("公司介绍-公司简介.md")).read_text(encoding="utf-8")
         self.assertEqual(page.count("检测或审核报告页"), 1)
 
     def test_knowledge_pages_are_filed_as_category_and_name(self) -> None:

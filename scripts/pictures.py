@@ -158,7 +158,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
             if (doc_id, group) not in unsafe:
                 add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
                     alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
-        catalog = doc.get("folder") == "产品画册"
+        catalog = doc["catalog"] if "catalog" in doc else doc.get("folder") == "产品画册"
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():
             group = page_group(info, page)
@@ -336,6 +336,8 @@ def retained_record(entry: dict[str, Any], forbidden: re.Pattern[str] | None = N
         kind, note = KIND_LABELS[entry["kind"]], "内容待转写，转写前不出知识点"
     elif suffix == ".psd":
         kind, note = "设计稿", "设计稿已保留，原件见原位置"
+    elif suffix in {".dwg", ".dxf", ".step", ".stp", ".iges", ".igs"}:
+        kind, note = "图纸", "图纸已保留，原件见原位置"
     elif entry.get("kind") == "image" and Path(relpath).name.casefold() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         kind, note = "图片", "图片已保留，原件见原位置"
     elif entry.get("kind") == "image" and suffix not in SHOWN_IMAGES:

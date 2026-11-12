@@ -140,7 +140,7 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
     if layout == "columns":
         rows.append("> - 版面：同一页的文字按栏分段，款号和它下面的特点在同一段；原件没写款号的栏，就没有款号，不要套用别栏的。"
                     "没删过内容的页附了原页图，可以直接对照。")
-    elif layout == "stored_order" and doc.get("folder") == "产品画册":
+    elif layout == "stored_order" and doc.get("catalog", doc.get("folder") == "产品画册"):
         rows.append("> - ⚠ 版面：这份按文件里的存储顺序读取（本机没装 PyMuPDF），一页多款时款号和特点可能错位，用前对照原件。")
     return rows
 
@@ -854,6 +854,8 @@ def main() -> int:
     write_jsonl(build / "docs.jsonl", docs.values())
     write_json(build / "published.json", published)
     write_json(build / "statuses.json", statuses)
+    from refresh_navigation import normalize_build
+    normalize_build(run)
     write_json(build / "governance-summary.json", gov["counts"])
     kept_counts = Counter(b["doc_id"] for b in visible)
     removed = Counter(b["doc_id"] for b in blocks if b["status"] == "removed")

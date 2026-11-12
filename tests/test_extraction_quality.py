@@ -23,6 +23,29 @@ def box(x0: float, y0: float, x1: float, text: str) -> dict:
 
 
 class LayoutTests(unittest.TestCase):
+    def test_documents_are_filed_by_what_they_are_and_samples_keep_their_kind(self) -> None:
+        from extract_blocks import is_catalog, package_title
+
+        def title(name: str, tier: str = "T2", path: str = "") -> str:
+            return package_title({"item_id": name, "display_name": name, "path": path or f"A/{name}", "source_hash": "0" * 64},
+                                 tier, {})[0]
+
+        self.assertEqual(title("98寸DS50系列数字标牌规格书.pdf", "T1"), "规格书-98寸DS50系列数字标牌规格书")
+        self.assertEqual(title("DS50—大尺寸广告机-中文版.pptx", "T1"), "产品画册-DS50—大尺寸广告机-中文版")  # 大尺寸 is not a size sheet.
+        self.assertEqual(title("双面屏吊装安装说明书.docx"), "说明书-双面屏吊装安装说明书")
+        self.assertEqual(title("Healthcare Solution.txt"), "解决方案-Healthcare Solution")
+        self.assertEqual(title("外设考试资料.docx", path="B/产品/培训资料/外设考试资料.docx"), "内部资料-外设考试资料")
+        self.assertEqual(title("自助终端常见问题.docx", path="B/产品/培训资料/自助终端常见问题.docx"), "内部资料-自助终端常见问题")
+        self.assertEqual(title("SLINVUE-品牌故事.docx"), "公司介绍-SLINVUE-品牌故事")
+        self.assertEqual(title("页面文本.txt", path="A/视领网页图片/Touch Table-Smartline/页面文本.txt"), "官网页面-Touch Table-Smartline")
+        self.assertEqual(title("43寸双面吊挂广告机-3568D.docx", path="D/产品/广告机/双面吊挂/43寸双面吊挂广告机-3568D.docx"),
+                         "产品资料-43寸双面吊挂广告机-3568D")
+        self.assertEqual(title("Quotation 2026.xlsx"), "其他-Quotation 2026")
+        # A T1 spec sheet leaves the catalog folder but stays a catalog sample, as confirmed before.
+        spec = {"item_id": "s", "display_name": "98寸DS50系列数字标牌规格书.pdf", "path": "A/x.pdf"}
+        self.assertTrue(is_catalog(spec, "T1", {}))
+        self.assertFalse(is_catalog({**spec, "display_name": "公司简介.pdf"}, "T1", {}))
+
     def test_a_code_stays_with_the_column_it_sits_above(self) -> None:
         # Three products side by side; the catalog prints a code above the third one only.
         boxes = [box(47, 401, 160, "SHERPA JACKET"), box(688, 411, 760, "NTX S-002"), box(45, 437, 110, "FEATURES"),

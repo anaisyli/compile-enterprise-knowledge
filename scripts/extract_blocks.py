@@ -87,6 +87,18 @@ ROLE_HEADERS = [
     ("name", re.compile(r"(?i)product|品名|产品|款式|名称|name|garment|item")),
 ]
 COMPANY_NAME = re.compile(r"(?i)公司|简介|profile|about")
+# Kinds of document, first match wins; what matches none is told apart by its folders and tier.
+DOC_CATEGORIES = [
+    ("内部资料", re.compile(r"(?i)培训|考试|验货|模板|training|\bexam\b|inspection")),
+    ("说明书", re.compile(r"(?i)说明书|使用手册|用户手册|安装说明|安装指南|安装手册|manual|user\s*guide|instructions?\b")),
+    ("规格书", re.compile(r"(?i)规格|参数|spec|data\s*sheet|(?<![大小])尺寸|重量")),
+    ("解决方案", re.compile(r"(?i)solutions?\b|解决方案|\bOEM\b|\bODM\b|定制服务")),
+    ("产品画册", re.compile(r"(?i)画册|catalog(?:ue)?\b|brochure|宣传册")),
+]
+# About the company rather than a product: a brand story, the contact page, news, the home page.
+COMPANY_DOC = re.compile(r"(?i)公司|简介|profile|about|关于我们|品牌故事|brand\s*story|contact|联系我们|news|新闻|^首页$|^home$|^why")
+WEBSITE_FOLDER = re.compile(r"(?i)网页|官网|website|web\s*page")
+PRODUCT_FOLDER = re.compile(r"(?i)^(?:产品|产品资料|products?)$")
 MAX_HEADER_SCAN = 80
 # Stricter than these notes already: rows above the header and unrecognised columns never pass.
 COVERED_BY_ALLOWLIST = re.compile(r"表头|全部价格|逐表确认")
@@ -306,35 +318,63 @@ def other_formats(routes: dict[str, dict[str, Any]], readable: Callable[[str], b
     return twins
 
 
+def is_catalog(asset: dict[str, Any], tier: str, overrides: dict[str, str]) -> bool:
+    """Whether a file is a catalog for samples and picture naming: a promotional T1 file not about
+    the company. Kept apart from the folder, so a sample kind confirmed once stays confirmed."""
+    if asset["item_id"] in overrides:
+        return overrides[asset["item_id"]].split("-", 1)[0] == "产品画册"
+    if tier != "T1" or asset.get("asset_kind") == "image" or extension_of(asset.get("display_name") or "") in PICTURE_FILES:
+        return False
+    name = clean_name(source_stem(asset.get("display_name") or asset["item_id"]))
+    if GENERIC_STEM.match(name):
+        name = f"{name}-{clean_name(Path(asset.get('source_relpath') or asset.get('path') or '').parent.name)}"
+    return not COMPANY_NAME.search(name)
+
+
+def doc_category(name: str, relpath: str, tier: str) -> str:
+    """The kind of document, from its name and folders: the source layer's folder and title prefix."""
+    folders = [p for p in relpath.replace("\\", "/").split("/")[:-1] if p]
+    parent = folders[-1] if folders else ""
+    for category, pattern in DOC_CATEGORIES:
+        if pattern.search(name) or (category == "内部资料" and pattern.search(parent)):
+            return category
+    if COMPANY_DOC.search(name):
+        return "公司介绍"
+    if any(WEBSITE_FOLDER.search(p) for p in folders):
+        return "官网页面"
+    if tier == "T1":
+        return "产品画册"
+    if any(PRODUCT_FOLDER.match(p) for p in folders):
+        return "产品资料"
+    return "其他"
+
+
 def package_title(asset: dict[str, Any], tier: str, overrides: dict[str, str]) -> tuple[str, str]:
     """Return (title, folder). Titles read 类别-名称 so a reader knows what a file is."""
     if asset["item_id"] in overrides:
         title = overrides[asset["item_id"]]
-        return title, title.split("-", 1)[0] if "-" in title else "公司资料"
+        return title, title.split("-", 1)[0] if "-" in title else "其他"
     if tier == "T3":
         return f"产品表-{asset['source_hash'][:8]}", FOLDERS["T3"]
+    relpath = asset.get("source_relpath") or asset.get("path") or ""
     name = clean_name(source_stem(asset.get("display_name") or asset["item_id"]))
     if GENERIC_STEM.match(name):
         # 页面文本.txt in forty folders would be forty pages of the same name: the folder says which.
-        folder = Path(asset.get("source_relpath") or asset.get("path") or "").parent.name
-        name = f"{name}-{clean_name(folder)}" if folder else name
+        folder = clean_name(Path(relpath).parent.name)
+        name = folder or name
     if asset.get("asset_kind") == "image" or extension_of(asset.get("display_name") or "") in PICTURE_FILES:
         # A picture read by MinerU or the model is a picture, not a company document.
         return f"图片-{name}", "图片资料"
-    if COMPANY_NAME.search(name):
-        return f"公司资料-{name}", "公司资料"
-    if tier == "T1":
-        return f"产品画册-{name}", "产品画册"
-    return f"公司资料-{name}", "公司资料"
+    category = doc_category(name, relpath, tier)
+    return f"{category}-{name}", category
 
 
-def module_for(asset: dict[str, Any], tier: str) -> str:
-    name = asset.get("display_name") or ""
+def module_for(asset: dict[str, Any], tier: str, folder: str = "") -> str:
     if tier == "T3":
         return "product"
-    if asset.get("resource_type") == "business_scenario":
+    if asset.get("resource_type") == "business_scenario" or folder == "解决方案":
         return "solution"
-    if COMPANY_NAME.search(name):
+    if folder == "公司介绍":
         return "company"
     return "product"
 
@@ -1080,11 +1120,12 @@ def main() -> int:
             "item_id": item_id,
             "title": title,
             "folder": folder,
+            "catalog": is_catalog(asset, tier, config.get("doc_titles", {})),
             "original_name": asset.get("display_name"),
             "source_label": f"初筛包 {asset.get('decision')} 类（{RESOURCE_LABELS.get(asset.get('resource_type'), '未归类')}）",
             "file_name": safe_name(title) + ".md",
             "tier": tier,
-            "module": MODULES[module_for(asset, tier)],
+            "module": MODULES[module_for(asset, tier, folder)],
             "resource_type": asset.get("resource_type"),
             "decision": asset.get("decision"),
             "source_sha256": asset["source_hash"],

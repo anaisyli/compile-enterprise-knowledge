@@ -25,6 +25,7 @@ from typing import Any
 
 from guard_blocks import HARD_PATTERNS
 from kb_common import BUILD_DIRECTORY, MODULES, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, safe_name, write_json, write_text
+from products import Matcher, parts_of, squeeze, usable_alias
 from sections import load_sections
 
 
@@ -40,6 +41,8 @@ USABLE_DOCS = {"有效", "部分待客户确认", "参考稿"}
 # Each sub-section gets its own share, so one busy sub-section cannot fill the page.
 SECTION_MAX = 40
 LINE_MAX = 30
+# A product gathers catalogs, spec sheets, manuals and website pages: more to choose from.
+PRODUCT_MAX = 60
 # A sub-section with this much source text becomes a page of its own.
 SPLIT_AT = 120
 SPLIT_MAX = 150
@@ -87,6 +90,10 @@ TEMPLATE = """# 整理页写作规则
    想换标题就改 `# 标题`，重跑时以它为准。
 10. 写全：input.md 里的每份资料至少写到一条，同一份资料里不同的款、参数、场景分开写，不要只挑几份概括。
    一页引用到的资料不到 input.md 里资料的一半，校验不通过，并列出没写到的资料。
+11. input.md 是挑选的原文块，不是整份资料。某个块只有标题或型号时，只说明本页引用范围；
+   不得据此说原资料缺少参数、尺寸或案例。完整内容应回到来源页查看。
+12. 已确认的提取错误不是原件版本冲突，不并列成两种产品参数；有同页核对补录时引用补录，
+   否则暂不列该数值，并注明需回原页核对。
 
 写好后保存为同目录的 page.md。每个准备好的主题都要写；原文实在不够写的，在 kb-config.json 的
 "skip_topics" 里写明主题编号和理由，例如 {"faq": "原文里问答太少"}，否则校验不通过。
@@ -97,17 +104,65 @@ def squeezed(text: str) -> str:
     return re.sub(r"\s+", "", text).casefold()
 
 
+def product_lines(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """The products a person confirmed in kb-config.json "products"; solutions are not product lines."""
+    return [p for p in config.get("products") or [] if p.get("name") and p.get("kind", "product") == "product"]
+
+
+def place_docs(docs: dict[str, dict[str, Any]], products: list[dict[str, Any]]) -> dict[str, tuple[str, str] | None]:
+    """doc_id -> (大类, 产品) by names only, never by content: the deepest folder that names a product
+    first, then the file's own name; a folder named after a 大类 gives the 大类 alone."""
+    entries = [{"name": p["name"], "category": p.get("category") or p["name"],
+                "aliases": [a for a in [p["name"], *(p.get("aliases") or [])] if usable_alias(a)]} for p in products]
+    match = Matcher(entries)
+    exact = {squeeze(f): e for p, e in zip(products, entries) for f in p.get("folders") or []}
+    categories = {squeeze(e["category"]): e["category"] for e in entries}
+    places: dict[str, tuple[str, str] | None] = {}
+    for doc_id, doc in docs.items():
+        if doc.get("origin") == "points":
+            places[doc_id] = None
+            continue
+        folders = parts_of(doc.get("package_path") or "")
+        found = None
+        for folder in reversed(folders):
+            found = exact.get(squeeze(folder)) or match(folder)
+            if found:
+                break
+        found = found or match(doc["title"].split("-", 1)[-1], Path(doc.get("original_name") or "").stem)
+        if found:
+            places[doc_id] = (found["category"], found["name"])
+            continue
+        category = next((categories[squeeze(f)] for f in reversed(folders) if squeeze(f) in categories), None)
+        places[doc_id] = (category, "") if category else None
+    return places
+
+
 def topics_for(config: dict[str, Any], docs: dict[str, dict[str, Any]], statuses: dict[str, str]) -> list[dict[str, Any]]:
     topics = [dict(t) for t in config.get("topics", TOPICS)]
+    # The overview has one sub-section per product line, so every catalog is read.
+    topics.append({"slug": "products", "title": "产品总览", "file": "产品-总览", "module": "product", "by_line": True,
+                   "modules": ["20_产品介绍"]})
+    products = product_lines(config)
+    if products:
+        # A confirmed product list decides: one page per 大类, one section per product, whatever
+        # document a passage came from — catalog in either language, spec sheet, manual, website page.
+        slugs = {t["slug"] for t in topics}
+        for category in dict.fromkeys(p.get("category") or p["name"] for p in products):
+            slug = f"cat-{safe_name(category)}"
+            if slug not in slugs:
+                slugs.add(slug)
+                topics.append({"slug": slug, "title": category, "file": f"产品大类-{category}", "module": "product",
+                               "by_product": True, "category": category,
+                               "order": [p["name"] for p in products if (p.get("category") or p["name"]) == category]})
+        topics.append({"slug": "cat-other", "title": "其他产品资料", "file": "产品大类-其他产品资料", "module": "product",
+                       "by_product": True, "category": None})
+        return topics
     # Product pages follow the categories the website and the catalogs actually use.
     counts: dict[str, int] = defaultdict(int)
     for d in docs.values():
         if d.get("folder", "").startswith("官网页面/"):
             counts[d["folder"].split("/", 1)[1]] += 1
     categories = sorted(c for c, n in counts.items() if n >= MIN_CATEGORY_PAGES and c != "公司与服务")
-    # The overview has one sub-section per product line, so every catalog is read.
-    topics.append({"slug": "products", "title": "产品总览", "file": "产品-总览", "module": "product", "by_line": True,
-                   "modules": ["20_产品介绍"]})
     for category in categories:
         # The whole name: "Tapestry Bag" and "Tapestry Jacket" share their first word.
         topics.append({"slug": f"cat-{safe_name(category)}", "title": category, "file": f"产品大类-{category}",
@@ -128,6 +183,9 @@ def topics_for(config: dict[str, Any], docs: dict[str, dict[str, Any]], statuses
 
 
 def line_name(doc: dict[str, Any]) -> str:
+    place = doc.get("_product")
+    if place and place[0]:
+        return place[0]
     folder = doc.get("folder", "")
     if folder.startswith("官网页面/"):
         return folder.split("/", 1)[1]
@@ -146,6 +204,16 @@ def topic_sections(topic: dict[str, Any], table: dict[str, list[dict[str, Any]]]
 
 def assign(block: dict[str, Any], doc: dict[str, Any], topic: dict[str, Any], sections: list[dict[str, Any]]) -> str | None:
     """The sub-section a passage belongs to in this topic, or None when it does not belong here."""
+    if topic.get("by_product"):
+        # The product list decides; company and solution documents stay on their own pages.
+        if doc["module"] == MODULES["company"]:
+            return None
+        place = doc.get("_product")
+        if topic.get("category") is None:
+            return line_name(doc) if not place and doc["module"] == MODULES["product"] else None
+        if not place or place[0] != topic["category"]:
+            return None
+        return place[1] or f"其他{topic['category']}资料"
     in_scope = doc.get("folder") in topic.get("folders", []) or doc["module"] in topic.get("modules", []) \
         or doc["doc_id"] in topic.get("doc_ids", [])
     if topic.get("by_line"):
@@ -190,7 +258,7 @@ def plan(topic: dict[str, Any], blocks: list[dict[str, Any]], docs: dict[str, di
     """Sub-section -> what is available and what goes to the writer. Passages the written page
     already cites always stay, so a rerun cannot pull them out from under it."""
     sections = topic_sections(topic, table)
-    names = [s["name"] for s in sections]
+    names = list(topic.get("order") or []) or [s["name"] for s in sections]
     available: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     cited: dict[str, list[dict[str, Any]]] = defaultdict(list)
     unique: set[str] = set()
@@ -207,7 +275,7 @@ def plan(topic: dict[str, Any], blocks: list[dict[str, Any]], docs: dict[str, di
         if name and key not in unique and len(key) >= 6:
             unique.add(key)
             available[name][block["doc_id"]].append(block)
-    limit = topic.get("max") or (LINE_MAX if topic.get("by_line") else SECTION_MAX)
+    limit = topic.get("max") or (LINE_MAX if topic.get("by_line") else PRODUCT_MAX if topic.get("by_product") else SECTION_MAX)
     position = {b["block_id"]: i for i, b in enumerate(blocks)}
     seen = {squeezed(b["text"]) for group in cited.values() for b in group}
     result: dict[str, dict[str, Any]] = {}
@@ -250,6 +318,8 @@ def prepare(out: Path, config: dict[str, Any]) -> dict[str, Any]:
     blocks = load_jsonl(build / "blocks.jsonl")
     table = load_sections(config)
     report = []
+    for doc_id, place in place_docs(docs, product_lines(config)).items():
+        docs[doc_id]["_product"] = place
     queue = topics_for(config, docs, statuses)
     while queue:
         topic = queue.pop(0)
@@ -268,7 +338,8 @@ def prepare(out: Path, config: dict[str, Any]) -> dict[str, Any]:
             sections = plan(topic, blocks, docs, statuses, table, set(CITATION.findall(page)))
         topic["split"] = {}
         for name, section in list(sections.items()):
-            if not topic.get("parent") and not topic.get("by_line") and section["available"] > SPLIT_AT:
+            # A 大类 page keeps its products as sections: one page per 大类 is the point of it.
+            if not topic.get("parent") and not topic.get("by_line") and not topic.get("by_product") and section["available"] > SPLIT_AT:
                 slug = f"{topic['slug']}-{safe_name(name)}"
                 topic["split"][name] = slug
                 prefix = (topic.get("file") or topic["title"]).split("-")[0]
@@ -332,9 +403,13 @@ def check(out: Path) -> dict[str, Any]:
     statuses = load_json(build / "statuses.json") if (build / "statuses.json").is_file() else {}
     docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")} if (build / "docs.jsonl").is_file() else {}
     results = {}
+    # Only this run's topics: a page drafted for a topic that no longer exists (a catalog page
+    # before the product list decided the pages) is not built again.
+    listed = build / CURATION / "topics.json"
+    current = {t["slug"] for t in load_json(listed)} if listed.is_file() else None
     for folder in sorted((build / CURATION).glob("*")):
         page_path, topic_path = folder / "page.md", folder / "topic.json"
-        if not page_path.is_file() or not topic_path.is_file():
+        if not page_path.is_file() or not topic_path.is_file() or (current is not None and folder.name not in current):
             continue
         topic = load_json(topic_path)
         allowed = set(topic["blocks"])
@@ -424,7 +499,7 @@ def build_pages(out: Path) -> dict[str, Any]:
                 links = "、".join(f"[[{Path(docs[blocks[i]['doc_id']]['file_name']).stem}#{blocks[i]['group']}|{docs[blocks[i]['doc_id']]['title']}]]"
                                  for i in ids[:3])
                 rows.append(f"| {code} | {links} |")
-            body = body.replace(STYLE_TABLE, "\n".join(rows) if len(rows) > 2 else "（原文里没有找到款号）")
+            body = body.replace(STYLE_TABLE, "\n".join(rows) if len(rows) > 2 else "")
         used = [d for d in sources if d in published]
         public = all(docs[d]["tier"] == "T1" for d in used) and not any(blocks[i].get("flags") for i in numbers)
         fields = {"doc_id": f"KNOW-{slug}", "title": topic["title"], "layer": "整理层", "tier": "整理",

@@ -474,8 +474,9 @@ class PipelineTests(unittest.TestCase):
         self.write_units("t2", [{"locator": "file", "text": "工厂有三条生产线。"}])
         result = self.run_pipeline()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        names = sorted(p.stem for p in self.clean.rglob("*页面文本*.md"))
-        self.assertEqual(names, ["公司资料-页面文本-关于我们", "公司资料-页面文本-工厂实力"])
+        names = sorted(p.stem for p in self.clean.rglob("*.md") if "关于我们" in p.stem or "工厂实力" in p.stem)
+        # The folder names the page; 页面文本 says nothing, and 官网 tells what kind of document it is.
+        self.assertEqual(names, ["公司介绍-关于我们", "官网页面-工厂实力"])
 
     def keep_d(self, how: str = "client") -> None:
         config = json.loads(self.config.read_text(encoding="utf-8"))
