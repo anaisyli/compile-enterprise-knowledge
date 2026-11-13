@@ -15,12 +15,32 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from test_extensions import Base, run  # noqa: E402
 from curate import assign, topics_for  # noqa: E402
 from sections import load_sections  # noqa: E402
-from guard_blocks import apply_reviewed_removals, deduplicate_blocks  # noqa: E402
+from guard_blocks import apply_reviewed_removals, deduplicate_blocks, unknown_words  # noqa: E402
 from governance import screening_location_resolved, screening_contacts_resolved  # noqa: E402
-from extract_blocks import find_header  # noqa: E402
+from extract_blocks import find_header, reference_draft  # noqa: E402
+from guard_blocks import flag_report_pages  # noqa: E402
+
+
+class UnknownWordTests(unittest.TestCase):
+    def test_exactly_allowed_compound_does_not_flag_or_allow_its_parts(self) -> None:
+        vocabulary = {"frame-sync"}
+        self.assertEqual(unknown_words("Frame-Sync", vocabulary), set())
+        self.assertEqual(unknown_words("Frame Sync", vocabulary), {"Frame", "Sync"})
 
 
 class ProductHeaderTests(unittest.TestCase):
+    def test_product_disclaimers_do_not_prove_reference_ownership(self) -> None:
+        units = [{"text": "Specifications for reference only. 参数仅供参考。" * 20}]
+        self.assertFalse(reference_draft(units, None))
+        self.assertTrue(reference_draft(units, "reference"))
+        self.assertFalse(reference_draft([{"text": "内部审核版 " * 5}], "original"))
+
+    def test_inspection_template_is_distinguished_from_an_actual_report(self) -> None:
+        blocks = [{"block_id": "x", "doc_id": "d", "group": "slide 2", "locator": "slide 2",
+                   "kind": "text", "text": "PART01 验货报告 Inspection Report", "status": "kept", "flags": []}]
+        self.assertEqual(flag_report_pages(blocks, {"d": {"title": "内部资料-验货报告模板"}}), 1)
+        self.assertTrue(blocks[0]["flags"][0]["template"])
+
     def test_terminology_rows_are_not_a_product_header(self) -> None:
         rows = {1: {"A": "中文术语 / 表达", "B": "English Term / Expression", "C": "说明 / Usage"},
                 2: {"A": "屏幕尺寸", "B": "Screen Size", "C": "显示屏对角线尺寸，通常以英寸表示"}}
@@ -131,7 +151,7 @@ class ReviewFixTests(Base):
         self.assertIn('status: "参考稿"', page)
         self.assertIn("参考整理稿", page)
         anm = next((self.build / "vault").rglob("01_源文与事实异常台账.md")).read_text(encoding="utf-8")
-        self.assertIn("参考整理稿不是公司自己的资料", anm)
+        self.assertIn("参考整理稿的事实归属待确认", anm)
 
     def test_a_line_citing_a_reference_must_carry_the_mark(self) -> None:
         self.reference_draft()

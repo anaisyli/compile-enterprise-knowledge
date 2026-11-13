@@ -123,7 +123,7 @@ def page_units(result: Path) -> list[dict[str, str]]:
             text = "\n".join(normalize_space(line) for line in text.splitlines() if line.strip())
             if text:
                 pages.setdefault(int(entry.get("page_idx", 0)) + 1, []).append(text)
-        # A separate locator keeps OCR text from replacing the text layer it may misread.
+        # Keep a separate locator for provenance; the source-page builder chooses the reading.
         return [{"locator": f"page {page} ocr", "text": "\n".join(lines)} for page, lines in sorted(pages.items())]
     markdowns = sorted(result.rglob("*.md"), key=lambda path: path.stat().st_size, reverse=True)
     if markdowns:

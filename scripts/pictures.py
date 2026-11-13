@@ -123,6 +123,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
     found: list[dict[str, Any]] = []
     assets = build / "assets"
     website = load_json(build / WEBSITE_PICTURES) if (build / WEBSITE_PICTURES).is_file() else {}
+    page_checks = load_json(build / "page-check" / "results.json") if (build / "page-check" / "results.json").is_file() else {}
     pages_of: dict[str, set[str]] = defaultdict(set)
     for doc_id in order:
         for page, names in status_info.get(docs[doc_id]["item_id"], {}).get("page_pictures", {}).items():
@@ -153,16 +154,40 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     prefix="报价单参考图" if quotation else "产品表", label=label, alt=label, use=INTERNAL,
                     english_source=words, location=block["locator"])
         info = status_info.get(doc["item_id"], {})
+        page_unit = info.get("page_unit", "page")
+
+        def dimension_result(page: str) -> dict[str, Any]:
+            result = page_checks.get(f"{doc['item_id']}|{page_unit} {page}", {})
+            return result if result.get("dimension_drawing") else {}
+
+        def drawing_folder(result: dict[str, Any]) -> tuple[str, str]:
+            model = safe_name(result.get("drawing_model") or "型号待确认", "型号待确认")
+            placed = material_folders((places or {}).get(doc["item_id"]), namer.forbidden)
+            return "/".join(placed[:-1] + ["尺寸图"] if placed else ["产品", model, "尺寸图"]), model
+
         for page, name in info.get("page_images", {}).items():
             group = page_group(info, page)
             if (doc_id, group) not in unsafe:
-                add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
-                    alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
+                drawing = dimension_result(page)
+                if drawing:
+                    folder, model = drawing_folder(drawing)
+                    add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group)
+                else:
+                    add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
+                        alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
         catalog = doc["catalog"] if "catalog" in doc else doc.get("folder") == "产品画册"
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():
             group = page_group(info, page)
             if (doc_id, group) in unsafe:
+                continue
+            drawing = dimension_result(page)
+            if drawing:
+                folder, model = drawing_folder(drawing)
+                for name in names:
+                    add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group)
                 continue
             on_page = [b for b in blocks if b["group"] == group]
             text = "\n".join(b["text"] for b in on_page)
@@ -201,10 +226,16 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         stem = Path(entry["relpath"]).stem
         label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
         prefix = (safe_name(place["product"]["name"], "其他") if placed else folders[-1]) if folders else ""
+        use, alt = PUBLIC, ""
+        if entry.get("status") == "dimension_drawing":
+            model = safe_name(entry.get("drawing_model") or "型号待确认", "型号待确认")
+            folders = placed[:-1] + ["尺寸图"] if placed else ["产品", model, "尺寸图"]
+            prefix, label = model, "尺寸图"
+            use, alt = CHECK, "尺寸见原图"
         location = "/".join(media_folders(entry["relpath"], namer)) or "根目录"
         if entry.get("id"):
             add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
-                alt=" ".join(p for p in (prefix, label) if p), use=PUBLIC, english_source=stem, location=location,
+                alt=alt or " ".join(p for p in (prefix, label) if p), use=use, english_source=stem, location=location,
                 source_relpath=entry["relpath"])
         if entry.get("cover"):
             add(entry["cover"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=f"{label}-封面" if label else "视频封面",

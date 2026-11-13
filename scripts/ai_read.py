@@ -38,14 +38,18 @@ RULES = """# AI 读图规则
 1. 只抄图里的字，逐字照抄，保留原来的大小写、拼写错误和换行；不翻译、不概括、不补充。
 2. 一页有好几款产品时，按款分段：款号和它旁边的特点放在同一段，段与段之间空一行。原图没写款号的，不要套用别款的。
 3. 看不清的字写 [看不清]，不要猜。
-4. 图里没有文字（纯照片），text 写空字符串，note 写“没有文字”。
-5. 价格、客户名也照抄，后面的规则会删掉；不要自己判断删哪些。
-6. 产品图里屏幕上显示的示例画面（航班信息屏、示例菜单、促销语、示例广告、桌面截图）和零部件铭牌、
+4. 如果图片本身是尺寸图、工程图、安装图或三视图，不要转写尺寸、规格、孔位、角度等标注；
+   只写 drawing_model（图上清楚可辨的型号；不能确认写“型号待确认”）和 drawing_name（如“外形及安装尺寸图”），
+   kind 写“尺寸图”，text 留空，note 也不要记录图纸标注。尺寸以原图为准。
+5. 普通图片里的正文、产品名称和说明照常逐字转写；若同图另有尺寸图，正文照常写入 text，图纸本身不转写。
+6. 价格、客户名也照抄，后面的规则会删掉；不要自己判断删哪些。
+7. 产品图里屏幕上显示的示例画面（航班信息屏、示例菜单、促销语、示例广告、桌面截图）和零部件铭牌、
    机身标签上的小字不转写：那是展示用的画面或别家零件的标识，不是这份资料的内容。
 
 每张图写一行 JSON，存成本目录下的 answer-001.jsonl（可以分几个文件）：
 
-    {"key": "<todo.jsonl 里的 key>", "text": "转写的文字", "note": ""}
+    {"key": "<todo.jsonl 里的 key>", "text": "转写的文字", "note": "",
+     "kind": "", "drawing_model": "", "drawing_name": ""}
 
 写完运行 `ai_read.py collect --out <运行目录>`，再重跑流水线。转写的内容会标 ⚠“AI 读图，待核对”。
 """
@@ -177,7 +181,14 @@ def collect(build: Path) -> dict[str, Any]:
     by_item: dict[str, list[dict[str, Any]]] = {}
     for key, record in answers.items():
         entry = todo[key]
-        unit = {"locator": f"{entry.get('unit', 'page')} {entry['page']} ocr", "text": record["text"].strip(), "engine": "ai"}
+        dimension_drawing = record.get("kind") == "尺寸图"
+        model = (record.get("drawing_model") or "").strip() or "型号待确认"
+        name = (record.get("drawing_name") or "").strip() or "尺寸图"
+        caption = f"{model} 的{name}" if dimension_drawing else ""
+        unit = {"locator": f"{entry.get('unit', 'page')} {entry['page']} {'drawing' if dimension_drawing else 'ocr'}",
+                "text": caption or record["text"].strip(), "engine": "ai"}
+        if dimension_drawing:
+            unit.update(dimension_drawing=True, drawing_model_confirmed=model != "型号待确认")
         if not unit["text"]:
             unit["empty"] = True  # Looked at and found no words: no longer waiting.
         by_item.setdefault(entry["item_id"], []).append(unit)
@@ -194,7 +205,7 @@ def store_ai_units(build: Path, by_item: dict[str, list[dict[str, Any]]]) -> Non
                                                          "source_hash": routes.get(item_id, {}).get("source_hash", "")}
         taken = {u["locator"] for u in record.get("units", []) if u.get("engine") != "ai"}
         kept = [u for u in record.get("units", []) if u.get("engine") != "ai" or u["locator"] not in {n["locator"] for n in units}]
-        record["units"] = sorted(kept + [u for u in units if u["locator"] not in taken],
+        record["units"] = sorted(kept + [u for u in units if u["locator"] not in taken and u.get("text", "").strip()],
                                  key=lambda u: int(u["locator"].split()[1]) if u["locator"].split()[1].isdigit() else 0)
         record["ai_read_at"] = date.today().isoformat()
         write_json(path, record)

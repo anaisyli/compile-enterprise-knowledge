@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from kb_common import remaining_ocr_pages  # noqa: E402
+from kb_common import reducto_figure_units, remaining_ocr_pages  # noqa: E402
 from reducto_client import ReductoError, by_page, classify_failure, page_ranges  # noqa: E402
 from reducto_ocr import candidates, compare, key_terms, store  # noqa: E402
 
@@ -73,6 +73,14 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(candidates(self.build, self.files)[0]["pages"], [2, 3, 7])  # A changed file is read again.
         self.triage("mineru")
         self.assertEqual(candidates(self.build, self.files), [])  # Read some other way: nothing goes to Reducto.
+
+    def test_explicit_full_document_comparison_includes_text_pages_and_keeps_cache(self) -> None:
+        [entry] = candidates(self.build, self.files, full_document_item_ids=["a1"])
+        self.assertEqual(entry["pages"], [1, 2, 3, 7, 8])
+        store(self.build, {**entry, "pages": [1]}, {"job_id": "j1", "pages": {1: {"text": ["cover"]}}})
+        self.assertEqual(candidates(self.build, self.files, full_document_item_ids=["a1"])[0]["pages"], [2, 3, 7, 8])
+        self.triage("mineru")
+        self.assertEqual(candidates(self.build, self.files, full_document_item_ids=["a1"]), [])
 
     def test_a_file_nothing_was_read_from_is_read_by_mineru_unless_reducto_is_chosen(self) -> None:
         import pymupdf
@@ -139,6 +147,20 @@ class PlanTests(unittest.TestCase):
         page = compare(self.build, "a1")[2]
         self.assertEqual(page["only_mineru"], ["S100"])  # F00053 is in Reducto's figure description: not a disagreement.
         self.assertEqual(page["only_reducto"], ["S108"])
+
+    def test_figure_units_keep_source_positions_and_do_not_count_as_page_transcripts(self) -> None:
+        entry = {"item_id": "a1", "source_hash": "h1", "pages": [2, 3], "unit": "slide"}
+        store(self.build, entry, {"job_id": "j1", "pages": {
+            2: {"text": [], "figures": ["图中产品 S-100", " ", "图中产品 S-100", "表中尺寸 120 mm"]},
+            3: {"text": [], "figures": ["图中产品 S-100"]},
+        }})
+        units = reducto_figure_units(self.build, "a1", "catalog.pptx")
+        self.assertEqual([u["locator"] for u in units],
+                         ["slide 2 figure 1", "slide 2 figure 4", "slide 3 figure 1"])
+        self.assertEqual(units[1]["figure_source_locator"], 'figures["2"][3]')
+        self.assertTrue(all(u["figure_description"] and u["engine"] == "reducto" for u in units))
+        self.assertEqual(remaining_ocr_pages(self.build, "a1", [2, 3]), [2, 3])
+        self.assertEqual(reducto_figure_units(self.build, "missing", "catalog.pdf"), [])
 
 
 if __name__ == "__main__":

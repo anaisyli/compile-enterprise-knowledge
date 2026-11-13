@@ -44,6 +44,9 @@ from kb_common import (
     load_units,
     long_path,
     normalize_space,
+    preferred_page_units,
+    reducto_figure_units,
+    suppress_drawing_dimensions,
     safe_name,
     short_hash,
     source_stem,
@@ -121,8 +124,8 @@ SCREENING_REASONS = {"price_columns": "价格列", "quantity_columns": "数量�
                      "customer_columns": "客户列", "cost_columns": "成本列", "notes_columns": "备注列"}
 # Phrases a compiled reference document uses about itself.
 REFERENCE_MARK = re.compile(
-    r"(?i)内部审核版|审核稿|草稿|公开参考|参考记录|参考款|参考供应商|参考数据|同类产品参考|仅供参考|"
-    r"internal review draft|\bdraft\b|public reference|reference (?:listing|data|record)s?|for reference only"
+    r"(?i)内部审核版|审核稿|草稿|公开参考|参考记录|参考款|参考供应商|参考数据|同类产品参考|"
+    r"internal review draft|\bdraft\b|public reference|reference (?:listing|data|record)s?"
 )
 REFERENCE_MIN = 3
 # Columns a price list has and a product list does not.
@@ -404,6 +407,14 @@ def column_number(letters: str) -> int:
     return number
 
 
+def column_letter(number: int) -> str:
+    letters = ""
+    while number:
+        number, digit = divmod(number - 1, 26)
+        letters = chr(65 + digit) + letters
+    return letters
+
+
 def parse_sheet_rows(text: str) -> dict[int, dict[str, str]]:
     rows: dict[int, dict[str, str]] = {}
     matches = list(CELL.finditer(text))
@@ -616,12 +627,15 @@ def sheet_blocks(
 def group_for(unit: dict[str, str], heading: str) -> str:
     locator = unit["locator"]
     # Columns of one page ("page 3 col 2") stay under that page's heading.
-    match = re.fullmatch(r"page (\d+)(?: col \d+| table \d+)?(?: ocr| check)?", locator)
+    match = re.fullmatch(r"page (\d+)(?: col \d+| table \d+| figure \d+)?(?: ocr| check| review)?", locator)
     if match:
         return f"第 {match.group(1)} 页"
-    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+)?(?: ocr| check)?", locator)
+    match = re.fullmatch(r"(slide|notes) (\d+)(?: col \d+| figure \d+)?(?: ocr| check| review)?", locator)
     if match:
         return f"第 {match.group(2)} 张幻灯片" + ("备注" if match.group(1) == "notes" else "")
+    match = re.fullmatch(r"(page|slide) (\d+) drawing", locator)
+    if match:
+        return f"第 {match.group(2)} 页" if match.group(1) == "page" else f"第 {match.group(2)} 张幻灯片"
     match = re.fullmatch(r"image (\d+)(?: ocr| check)?", locator)
     if match:
         return f"图片 {match.group(1)}"  # A picture inside a Word document, read by MinerU or the model.
@@ -638,13 +652,14 @@ def squeezed(text: str) -> str:
 
 
 def ocr_additions(units: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Keep only what OCR found beyond the text layer: usually product names in pictures."""
+    """Prefer full platform pages; otherwise add only what OCR found beyond native text."""
     def comparable(text: str) -> str:
         # OCR Markdown bullets and full-width punctuation are formatting, not new facts.
         text = unicodedata.normalize("NFKC", text)
         text = re.sub(r"(?:^|\s)(?:\\?[-*•·])\s+", " ", text)
         return squeezed(text).casefold()
 
+    units = preferred_page_units(units)
     native: dict[str, str] = defaultdict(str)
     for unit in units:
         if not unit["locator"].endswith(OCR_SUFFIX):
@@ -656,17 +671,22 @@ def ocr_additions(units: list[dict[str, str]]) -> list[dict[str, str]]:
             result.append(unit)
             continue
         known = native.get(unit["locator"][: -len(OCR_SUFFIX)], "")
+        if not known:
+            result.append(unit)
+            continue
         fresh = [line for line in unit["text"].splitlines() if comparable(line) and comparable(line) not in known]
         if fresh:
             result.append({**unit, "text": "\n".join(fresh)})
-    return sorted(result, key=lambda u: (unit_order(u["locator"]), u["locator"].endswith(OCR_SUFFIX)))
+    return sorted(result, key=lambda u: (unit_order(u["locator"]), bool(u.get("figure_description")),
+                                        bool(u.get("reviewed_supplement")), u["locator"].endswith(OCR_SUFFIX)))
 
 
 def reference_draft(units: list[dict[str, str]], role: str | None) -> bool:
     """A knowledge list or draft built from public listings says so about itself, again and again."""
     if role in {"reference", "original"}:
         return role == "reference"
-    text = "\n".join(unit["text"] for unit in units)
+    text = "\n".join(unit["text"] for unit in units
+                     if not unit.get("figure_description") and not unit.get("dimension_drawing"))
     return len(REFERENCE_MARK.findall(text)) >= REFERENCE_MIN
 
 
@@ -675,10 +695,28 @@ def unit_order(locator: str) -> int:
     return int(match.group(0)) if match else 0
 
 
-def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> list[dict[str, Any]]:
+def technical_workbook(name: str, units: list[dict[str, Any]]) -> bool:
+    """Technical grids are source documents, not garment/quotation product rows.
+
+    Price/transaction fields keep a mixed workbook on the cell-cleaning path.
+    Container capacities and component/package weights are technical specifications.
+    """
+    sheets = [u for u in units if SHEET_UNIT.match(u["locator"])]
+    if not sheets:
+        return False
+    text = "\n".join(u["text"] for u in sheets)
+    if re.search(r"(?i)报价|单价|售价|成本|起订|付款|客户|\b(?:price|cost|qty|quantity|moq|payment|buyer|customer)\b", text):
+        return False
+    named = re.search(r"(?i)规格|参数|尺寸|重量|\bspec(?:ification)?s?\b|data\s*sheet", name)
+    fields = re.findall(r"(?i)亮度|分辨率|尺寸|重量|电压|触摸|brightness|resolution|dimensions?|weight|voltage|touch", text)
+    return bool(named or len({f.casefold() for f in fields}) >= 3)
+
+
+def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
+                    preserve_grid: bool = False) -> list[dict[str, Any]]:
     blocks, heading = [], "正文"
-    has_ocr = any(u["locator"].endswith(OCR_SUFFIX) for u in units)
-    if has_ocr:
+    units = suppress_drawing_dimensions(units)
+    if any(u["locator"].endswith(OCR_SUFFIX) or u.get("figure_description") for u in units):
         units = ocr_additions(units)
     sheets = 0
     for unit in units:
@@ -697,7 +735,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
             # 表 n back when the name turns out to be a customer's.
             names = {"sheet_name": sheet.group("name"), "sheet_neutral": f"表 {sheets}"}
             group = f"表 {sheets} · {sheet.group('name')}"
-            laid = lay_out(rows, unit.get("merges", []))
+            laid = None if preserve_grid else lay_out(rows, unit.get("merges", []))
             if laid:
                 # Lines above the real header, the table, lines below: every word kept, only arranged.
                 below = ([f"（原表还有这些列，下面没有内容：{'、'.join(laid['empty'])}）"] if laid["empty"] else []) + laid["below"]
@@ -711,7 +749,19 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                                        "ocr": False, "ai_read": False, "ai_checked": False, **names})
                 continue
             columns = sorted({c for row in rows.values() for c in row}, key=column_number)
-            table = [[rows[n].get(c, "") for c in columns] for n in sorted(rows)]
+            row_numbers = sorted(rows)
+            if preserve_grid and rows:
+                # Include empty merge continuations and blank separators between sub-tables.
+                # Never fill shared values into unrelated model/component cells.
+                for merge in unit.get("merges", []):
+                    match = re.fullmatch(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", merge)
+                    if match:
+                        c1, r1, c2, r2 = match.groups()
+                        row_numbers.extend(range(int(r1), int(r2) + 1))
+                        columns.extend(column_letter(c) for c in range(column_number(c1), column_number(c2) + 1))
+                row_numbers = list(range(min(row_numbers), max(row_numbers) + 1))
+                columns = sorted(set(columns), key=column_number)
+            table = [[rows.get(n, {}).get(c, "") for c in columns] for n in row_numbers]
             first_row = min(rows) if rows else 1
             header_end = max([first_row] + [int(m.group(2)) for merge in unit.get("merges", [])
                              if (m := re.fullmatch(r"[A-Z]+(\d+):[A-Z]+(\d+)", merge))
@@ -719,9 +769,9 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
             blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}"), "doc_id": doc_id, "kind": "text", **names,
                            "group": group, "locator": unit["locator"], "text": markdown_table(table) if table else text,
                            "ocr": False, "ai_read": False, "ai_checked": False,
-                           "table_layout": {"rows": sorted(rows), "columns": [column_number(c) for c in columns],
+                           "table_layout": {"rows": row_numbers, "columns": [column_number(c) for c in columns],
                                             "merges": unit.get("merges", []),
-                                            "header_rows": sum(r <= header_end for r in rows)}})
+                                            "header_rows": 0 if preserve_grid else sum(r <= header_end for r in rows)}})
             continue
         first_line = text.splitlines()[0].strip()
         if unit["locator"].startswith("para ") and len(first_line) <= 40 and HEADING.match(first_line):
@@ -736,11 +786,16 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                 "text": text,
                 "ocr": unit["locator"].endswith(OCR_SUFFIX),
                 # Read by the model or by Reducto from a picture, not by MinerU: published with a mark.
-                "ai_read": unit.get("engine") in {"ai", "reducto"},
+                "ai_read": unit.get("engine") in {"ai", "reducto"} and not unit.get("dimension_drawing"),
                 "reader": unit.get("engine", ""),
                 "ai_checked": bool(unit.get("checked")),  # Added on a page check, beside a text layer.
                 "transcription_review": unit.get("reviewed_by", ""),
                 "transcription_review_note": unit.get("review_note", ""),
+                **({"reviewed_supplement": True} if unit.get("reviewed_supplement") else {}),
+                **({"figure_description": True, "figure_source_locator": unit["figure_source_locator"]}
+                   if unit.get("figure_description") else {}),
+                **({"dimension_drawing": True, "drawing_model_confirmed": unit.get("drawing_model_confirmed", False)}
+                   if unit.get("dimension_drawing") else {}),
             }
         )
     return blocks
@@ -1004,6 +1059,9 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
             "status": route["reason"],
             "review_group": asset.get("review_group") or "",
             "resource_type": asset.get("resource_type"),
+            "picture_kind": route.get("picture_kind"),
+            "drawing_model": route.get("drawing_model"),
+            "drawing_model_confirmed": route.get("drawing_model_confirmed"),
         }
         suffix = extension_of(asset.get("display_name") or "")
         source = package_of[item_id] / (asset.get("path") or "")
@@ -1016,7 +1074,7 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
             if not pages:
                 media.append({**entry, "kind": "document", "status": "drawing_unrendered"})
             continue
-        if (entry["kind"] == "image" and route["reason"] == "media_kept" and suffix in IMAGE_TYPES
+        if (entry["kind"] == "image" and route["reason"] in {"media_kept", "dimension_drawing"} and suffix in IMAGE_TYPES
                 and entry["bytes"] <= max_bytes and asset.get("path")
                 and Path(asset.get("display_name") or "").suffix):
             # An original named only .jpg has no useful stem: retain its original-location record.
@@ -1083,8 +1141,14 @@ def main() -> int:
         for asset in assets
     }
     for item_id, route in routes.items():
+        ocr_units = load_units([ocr_dir, build / "reducto-units"], item_id)
+        drawing = next((unit for unit in ocr_units if unit.get("dimension_drawing")), None)
+        if route["reason"] == "image_needs_review" and drawing:
+            route.update(route="media", reason="dimension_drawing", picture_kind="尺寸图",
+                         drawing_model=drawing.get("text", "").split(" 的", 1)[0] or "型号待确认",
+                         drawing_model_confirmed=drawing.get("drawing_model_confirmed", False))
         # A picture someone (MinerU, Reducto or the model) has read enters with what was read in it.
-        if route["reason"] == "image_needs_review" and any(u["text"].strip() for u in load_units([ocr_dir, build / "reducto-units"], item_id)):
+        if route["reason"] == "image_needs_review" and any(u["text"].strip() for u in ocr_units):
             route.update(route="kb", reason="image_read", tier="T2")
     gate_path = build / "sample-gate.json"
     if gate_path.is_file():
@@ -1102,6 +1166,8 @@ def main() -> int:
     # One document in two formats goes in once; the PDF stays reachable from the kept page.
     readable = lambda i: status.get(i, {}).get("status") in {"read_ok", "partial"} or bool(load_units(text_dirs, i))  # noqa: E731
     for pdf, source in other_formats(routes, readable).items():
+        if pdf in config.get("separate_format_items", []):
+            continue  # Explicitly checked: these same-named files contain different documents.
         routes[pdf].update(route="skip", reason="other_format", same_as=source)
     reviewed_columns = build / "cell-review" / "sheet-columns.json"
     column_overrides = {**config.get("sheet_columns", {}), **(load_json(reviewed_columns) if reviewed_columns.is_file() else {})}
@@ -1134,6 +1200,10 @@ def main() -> int:
         doc_id = f"DOC-{asset['source_hash'][:10]}"
         from source_fidelity import reviewed_units
         units = reviewed_units(build, item_id, asset['source_hash'], load_units(text_dirs, item_id))
+        technical = technical_workbook(asset.get("display_name", ""), units)
+        if technical:
+            tier = "T2"
+        units.extend(reducto_figure_units(build, item_id, asset.get("display_name") or ""))
         title, folder = package_title(asset, tier, config.get("doc_titles", {}))
         doc = {
             "doc_id": doc_id,
@@ -1155,7 +1225,7 @@ def main() -> int:
         }
         item_blocks: list[dict[str, Any]] = []
         sheet_units = [u for u in units if SHEET_UNIT.match(u["locator"])]
-        if asset.get("decision") in {"B", "D"} and sheet_units:
+        if asset.get("decision") in {"B", "D"} and sheet_units and not technical:
             # A workbook screening wants cleaned: a sheet whose header names product columns is read
             # row by row, so prices and customers go cell by cell; any other sheet is the table it is.
             rules, unreadable = parse_actions(triage.get(item_id, {}).get("actions", []))
@@ -1204,7 +1274,7 @@ def main() -> int:
                            file_name=f"报价单-{asset['source_hash'][:8]}.md")
             sheet_reports[item_id] = stats
         else:
-            item_blocks = document_blocks(doc_id, item_id, units)
+            item_blocks = document_blocks(doc_id, item_id, units, preserve_grid=technical)
             if asset.get("decision") == "B":
                 # Places screening wanted cleaned in a document: the guard cleans prices and customers
                 # wherever they are; what it cannot place is told to a person.
@@ -1212,7 +1282,7 @@ def main() -> int:
                 if unreadable:
                     sheet_reports[item_id] = {"unreadable_locations": unreadable}
             if reference_draft(units, config.get("doc_roles", {}).get(item_id)):
-                # Someone's compilation from other sources, not the company's own material.
+                # A declared reference/draft; ownership cannot be inferred from that label.
                 doc["role"] = "reference"
                 for block in item_blocks:
                     block["reference"] = True
@@ -1369,6 +1439,9 @@ def main() -> int:
                 # Why we put it to the client ourselves (ask_client), and who kept a D file.
                 "ask_reason": route.get("ask_reason"),
                 "kept_by": route.get("kept_by"),
+                "picture_kind": route.get("picture_kind"),
+                "drawing_model": route.get("drawing_model"),
+                "drawing_model_confirmed": route.get("drawing_model_confirmed"),
             }
             for item_id, route in routes.items()
         },

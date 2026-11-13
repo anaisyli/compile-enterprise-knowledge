@@ -146,10 +146,12 @@ def build(
     show: Callable[[str], str] = lambda name: name,
     own_domains: set[str] | None = None,
     own_contacts: list[str] | None = None,
+    client_confirmation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """show turns an original file name into what the vault may print: customer names hidden."""
     effective_tiers = effective_tiers or {"T1", "T2"}
     registry = Registry(build_dir / "governance-ids.json", project_id)
+    client_confirmation = client_confirmation or {}
     today = date.today().isoformat()
     records: dict[str, list[dict[str, Any]]] = {"CUS": [], "MAT": [], "ANM": []}
 
@@ -158,6 +160,14 @@ def build(
         record_id = registry.id_for(kind, key)
         for item in items or []:
             item["sub_id"] = f"{record_id}.{registry.number(f'sub:{key}', item['key'])}"
+            if client_confirmation.get("friendly"):
+                item["client_id"] = f"问题{registry.number('client_question', item['sub_id']):03d}"
+            questions = client_confirmation.get("questions", {})
+            page_question = questions.get(item.get("key")) if item.get("location") else None
+            question = page_question or questions.get(item.get("item_id"))
+            if question and (page_question or not item.get("location")):
+                item["question"] = question
+                item["answer_type"] = "text"
         records[kind].append({"id": record_id, "key": key, "row": [title, count, stage, owner], "details": details,
                               "items": items or [], "updated": today})
         return record_id
@@ -242,10 +252,20 @@ def build(
                 "准备客户话术", "内容运营", detail,
                 [{"key": "all", "item_id": "", "location": "", "question": f"公司的{label}以哪个为准（{'、'.join(sorted(values))}）"}])
 
+    for question in client_confirmation.get("additional", []):
+        related = [i for i in question.get("item_ids", []) if i in by_item]
+        items = [{"key": question["key"], "item_id": "", "location": question.get("location", ""),
+                  "question": question["question"], "name": "；".join(by_item[i]["original_name"] for i in related),
+                  "answer_type": "text", "related_item_ids": related}]
+        add("CUS", f"review:{question['key']}", question["question"], "1 项", "等待客户回复", "内容运营 → 客户",
+            ["- 为什么问：独立通读发现不同资料的说法需要客户说明；来源层保留各自原文，不替客户选定答案。", ""]
+            + [f"- {link(by_item[i])}" for i in related], items)
+
     # ---- ANM: risks inside material that is already in use
     unverified: dict[str, set[str]] = defaultdict(set)
     term_labels: dict[str, str] = {}
     reports: set[str] = set()
+    report_templates: set[str] = set()
     ai_pages: set[str] = set()
     references: set[str] = set()
     for block in blocks:
@@ -260,6 +280,8 @@ def build(
                     unverified[key].add(link(doc))
             elif flag["type"] == "report_page":
                 reports.add(link(doc, block["group"]))
+                if flag.get("template"):
+                    report_templates.add(link(doc, block["group"]))
             elif flag["type"] in {"ai_read", "ai_added"}:
                 ai_pages.add(link(doc, block["group"]))
             elif flag["type"] == "reference_draft":
@@ -267,8 +289,8 @@ def build(
     anm_ids: dict[str, str] = {}
     if references:
         anm_ids["reference_draft"] = add(
-            "ANM", "reference_draft", f"{len(references)} 份参考整理稿不是公司自己的资料", f"{len(references)} 份", "待判断", "知识库专员",
-            ["- 为什么有风险：这些文件自己写着“参考”“内部审核版”“待确认”，内容是从别家公开资料或旧稿整理的，参数、款式可能不是本公司的。",
+            "ANM", "reference_draft", f"{len(references)} 份参考整理稿的事实归属待确认", f"{len(references)} 份", "待判断", "知识库专员",
+            ["- 为什么有风险：这些文件标有参考、草稿或内部审核属性，或已明确登记为参考稿；这些标记不能证明资料属于第三方，参数和款式能否作为公司事实仍需确认。",
              "- 现在怎么处理：入库可检索，状态“参考稿”，整理页引用时必须带 ⚠，只能写成“参考资料显示……（待公司确认）”。",
              "- 怎么关闭：请公司确认里面哪些是自己的；确认是公司原始资料的，在 kb-config.json 的 doc_roles 里写 \"original\"。", ""]
             + [f"- {page}" for page in sorted(references)])
@@ -289,9 +311,12 @@ def build(
         anm_ids["unverified_name"] = add("ANM", "unverified_name", f"{len(unverified)} 个没核实过的词出现在已生效资料里",
                                          f"{len(unverified)} 个词", "待判断", "知识库专员", detail)
     if reports:
-        anm_ids["report_page"] = add("ANM", "report_page", f"{len(reports)} 处检测或审核报告", f"{len(reports)} 处", "待判断",
+        report_name = (f"{len(reports)} 处验货或检测报告模板" if reports == report_templates
+                       else f"{len(reports)} 处检测或审核报告（含 {len(report_templates)} 处模板）")
+        anm_ids["report_page"] = add("ANM", "report_page", report_name, f"{len(reports)} 处", "待判断",
                                      "知识库专员",
-                                     ["- 为什么有风险：报告里有评级和其他公司名，也可能已经过期。", "- 现在怎么处理：已入库并标 ⚠，引用前核对报告日期。", ""]
+                                     ["- 为什么有风险：模板及示例值不能作为真实检测、认证或验货结果；实际报告还需核对日期、主体和适用范围。",
+                                      "- 现在怎么处理：已入库并标 ⚠；模板只作流程参考，不作为已通过检测或认证的证据。", ""]
                                      + [f"- {page}" for page in sorted(reports)])
 
     # ---- MAT: material that needs processing
@@ -323,6 +348,18 @@ def build(
     checks_path = build_dir / "page-check" / "results.json"
     checks = list(load_json(checks_path).values()) if checks_path.is_file() else []
     heading = lambda r: {"slide": f"第 {r['page']} 张幻灯片", "image": f"图片 {r['page']}"}.get(r["unit"], f"第 {r['page']} 页")
+    unknown_drawings = [
+        f"{link(by_item[r['item_id']], heading(r))}：尺寸图型号待确认"
+        for r in checks if r.get("dimension_drawing") and not r.get("drawing_model_confirmed")
+        and r["item_id"] in by_item
+    ]
+    unknown_drawings.extend(
+        f"{show(route.get('display_name') or item_id)}（资料编号 `{item_id}`）：尺寸图型号待确认"
+        for item_id, route in routes.items()
+        if route.get("reason") == "dimension_drawing" and not route.get("drawing_model_confirmed")
+    )
+    mat("dimension_drawing_model", "尺寸图型号待确认", unknown_drawings, "处", "待知识库专员判断",
+        "查看原图确认型号后更新尺寸图名称", "型号确认后")
     from source_fidelity import reviewed_units
 
     reviewed_locators: set[tuple[str, str]] = set()
@@ -356,8 +393,11 @@ def build(
                       "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}的共用 FEATURES 区分两列文字，左列和右列是否分别对应页面左、右款号，还是两款共用？"}
                      for r in unclear]
         else:
-            title = f"{len(unclear)} 页款号和产品对应不清楚"
-            instruction = "- 原件上没写清楚哪个款号对应哪款，整理页不要自行配对。"
+            table_ambiguity = any(r.get("structure") == "表格" for r in unclear)
+            title = (f"{len(unclear)} 页原件内容的对应关系待确认" if table_ambiguity
+                     else f"{len(unclear)} 页款号和产品对应不清楚")
+            instruction = ("- 原件中的型号、说明或表格列位存在对应疑点，请按客户确认表逐页确认；整理页不自行选择。" if table_ambiguity
+                           else "- 原件上没写清楚哪个款号对应哪款，整理页不要自行配对。")
             items = [{"key": f"{r['item_id']}|{r['unit']} {r['page']}", "item_id": r["item_id"], "location": heading(r),
                       "question": f"《{by_item[r['item_id']]['title']}》{heading(r)}上有几款产品，看不出各自的款号，请标出每款的款号"}
                      for r in unclear]
@@ -382,7 +422,10 @@ def build(
     mat("browser", "需要浏览器读取的官网页面", browser, "页", "等待材料或工具", "用浏览器读取后 --browser-capture 导入", "官网改版时")
     fetch_path = build_dir / "website" / "fetch-report.json"
     fetch = load_json(fetch_path) if fetch_path.is_file() else {}
-    unread_site = [f"{f['url']}：{short(f['error'], 80)}" for f in fetch.get("failed", [])]
+    crawl = fetch.get("last_crawl", fetch)
+    unread_site = [f"{f['url']}：{short(f['error'], 80)}" for f in crawl.get("failed", [])]
+    if crawl.get("blocked_by_robots"):
+        unread_site.append(f"网站自动抓取规则阻止读取 {crawl['blocked_by_robots']} 个网址；已保存的浏览器页面不代表官网全部页面")
     if fetch and not fetch.get("usable_pages"):
         unread_site.insert(0, f"{'、'.join(fetch.get('sites', []))} 一页可用正文也没读到（{fetch.get('checked_at', '')[:10]}）")
     elif fetch.get("using_snapshot"):
@@ -424,14 +467,21 @@ def build(
     with (build_dir / "客户确认表.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         # The client knows their files by the original names; this table goes to them, not into the vault.
-        writer.writerow(["编号", "要确认的问题", "原文件名", "在初筛包里的位置", "回答（保留 / 不用 / 文字）"])
+        friendly = client_confirmation.get("friendly")
+        writer.writerow(["编号", "要确认的问题", "原文件名", "在文件里的位置" if friendly else "在初筛包里的位置", "回答（保留 / 不用 / 文字）"])
         for record in sorted(records["CUS"], key=lambda r: r["id"]):
             for item in record["items"]:
                 route = routes.get(item["item_id"], {})
-                writer.writerow([item["sub_id"], item["question"], item.get("name") or route.get("display_name") or "",
-                                 item.get("place") or route.get("path") or "", ""])
+                place = item.get("location") or "整份文件" if friendly else item.get("place") or route.get("path") or ""
+                writer.writerow([item.get("client_id", item["sub_id"]), item["question"], item.get("name") or route.get("display_name") or "",
+                                 place, ""])
     write_json(build_dir / "governance.json", {kind: [{k: v for k, v in r.items() if k != "details"} for r in rs] for kind, rs in records.items()})
-    return {"anm_ids": anm_ids, "mat_ids": mat_ids, "cus_ids": cus_ids, "cus_items": {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]},
+    cus_items = {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]}
+    for record in records["CUS"]:
+        for item in record["items"]:
+            for related in item.get("related_item_ids", []):
+                cus_items[f"{related}:review:{item['key']}"] = record["id"]
+    return {"anm_ids": anm_ids, "mat_ids": mat_ids, "cus_ids": cus_ids, "cus_items": cus_items,
             "counts": {kind: len(rs) for kind, rs in records.items()}}
 
 

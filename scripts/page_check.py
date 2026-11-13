@@ -28,7 +28,8 @@ from typing import Any
 
 from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
-from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, remaining_ocr_pages, write_json, write_text
+from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
+                       remaining_ocr_pages, sha256_file, suppress_drawing_dimensions, write_json, write_text)
 from office import convert_office
 from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of
 from samples import (GRADES, IMAGE_KIND, METHODS, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
@@ -60,15 +61,19 @@ RULES = """# 看图核对规则
 1. missing：图上有、提取的文字里没有的内容，逐字照抄（款号、产品名、参数、图上的标语），按款分段。
    没有漏的写空字符串。
 2. text_errors：提取的文字和图上不一样的地方（乱码、错字、缺字），简单写哪里不对。没有就写空字符串。
+   structure 选了“尺寸图”的页，text_errors 会被忽略，不用填写。
 3. pairing：这一页有几款产品时，写清楚每个款号对应哪款（比如“左：没写款号；中：没写款号；右：ANS S-002”）。
    原图本身看不出对应关系的，unclear 写 true。只有一款或没有产品的，pairing 写空字符串。
-4. structure：这一页（或这张图）主要是什么结构：表格、流程图、时间轴、地图、图表；都不是写空字符串。
+4. structure：这一页（或这张图）主要是什么结构：表格、流程图、时间轴、地图、图表、尺寸图；都不是写空字符串。
 5. structured：structure 不为空时，把图上的字按原结构排好：
    - 表格：写成 Markdown 表，第一行是表头，每格照抄图上的字。
    - 流程图：按箭头顺序写成编号列表“1. …”，每步照抄图上的字；有分支的写清楚从哪一步分出去。
    - 时间轴：按时间先后写成编号列表，年份和事件照抄。
    - 地图、图表：列出图上标注的字和它们的关系（比如“柱状图：2023 年 120，2024 年 150”），只写图上有的。
    只能用图上看得到的字，不加说明、不补数字、不翻译；脚本会检查每个词都在这一页的文字里，有不在的就不收。
+   - 尺寸图：不要转写任何尺寸、规格、孔位、角度或标注，也不要做款号配对。structured 只写图名，如“外形及安装尺寸图”；
+     另填 drawing_model（图上清楚可辨的型号；不能确认就写“型号待确认”）。图名不能确认时写“尺寸图”。
+     尺寸以原图为准。若同页还有正文或参数表，只把其中非图纸部分的漏字填入 missing。
 
 价格、客户名也照抄，后面的规则会删掉，不要自己判断删哪些。
 
@@ -79,7 +84,7 @@ RULES = """# 看图核对规则
 每张图写一行 JSON，存成本目录下的 answer-001.jsonl（可以分几个文件，可以分给几个子 Agent）：
 
     {"key": "<todo.jsonl 里的 key>", "missing": "", "text_errors": "", "pairing": "", "unclear": false,
-     "structure": "", "structured": ""}
+     "structure": "", "structured": "", "drawing_model": ""}
 
 写完运行 `page_check.py collect --out <运行目录>`，再重跑流水线。补进去的字会标 ⚠“AI 看图补充，待核对”。
 """
@@ -180,6 +185,8 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     pictures = folder / "pages"
     pictures.mkdir(parents=True, exist_ok=True)
     done = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
+    sampling_path = folder / "sampling.json"
+    sampling = load_json(sampling_path) if sampling_path.is_file() else {}
     codes = code_pattern(config.get("style_prefixes", []))
     share = float((config.get("reducto") or {}).get("check_share", CHECK_SHARE))
     rng = random.Random(20261105)
@@ -218,6 +225,12 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         suffix = asset["file"].suffix.casefold()
         # The reviewer sees what the build will publish: text layer plus what MinerU or the model read.
         units = load_units([*text_dirs, build / "reducto-units", build / "mineru-units"], item_id)
+        drawing_pages = {f"{entry.get('unit', 'page')} {entry.get('page')}"
+                         for key, entry in done.items() if entry.get("dimension_drawing") and entry.get("item_id") == item_id}
+        units = suppress_drawing_dimensions(
+            units + [{"locator": f"{page} drawing", "text": done[f"{item_id}|{page}"].get("drawing_caption", ""),
+                      "dimension_drawing": True, "drawing_model_confirmed": done[f"{item_id}|{page}"].get("drawing_model_confirmed", False)}
+                     for page in drawing_pages if f"{item_id}|{page}" in done])
         reducto = compare(build, item_id)
         reducto_record = record_of(build, item_id)
         reducto_read = set(reducto_record.get("pages_read", [])) if reducto_record.get("source_hash") == asset.get("source_hash") else set()
@@ -279,7 +292,8 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 seen = reducto.get(number)
                 found = reasons_for(page, text, codes)
                 disagree = []
-                if seen is not None:
+                dimension_drawing = done.get(f"{item_id}|{unit} {number}", {}).get("dimension_drawing", False)
+                if seen is not None and not dimension_drawing:
                     disagree = check_reasons(seen, text)
                     if seen.get("only_mineru") or seen.get("only_reducto"):
                         text += f"\n\n【Reducto 识别（与 MinerU 不一致，以原图为准）】\n{seen['text']}"
@@ -287,7 +301,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 why = [r for r in disagree if r.startswith(DISAGREE)] if grade == "D" else found or (
                     ["没有文字层，已读出"] if grade == "C" else [])
                 grades[str(number)] = {"grade": grade, "reasons": why}
-                if number in looked_at or hold:
+                if hold:
                     continue
                 # What each grade gets depends on how the file is read.
                 if (method == "reducto" and seen is None and grade in {"B", "C"} and number not in reducto_read
@@ -304,14 +318,24 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     pool.add(number)
                 chosen.append((number, text, reasons))
             rest = [c for c in chosen if not c[2] and c[0] not in pool]
-            for number, text, _ in rng.sample(rest, max(1, round(len(rest) * SAMPLE_SHARE))) if rest else []:
+            sample_key = f"{item_id}:{asset.get('source_hash', '')}:{method}:{share}"
+            selected = sampling.setdefault(sample_key, {})
+            if rest and "ordinary" not in selected:
+                selected["ordinary"] = [c[0] for c in rng.sample(rest, max(1, round(len(rest) * SAMPLE_SHARE)))]
+            for number, text, _ in rest:
+                if number not in selected.get("ordinary", []):
+                    continue
                 chosen[[c[0] for c in chosen].index(number)] = (number, text, ["抽查"])
             # Codes and numbers only Reducto read are checked more often than the ordinary sample.
             alone = [c for c in chosen if c[0] in pool]
-            for number, text, _ in rng.sample(alone, max(1, round(len(alone) * share))) if alone else []:
+            if alone and "reducto" not in selected:
+                selected["reducto"] = [c[0] for c in rng.sample(alone, max(1, round(len(alone) * share)))]
+            for number, text, _ in alone:
+                if number not in selected.get("reducto", []):
+                    continue
                 chosen[[c[0] for c in chosen].index(number)] = (number, text, ["只有 Reducto 识别，含款号或数字，抽查"])
             for number, text, reasons in chosen:
-                if not reasons:
+                if not reasons or number in looked_at:
                     continue
                 target = pictures / f"{item_id}-p{number}.png"
                 if not target.is_file():
@@ -335,6 +359,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     write_text(folder / "README.md", RULES)
+    write_json(sampling_path, sampling)
     write_json(build / TRIAGE, {"grades": {g: f"{label}：{rule}" for g, (label, rule) in GRADES.items()}, "files": triage})
     totals = {g: sum(f["counts"][g] for f in triage.values()) for g in GRADES}
     report = {"ok": True, "to_check": len(todo), "checked": len(done), "files": len({t["item_id"] for t in todo}), "skipped": skipped,
@@ -361,7 +386,7 @@ def laid_out(text: str, source: str) -> tuple[str, list[str]]:
         body = LIST_MARK.sub("", line)
         if TABLE_RULE.fullmatch(body.strip()):
             continue
-        for piece in re.split(r"\||→|->|=>|；|;|：|:", body):
+        for piece in re.split(r"<br\s*/?>|\||→|->|=>|；|;|：|:", body, flags=re.IGNORECASE):
             word = re.sub(r"\s+", "", piece).casefold()
             if word and word not in known:
                 refused.append(piece.strip())
@@ -370,34 +395,86 @@ def laid_out(text: str, source: str) -> tuple[str, list[str]]:
     return text.strip(), []
 
 
-def collect(build: Path) -> dict[str, Any]:
+def checked_entry(build: Path, key: str, previous: dict[str, Any], text_dirs: list[Path],
+                  checked_sources: dict[str, bool]) -> dict[str, Any] | None:
+    """Reopen an accepted page against its original source and current extraction caches."""
+    item_id, unit, number = previous.get("item_id"), previous.get("unit"), previous.get("page")
+    if not item_id or unit not in {"page", "slide", "image"} or not isinstance(number, int) or number < 1:
+        return None
+    if key != f"{item_id}|{unit} {number}":
+        return None
+    if item_id not in checked_sources:
+        route = load_json(build / "routes.json").get(item_id, {})
+        source = Path(route.get("package", "")) / route.get("path", "")
+        expected = route.get("source_hash")
+        checked_sources[item_id] = bool(expected and source.is_file() and sha256_file(source) == expected)
+    if not checked_sources[item_id]:
+        return None
+    units = load_units([*text_dirs, build / "reducto-units", build / "mineru-units"], item_id)
+    # A superseded visual addition cannot serve as evidence for its own replacement.
+    text = page_text([u for u in units if not u.get("checked")], unit, number)
+    return {**previous, "key": key, "text": text}
+
+
+def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Path] | None = None,
+            text_dirs: list[Path] | None = None) -> dict[str, Any]:
     folder = build / FOLDER
     todo = {entry["key"]: entry for entry in load_jsonl(folder / "todo.jsonl")}
     results: dict[str, Any] = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
-    rejected, by_item = [], {}
-    for path in sorted(folder.glob("answer-*.jsonl")):
+    rejected, by_item, answers = [], {}, {}
+    reopened, checked_sources = {}, {}
+    for path in sorted(answer_files if answer_files is not None else folder.glob("answer-*.jsonl")):
         for record in load_jsonl(path):
-            entry = todo.get(record.get("key"))
-            if not entry or not all(isinstance(record.get(field, ""), str) for field in ("missing", "text_errors", "pairing")):
+            key = record.get("key")
+            entry = todo.get(key)
+            if entry is None and key in results:
+                if not revise_checked:
+                    continue  # Revisions outside the current plan must be explicitly requested.
+                if key not in reopened:
+                    reopened[key] = checked_entry(build, key, results[key], text_dirs or [build / "package-text"], checked_sources)
+                entry = reopened[key]
+            if not entry or not all(isinstance(record.get(field, ""), str) for field in ("missing", "text_errors", "pairing", "structure", "structured")):
                 rejected.append(record.get("key") or "（没有 key）")
                 continue
-            missing = (record.get("missing") or "").strip()
-            structure = (record.get("structure") or "").strip()
-            structured, refused = laid_out(record.get("structured") or "", entry.get("text", "") + "\n" + missing)
-            results[entry["key"]] = {"item_id": entry["item_id"], "unit": entry["unit"], "page": entry["page"],
-                                     "reasons": entry["reasons"], "added": bool(missing), "draft": entry.get("draft", ["文字层"]),
-                                     "text_errors": clean_note(record.get("text_errors", "")),
-                                     "pairing": clean_note(record.get("pairing", "")), "unclear": bool(record.get("unclear")),
-                                     "structure": structure if structure in STRUCTURES else "",
-                                     "structured": structured if structure in STRUCTURES else "", "structured_refused": refused}
-            if missing:
-                # A locator of its own: on a page MinerU read, MinerU's "page N ocr" must not swallow it.
-                by_item.setdefault(entry["item_id"], []).append(
-                    {"locator": f"{entry['unit']} {entry['page']} check", "text": missing, "engine": "ai", "checked": True})
+            answers[entry["key"]] = record
+    # A later answer revises the same page; do not append both drafts to its source text.
+    for key, record in answers.items():
+        entry = todo.get(key) or reopened[key]
+        missing = (record.get("missing") or "").strip()
+        structure = (record.get("structure") or "").strip()
+        dimension_drawing = structure == "尺寸图"
+        if dimension_drawing:
+            missing = "\n".join(line for line in missing.splitlines() if not is_drawing_dimension_line(line)).strip()
+        structured, refused = laid_out(record.get("structured") or "", entry.get("text", "") + "\n" + missing)
+        drawing_model = clean_note(record.get("drawing_model", "")) or "型号待确认"
+        drawing_name = clean_note(record.get("structured", "")) or "尺寸图"
+        # A label, not a transcription: no dimension text is copied or validated.
+        drawing_caption = f"{drawing_model} 的{drawing_name}" if dimension_drawing else ""
+        results[key] = {"item_id": entry["item_id"], "unit": entry["unit"], "page": entry["page"],
+                        "reasons": entry["reasons"], "added": bool(missing), "draft": entry.get("draft", ["文字层"]),
+                        "text_errors": "" if dimension_drawing else clean_note(record.get("text_errors", "")),
+                        "pairing": "" if dimension_drawing else clean_note(record.get("pairing", "")),
+                        "unclear": False if dimension_drawing else bool(record.get("unclear")),
+                        "structure": structure if structure in STRUCTURES | {"尺寸图"} else "",
+                        "structured": structured if structure in STRUCTURES else "", "structured_refused": refused,
+                        "dimension_drawing": dimension_drawing, "drawing_model": drawing_model if dimension_drawing else "",
+                        "drawing_model_confirmed": dimension_drawing and drawing_model != "型号待确认",
+                        "drawing_name": drawing_name if dimension_drawing else "",
+                        "drawing_caption": drawing_caption}
+        if missing or key in reopened:
+            # A locator of its own: on a page MinerU read, MinerU's "page N ocr" must not swallow it.
+            by_item.setdefault(entry["item_id"], []).append(
+                {"locator": f"{entry['unit']} {entry['page']} check", "text": missing, "engine": "ai", "checked": True})
+        if dimension_drawing:
+            by_item.setdefault(entry["item_id"], []).append(
+                {"locator": f"{entry['unit']} {entry['page']} drawing", "text": drawing_caption,
+                 "engine": "ai", "checked": True, "dimension_drawing": True,
+                 "drawing_model_confirmed": drawing_model != "型号待确认"})
     store_ai_units(build, by_item)
     write_json(build / RESULTS, results)
     left = len(set(todo) - set(results))
-    return {"collected": len(results), "added_text": sum(len(v) for v in by_item.values()), "rejected": rejected, "left": left}
+    return {"collected": len(results), "revised": sum(key in reopened for key in answers),
+            "added_text": sum(bool(u["text"]) for units in by_item.values() for u in units), "rejected": rejected, "left": left}
 
 
 def main() -> int:
@@ -407,6 +484,8 @@ def main() -> int:
     parser.add_argument("--package", action="append", default=[], help="Preparation package; repeat (plan)")
     parser.add_argument("--text-dir", action="append", default=[], help="Extracted text units; repeat (plan)")
     parser.add_argument("--config", help="kb-config.json")
+    parser.add_argument("--revise-checked", action="store_true", help="Explicitly recheck answers for already accepted pages (collect)")
+    parser.add_argument("--answer-file", action="append", help="Only collect this answer file; repeat for several files")
     args = parser.parse_args()
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     if args.command == "plan":
@@ -415,7 +494,9 @@ def main() -> int:
         dirs = [Path(d).resolve() for d in args.text_dir] or [build / "package-text"]
         report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs)
     else:
-        report = collect(build)
+        report = collect(build, revise_checked=args.revise_checked,
+                         answer_files=[Path(p).resolve() for p in args.answer_file] if args.answer_file else None,
+                         text_dirs=[Path(d).resolve() for d in args.text_dir] if args.text_dir else None)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if args.command == "plan":
         return 0  # Without PyMuPDF the pipeline goes on; verify says the check was not possible.

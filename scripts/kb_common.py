@@ -255,6 +255,93 @@ def load_units(text_dirs: list[Path], item_id: str) -> list[dict[str, str]]:
     return list(merged.values())
 
 
+def preferred_page_units(units: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Use nonempty platform page readings instead of the same page's native text."""
+    # MinerU's cached page records from older runs used ``engine: null``.  The
+    # locator is still the platform's full-page OCR unit (``page N ocr``), so
+    # treat a missing/empty engine as MinerU for page replacement.  AI page
+    # readings remain excluded because their engine is explicitly ``ai``.
+    pages = {
+        unit["locator"].removesuffix(" ocr")
+        for unit in units
+        if re.fullmatch(r"(?:page|slide) \d+ ocr", unit["locator"])
+        and unit.get("engine") in {None, "", "mineru", "reducto"}
+        and unit["text"].strip()
+    }
+    return [unit for unit in units
+            if re.sub(r" (?:col|table) \d+$", "", unit["locator"]) not in pages]
+
+
+def is_drawing_dimension_line(text: str) -> bool:
+    """Recognize standalone engineering callouts without suppressing prose or table rows."""
+    line = normalize_space(text)
+    # A parameter table stays a table, even when printed beside a drawing.
+    if not line or line.startswith("|") or re.search(r"<\s*(?:table|tr|td|th)\b", line, re.I):
+        return False
+    line = re.sub(r"^#{1,6}\s+", "", line)
+    if re.fullmatch(r"(?i)(?:[ΦφØ⌀]?[ABCDHLMNRSTWXZ]\d?|n\s*[-−]\s*[ΦφØ⌀]?[A-Z]?|"
+                    r"[□ΦφØ⌀]?b\s*[×x*]\s*b|[ΦφØ⌀][A-Z]?|N-Th|BXB|n-b|n-d)", line):
+        return True
+    if not re.search(r"\d", line):
+        return False
+    labels = re.compile(r"(?i)\b(?:DN|VESA|PCD|BCD|OD|ID|mm|cm|inch|in|deg|kg|lb)\b|"
+                        r"[ΦØ⌀]\s*(?:D|L|W|H|R|M)(?=\s*[=<>≤≥±]?\s*\d)|"
+                        r"(?<!\w)(?:L|W|H|R|M|D)(?=\s*[=<>≤≥±]?\s*\d)|[ΦØ⌀]")
+    remainder = labels.sub("", line)
+    if re.fullmatch(r"[\d\s.,+\-±~≤≥<>=:：/×xX*()'\"°%寸米厘纳]+", remainder):
+        return True
+    return False
+
+
+def suppress_drawing_dimensions(units: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Exclude dimension callouts only on pages explicitly reviewed as dimension drawings."""
+    pages = {
+        unit["locator"].removesuffix(" drawing")
+        for unit in units if unit.get("dimension_drawing")
+    }
+    if not pages:
+        return units
+    result = []
+    for unit in units:
+        locator = unit["locator"]
+        page = re.match(r"^((?:page|slide) \d+)(?: |$)", locator)
+        if unit.get("dimension_drawing") or page is None or page.group(1) not in pages:
+            result.append(unit)
+            continue
+        # The drawing is an image asset; its model-generated description must not
+        # reintroduce hole counts, dimensions or inferred geometry into prose.
+        if unit.get("figure_description"):
+            continue
+        # Human full-page supplements are independent evidence, not OCR drafts.
+        if unit.get("reviewed_supplement") or unit.get("engine") == "reviewed":
+            result.append(unit)
+            continue
+        lines = [line for line in unit["text"].splitlines() if not is_drawing_dimension_line(line)]
+        if lines:
+            result.append({**unit, "text": "\n".join(lines), "drawing_filtered": True})
+    return result
+
+
+def reducto_figure_units(build: Path, item_id: str, source_name: str) -> list[dict[str, Any]]:
+    """Keep page-linked model descriptions separate from transcribed source words."""
+    path = build / "reducto-units" / f"{item_id}.json"
+    if not path.is_file():
+        return []
+    unit = "slide" if file_extension(source_name) in {".ppt", ".pptx"} else "page"
+    result = []
+    for page, figures in load_json(path).get("figures", {}).items():
+        seen: set[str] = set()
+        for index, text in enumerate(figures):
+            text = clean_text(text).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append({"locator": f"{unit} {page} figure {index + 1}", "text": text,
+                           "engine": "reducto", "figure_description": True,
+                           "figure_source_locator": f'figures["{page}"][{index}]'})
+    return result
+
+
 def yaml_scalar(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(yaml_scalar(entry) for entry in value) + "]"

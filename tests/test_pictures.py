@@ -95,6 +95,15 @@ class PictureTests(unittest.TestCase):
         self.assertEqual(named["img-eeeeeeeeeeeeeeee.jpg"]["alt"], "Elephant Wall Tapestry")
         self.assertEqual(named["img-dddddddddddddddd.jpg"]["english"], "elephant-jacquard-wall-tapestry-dddddddd.jpg")
 
+    def test_dimension_drawing_pictures_are_named_and_filed_by_model(self) -> None:
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|page 3": {
+            "dimension_drawing": True, "drawing_model": "YFD71XA", "drawing_name": "外形及安装尺寸图"}}), encoding="utf-8")
+        named = self.name_all()
+        entry = named["img-cccccccccccccccc.jpg"]
+        self.assertEqual(entry["file"], "产品/YFD71XA/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
+        self.assertEqual(entry["use"], CHECK)
+
     def test_buyers_numbers_and_customer_names_stay_out_of_names(self) -> None:
         namer = Namer(CONFIG, re.compile("Acme"))
         self.assertEqual(namer.label("DG-7959 HOOD"), "HOOD")

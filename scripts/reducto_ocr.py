@@ -124,7 +124,8 @@ def disagrees(reasons: list[str]) -> bool:
     return any(r.startswith(DISAGREE) for r in reasons)
 
 
-def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool = False) -> list[dict[str, Any]]:
+def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool = False,
+               full_document_item_ids: list[str] | None = None) -> list[dict[str, Any]]:
     """Per file read “Reducto 难页 + AI 抽查”, its grade B and C pages (page-triage.json) nobody read yet.
 
     With samples_only, the same pages of each paged kind's sample still waiting for a decision, so
@@ -140,6 +141,7 @@ def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool
         item_of = {d["doc_id"]: d["item_id"] for d in docs}
         trial = {item_of[d] for kind, d in choose_samples(docs, {}, build).items() if kind in PAGED_KINDS}
     chosen = []
+    full_documents = set(full_document_item_ids or [])
     for item_id, route in sorted(routes.items()):
         asset = files.get(item_id)
         info = triage.get(item_id)
@@ -161,15 +163,19 @@ def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool
             why = f"单张图片，这张指定“{METHODS['reducto']}”"
         else:
             why = f"按“{METHODS['reducto']}”处理（{'这份文件指定' if info.get('method_from') == '文件' else '这类文件选的'}）"
+        full_document = item_id in full_documents
+        if full_document:
+            why = "用户指定整份使用 Reducto 解析，供平台效果对比"
         record = record_of(build, item_id)
         done = set(record.get("pages_read", [])) if record.get("source_hash") == asset.get("source_hash") else set()
         done |= set(mineru_pages(build, item_id))
         pages = {int(number): [why, f"{page['grade']} 级{GRADES[page['grade']][0]}", *page.get("reasons", [])]
-                 for number, page in info.get("pages", {}).items() if page["grade"] in {"B", "C"} and int(number) not in done}
+                 for number, page in info.get("pages", {}).items()
+                 if (full_document or page["grade"] in {"B", "C"}) and int(number) not in done}
         if pages:
             chosen.append({"item_id": item_id, "display_name": route.get("display_name") or asset["file"].name,
                            "path": str(asset["file"]), "source_hash": asset.get("source_hash", ""),
-                           "unit": "slide" if suffix in SLIDES else "page", "image": image,
+                           "unit": "slide" if suffix in SLIDES else "page", "image": image, "full_document": full_document,
                            "pages": sorted(pages), "reasons": {str(k): v for k, v in sorted(pages.items())}})
     return chosen
 
@@ -187,10 +193,11 @@ def approved(config: dict[str, Any]) -> tuple[bool, str]:
 def write_plan(build: Path, chosen: list[dict[str, Any]], state: dict[str, Any]) -> None:
     write_json(build / "reducto-plan.json", chosen)
     total = sum(len(entry["pages"]) for entry in chosen)
-    lines = ["# Reducto 难页解析计划", "",
+    lines = ["# Reducto 解析计划", "",
              f"共 {len(chosen)} 个文件、{total} 页。只上传这些页所在的文件，并只解析列出的页；按页计费。", "",
              "- 选哪些页：处理方式是“Reducto 难页 + AI 抽查”的文件（按类型选，或单个文件指定），里面 B 级（图文页）和 C 级（难页）"
              "还没人读过的页；MinerU 读过的页不再送。单张图片原样上传，算 1 页。",
+             "- 用户明确指定整份对比的文件：解析全部页，包含文字页；文件清单见配置 reducto.full_document_item_ids。批准范围和已解析页缓存仍生效。",
              f"- 模型：{MODEL}。价格和套餐看 {PRICING_PAGE} ，余额在 {KEY_PAGE} 查看（新账号送 15,000 credits）。",
              "- Reducto 的结果是候选：入库标 ⚠；同一页有 MinerU 的以 MinerU 为准，两者不一致的页交给 AI 看图核对。",
              "- 免费和标准套餐不能主动删除上传的文件，由 Reducto 按其保留期清除；要求零保留需 Growth / Enterprise 套餐。", "",
@@ -244,7 +251,7 @@ def store(build: Path, entry: dict[str, Any], result: dict[str, Any]) -> dict[st
         text = page_text(read)
         if read.get("figures"):
             # The model's picture descriptions mix what is printed with what it thinks it sees:
-            # kept for comparison and for the page check, never published as the page's words.
+            # published separately with a warning, never as the page's transcribed words.
             figures[str(number)] = read["figures"]
         if text:
             units[locator] = {"locator": locator, "text": text, "engine": "reducto"}
@@ -304,7 +311,7 @@ def main() -> int:
     if not (build / "page-triage.json").is_file():
         print(json_text({"ok": False, "reason": "还没有页面分级（page-triage.json），先跑一次流水线"}))
         return 2
-    chosen = candidates(build, files, args.samples)
+    chosen = candidates(build, files, args.samples, (config.get("reducto") or {}).get("full_document_item_ids"))
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:

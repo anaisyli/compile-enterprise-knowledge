@@ -105,7 +105,8 @@ WORD = re.compile(r"[A-Za-z][A-Za-z'&\-]{2,}")
 CN_COMPANY_TAIL = re.compile(r"(?:香港|国际|集团)?(?:有限公司|贸易公司|贸易|实业|商贸|洋行|服饰|纺织)+$")
 CN_REGION_HEAD = re.compile(r"^(?:中国|香港|浙江|江苏|上海|广东|绍兴|杭州|宁波|深圳|柯桥)+")
 # Audit and test reports carry ratings, logos, and other companies' names.
-REPORT_PAGE = re.compile(r"(?i)test report|audit report|inspection report|certificate no|检测报告|审核报告|验厂报告|综合评级|证书编号")
+REPORT_PAGE = re.compile(r"(?i)test report|audit report|inspection report|certificate no|检测报告|审核报告|验货报告|验厂报告|综合评级|证书编号")
+REPORT_TEMPLATE = re.compile(r"(?i)模板|\btemplate\b")
 QUESTION = re.compile(r"(?i)(?:[?？]\s*$|^\s*q\d*[:：.\s])")
 # A label name: capitalised, no digits (style codes have them).
 BRAND_LIKE = re.compile(r"[A-Z][A-Za-z&'\-]{2,}")
@@ -280,7 +281,10 @@ def unknown_words(text: str, vocabulary: set[str]) -> set[str]:
     found = set()
     for raw in WORD.findall(text):
         word = raw.strip("-&'")
-        parts = [part for part in word.casefold().split("-") if part]
+        normalized = word.casefold()
+        if normalized in vocabulary:
+            continue
+        parts = [part for part in normalized.split("-") if part]
         if len(word) >= 2 and not all(part in vocabulary or len(part) == 1 for part in parts):
             found.add(word)
     return found
@@ -383,18 +387,21 @@ def split_on_hits(blocks: list[dict[str, Any]], hard_terms: re.Pattern[str] | No
     return result
 
 
-def flag_report_pages(blocks: list[dict[str, Any]]) -> int:
+def flag_report_pages(blocks: list[dict[str, Any]], docs: dict[str, dict[str, Any]] | None = None) -> int:
     """Audit and test reports name other companies and ratings: kept, but marked for review.
 
     A PDF page or a slide is marked as a whole; in Word and other unpaged files only the
     passage itself, or one mention of a report would mark a whole chapter."""
     hits = {(b["doc_id"], b["group"]) if PAGED.match(b["locator"]) else b["block_id"]
-            for b in blocks if b["kind"] == "text" and REPORT_PAGE.search(b["text"])}
+            for b in blocks if b["kind"] == "text" and not b.get("figure_description") and REPORT_PAGE.search(b["text"])}
     flagged = 0
     for block in blocks:
         if ((block["doc_id"], block["group"]) in hits or block["block_id"] in hits) and block["status"] in {"kept", "flagged"}:
             block["status"] = "flagged"
-            block["flags"].append({"type": "report_page", "terms": []})
+            doc = (docs or {}).get(block["doc_id"], {})
+            template = bool(REPORT_TEMPLATE.search(" ".join(str(doc.get(k, "")) for k in ("title", "original_name")))
+                            or REPORT_TEMPLATE.search(block["text"]))
+            block["flags"].append({"type": "report_page", "terms": [], "template": template})
             flagged += 1
     return flagged
 
@@ -403,7 +410,12 @@ def strip_repeated_lines(blocks: list[dict[str, Any]]) -> int:
     """Drop page furniture: a line on most pages of a document is not knowledge."""
     pages: dict[str, list[dict[str, Any]]] = {}
     for block in blocks:
-        if block["kind"] == "text" and block["locator"].startswith("page "):
+        # Platform full-page readings retain headers and footers as returned.
+        # Sensitive content is still handled by the normal guard below.
+        if block.get("ocr") and block.get("reader") in {None, "", "mineru", "reducto"}:
+            continue
+        if block["kind"] == "text" and not block.get("figure_description") and not block.get("dimension_drawing") \
+                and block["locator"].startswith("page "):
             pages.setdefault(block["doc_id"], []).append(block)
     removed = 0
     for members in pages.values():
@@ -483,7 +495,7 @@ def scan_block(
         hard.extend(name for name, pattern in ROW_PATTERNS.items() if pattern.search(unjudged))
     customers = sorted({normalize_space(m.group(0)) for m in soft_terms.finditer(text)}) if soft_terms else []
     unvetted: list[str] = []
-    if block["kind"] == "row" or block.get("ocr"):
+    if block["kind"] == "row" or block.get("ocr") or block.get("figure_description"):
         # Brands, celebrities, and IP turn up as words nobody has vetted yet.
         unvetted = sorted(unknown_words(unjudged, vocabulary))
     elif block["doc_id"].startswith("WEB-"):
@@ -610,7 +622,9 @@ def main() -> int:
     # because shop pages are where licensed and celebrity names appear.
     vocabulary.update(
         word.casefold() for block in blocks
-        if block["kind"] == "text" and block.get("tier") == "T1" and not block.get("ocr") and not block["doc_id"].startswith("WEB-")
+        if block["kind"] == "text" and block.get("tier") == "T1" and not block.get("ocr")
+        and not block.get("figure_description") and not block.get("dimension_drawing")
+        and not block["doc_id"].startswith("WEB-")
         for word in WORD.findall(block["text"])
     )
     # A word on many pages of the site is the site's own vocabulary; names sit on one or two.
@@ -679,7 +693,7 @@ def main() -> int:
             if block.get("reference"):
                 # A compilation from other suppliers' listings: it can guide, not state the company's facts.
                 block["flags"].append({"type": "reference_draft", "terms": []})
-            if block.get("ai_read") and not trusted:
+            if block.get("ai_read") and (not trusted or block.get("figure_description")):
                 # The model (or Reducto) read it from a picture; nobody has compared it with the page yet.
                 flag = {"type": "ai_added" if block.get("ai_checked") else "ai_read", "terms": []}
                 if block.get("reader") == "reducto":
@@ -694,7 +708,7 @@ def main() -> int:
             counts[reason.split(":")[0]] += 1
         results.append(block)
 
-    counts["report_page"] += flag_report_pages(results)
+    counts["report_page"] += flag_report_pages(results, {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")})
 
     # An answer is only safe if its question was: remove them together.
     for question, answer in zip(results, results[1:]):

@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from extract_blocks import document_blocks  # noqa: E402
+from extract_blocks import document_blocks, technical_workbook  # noqa: E402
+from source_fidelity import merged_sheet_table  # noqa: E402
 from guard_blocks import HARD_PATTERNS  # noqa: E402
 from sheet_layout import excel_date, lay_out  # noqa: E402
 
@@ -31,6 +32,24 @@ QUOTE = "\n".join([
 
 
 class SheetLayoutTests(unittest.TestCase):
+    def test_technical_grids_keep_headerless_data_and_shared_parameter_scope(self) -> None:
+        unit = {"locator": "sheet 参数 (visible)",
+                "text": "A1=型号; B1=SL55; C1=SL65\nA2=系统; B2=Android 16\nA4=21.5寸; B4=屏幕包装; C4=920*490*190mm",
+                "merges": ["B2:C2"]}
+        self.assertTrue(technical_workbook("尺寸重量表.xlsx", [unit]))
+        block, = document_blocks("D", "x", [unit], preserve_grid=True)
+        self.assertEqual(block["table_layout"]["rows"], [1, 2, 3, 4])
+        self.assertEqual(block["table_layout"]["header_rows"], 0)
+        rendered = merged_sheet_table(block["text"], block["table_layout"])
+        self.assertIn('<td colspan="2">Android 16</td>', rendered)
+        self.assertIn('<td>21.5寸</td>', rendered)
+        self.assertNotIn('<th', rendered)
+        self.assertIn('920*490*190mm', rendered)
+
+    def test_technical_name_does_not_bypass_quote_cleaning(self) -> None:
+        unit = {"locator": "sheet 产品 (visible)", "text": "A1=型号; B1=尺寸; C1=单价\nA2=DS50; B2=55寸; C2=1000"}
+        self.assertFalse(technical_workbook("规格参数.xlsx", [unit]))
+
     def test_a_quote_template_reads_as_lines_a_table_and_lines(self) -> None:
         blocks = document_blocks("D", "x", [{"locator": "sheet 立式壁挂广告机 (visible)", "text": QUOTE, "merges": ["B8:B10"]}])
         self.assertEqual({b["group"] for b in blocks}, {"表 1 · 立式壁挂广告机"})  # The sheet's own name is the heading.

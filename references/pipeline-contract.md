@@ -118,6 +118,7 @@
 - `no_ocr_items`：`{"<item_id>": "理由"}`，单张图片只当素材，不做识别。
 - `route_overrides`：`{"<item_id>": {"route": "kb|media|skip|hold", "reason": "…", "tier": "T2"}}`，单份资料的去向直接指定，优先于客户回答和 `d_keep` / `d_drop`（只排在 `excluded_items`、`ask_client` 之后）。只用于上面这些都表达不了的例外；常见情况用 `d_keep`、`d_drop`、`ask_client`，不然客户的回答会被它挡住。reason 用 `media_kept` 才会把图片复制进 90_素材。历史项目用待客户确认路由登记过的，本次客户明确回复后可用 `apply_answers.py --release-awaiting-overrides --answers <本次建库回复.csv>`，只解除该表实际回答条目的 awaiting_client / media_awaiting_client 覆盖，再写客户回答；不用于旧初筛 XLSX，不解除其他路由决定。
 - `build_stage`：`"sources_only"` 时只建来源层，不准备、不生成整理页（`curate.py` 两步都跳过）；要写整理页时改成 `"full"` 或删掉这一项。`stage_authorization` 记下是谁、什么时候、批准到哪一步：`{"approved_at": "…", "evidence": "用户原话", "scope": "…"}`，只做记录，不影响构建。
+- `package_read_only: true`：不向初筛包写入对照表，不新建或替换原件别名；仅复用已经存在且与原件对应的别名链接。用户要求初筛包也保持只读时使用。
 - `client_answers` 和 `client_answers_units` 一般由 `apply_answers.py` 写。它读建库的 `客户确认表.csv`，也读初筛包的 `客户确认表.xlsx`（`--answers` 给 .xlsx 路径，按表头找列，Excel 或 WPS 存过的都能读）。初筛表的编号这样对应：
   - `<item_id>#<n>`：位置是整份文件，或不在该文件的 `pending_units` 里，写 `client_answers[item_id]`；否则写 `client_answers_units[item_id][位置]`。
   - `folder:<文件夹>`：写给 manifest 里 `review_group` 是这个文件夹的每个文件。
@@ -183,9 +184,9 @@
 - 付款条件（T/T、L/C、定金、尾款、付款方式）一律删。
 - 不要把“正式成立”“Established in”这类说法写进 `deny_terms`。成立年份说法不一致会自动登记 CUS 问客户，不需要删原文。
 
-**检测或审核报告页：**PDF 的页、PPT 的幻灯片命中就整页标 ⚠；Word 这类不分页的文档只标提到报告的那一段，不会因为提到一次报告就把整章标上。
+**检测或审核报告页：**PDF 的页、PPT 的幻灯片命中就整页标 ⚠；Word 这类不分页的文档只标提到报告的那一段，不会因为提到一次报告就把整章标上。标题或原文写明“模板 / template”的，明确标为模板，只作流程参考，不作为实际检测、认证或验货结果的证明。
 
-**参考整理稿：**文件自己写着“内部审核版”“draft”“公开参考”“参考款”“参考供应商”“仅供参考”这类话，出现 3 次以上时，认作参考整理稿：从别家公开资料或旧稿整理的参考，不是公司自己的资料。
+**参考整理稿：**文件自己写着“内部审核版”“draft”“公开参考”“参考款”“参考供应商”这类话，出现 3 次以上时，认作参考整理稿，事实归属待确认。普通产品免责声明里的“仅供参考 / for reference only”不作为参考稿判据；参考或草稿标记不能证明资料属于第三方。显式 `doc_roles` 判断优先。
 - 入库可检索，状态“参考稿”，卡片上写明；每段带 `reference_draft` 标记，登记 ANM。
 - 整理页引用时必须带 ⚠，只能写成“参考资料显示……（待公司确认）”；选原文时排在公司自己的资料后面。
 - 判断错了在 kb-config.json 的 `doc_roles` 里改：`{"<item_id>": "original"}` 或 `"reference"`。
@@ -394,13 +395,16 @@
 
   选了 MinerU 的，等这份的 MinerU 初稿出来才列（`plan.json` 的 `skipped` 写“等 MinerU 初稿”）；选了 Reducto 的，B、C 页等 Reducto 读完才列（写“等 Reducto 结果”）。选了 AI 或 Reducto 的文件，C 页不进 MinerU 计划。
 - `plan` 由流水线自动运行：把挑出的页画成图（100 dpi），和这一页**现在的初稿**一起写进 `04_知识库构建/page-check/todo.jsonl`，附规则 `README.md`。初稿是文字层，加上 MinerU 识别、AI 读图读出的内容，各段标【MinerU 识别】【AI 读图】；`draft` 记初稿来自哪里。已经核对过的页不再列出；核对时还没有 MinerU 初稿、后来有了的页，再列一次。没装 PyMuPDF 时不做，校验给提醒。
-- AI 每页回答四项：`missing`（图上有、文字里没有的内容，逐字照抄）、`text_errors`（文字哪里和图上不一样）、`pairing`（一页多款时每款对应哪个款号）、`unclear`（原件本身看不出对应）。
+- AI 每页回答四项：`missing`（图上有、文字里没有的内容，逐字照抄）、`text_errors`（文字哪里和图上不一样）、`pairing`（一页多款时每款对应哪个款号）、`unclear`（原件本身看不出对应）。尺寸图另可选 `structure: 尺寸图`，只填 `drawing_model` 和 `structured` 图名；尺寸以原图为准，不抄尺寸、规格、孔位或角度，不配款号，`text_errors` 整项忽略（不标“以原图为准”、不登记 ANM），尺寸标注也不算作 `missing`。同页其他正文的漏字仍写 `missing`。
 - `collect` 之后：
   - `missing` 作为这一页的补充文字（定位 `page N check`，`engine: ai`，`checked: true`）存进 `mineru-units/`，标 ⚠“AI 看图补充，待核对”，登记 ANM。定位和 MinerU 的 `page N ocr` 分开，MinerU 读过的页上补的字和 MinerU 的内容并排保留，不会被 MinerU 覆盖。
   - `text_errors` 在这一页标 ⚠“以原图为准”，登记 ANM“页提取的文字和原图不一致”（和 AI / Reducto 识别的文字同一本台账，统一对照原页核对）。原文和 MinerU 初稿都不改，人对照原图定。
   - `pairing` 作为这一页的核对说明写在页标题下；`unclear` 的页标 ⚠“不要自行配对”，登记 CUS“款号和产品对应不清楚”，问客户。
   - 说明里带价格、条款等禁止内容时不写。
+- 尺寸图 `collect` 另存独立页级标签，来源页写一行“型号 的图名，尺寸见原图”并附原页图；型号不清楚时醒目标 ⚠“型号待确认”并登记 MAT。该页的尺寸标注不进入正文或 D 级，`text_errors` 存为空，不标“以原图为准”、不登记 ANM；同页非图纸正文漏字照常走 `missing`。单张尺寸图也按“型号-尺寸图”进入对应产品的 `90_素材/<产品>/尺寸图/`，型号待确认时使用“型号待确认-尺寸图”；已有图片名不改。
+  - 这一排除同样适用于已缓存的 MinerU、Reducto 整页结果及 Reducto 图纸描述，不仅限于原生文字层；平台缓存本身保留。图旁参数表、正文继续保留，不把整页参数表当作尺寸标注删除；已有独立人工整页校对稿不覆盖。
 - 核对结果存在 `page-check/results.json`，发布时存进知识库，重建时直接用。
+- 已完成并离开待核对清单的页，需要修订时用 `page_check.py collect --out <运行目录> --revise-checked --answer-file <修订答案.jsonl>`（可重复指定答案文件）。脚本核对原件哈希，从文字层和平台缓存重建该页文字，仍逐词校验结构稿；同页只保留最后一条答案，清空补字会撤掉旧补字，不改平台原稿。
 - 校验：挑出的页还有没核对的、又已经核对了一部分时，校验失败；一页都没核对时只提醒；配置里写 `"page_check": {"skip": "理由"}` 可以不做。
 
 **表格和流程：**格式可以整理，字一个不改、不加。
@@ -420,6 +424,7 @@
    - 转写内容入库时标 ⚠“AI 读图转写，待核对”，登记 ANM；整理页引用时也要带 ⚠。
    - 看过、确实没字的页记为已读，不再列为待识别。
    - 图片不出本机，由正在工作的 AI 读。之后 MinerU 读到的页会替换 AI 转写，AI 读过而 MinerU 没读到的页保留。
+   - 单张尺寸图在 `kind` 写“尺寸图”，只填 `drawing_model`、`drawing_name`，`text` 留空；正文与图纸同图时正文照常逐字写入 `text`。尺寸以原图为准。
 
 ## 可信级别
 
@@ -452,7 +457,7 @@
   - 找不到这样的表头行时（比如第一行就是表头的普通清单），整张照原样成一张表。
   - 隐藏的表不入库。这类表按普通资料的规则删报价金额和客户信息，不套用报价单的删列规则。
 - **报价条款**：英文付款条款（Payment term:、Advance payment 20%、30% deposit、80% before shipment）和贸易条款（Price term:、EXW、FOB、CIF、CFR、DDP、DAP）在所有资料里都删，删到所在的那一句或那一行。
-- **先分表型：**表头里有单价、报价、数量、金额、MOQ、起订这类列的是报价单，其余按产品清单处理。报价单标题写“报价单-<哈希>”，放进 `产品表/报价单/`。
+- **先分表型：**纯技术规格、尺寸重量和包装参数工作簿按 T2 来源资料完整保留，不套用报价产品行的字段白名单。保留原网格、空白分隔和横纵合并范围，不将共用参数归给首型号，也不把无表头数据行当表头；包装部件重量和装柜容量是技术参数。含价格、成本、订购数量、MOQ、付款或客户字段的混合表仍走逐格清理路径，不能凭技术文件名绕过。其余表头里有单价、报价、数量、金额、MOQ、起订这类列的是报价单，其余按产品清单处理。报价单标题写“报价单-<哈希>”，放进 `产品表/报价单/`。
 - **序号列不是款号：**“款号”列里全是 1、2、3 这种 1–3 位数字时，那是报价单的行号，去掉；去掉后只剩图片、没有描述和面料的行不入库。
 - 所有保留下来的行再合成一份 `产品表/00_产品表汇总.md`，见“来源层”。
 - 内容完全相同的另存副本只发布一份。
@@ -477,14 +482,18 @@
 - 识别结果长期存进 `05_数据与审核/70_构建状态/mineru-units/`（旧库里的 `02_源资料/20_MinerU按需提取/` 会在下次保存或恢复时自动搬过来）：
   - 每份文件一个 `<item_id>.json`，里面是按页的文字，给脚本用；不再生成给人看的 md，要看识别结果去净化原文或 `mineru-units/`。
 - 重跑时先读这里；有结果就不再上传。
-- 识别出的文字只补原文字层没有的行，英文词照样检查是否核实过。
+- 某页有非空的 MinerU 或 Reducto 整页识别结果时，来源层正文完整使用该结果，不再并入同页原生文字层（包括分栏和表格）；没有整页结果、结果为空或无法对应页码时维持原有处理。识别结果中的标题、正文、表格、列表、页眉和页脚均保留，不执行重复页眉页脚清理；价格、客户信息等既有敏感内容清理照常执行并留记录。AI 看图补充仍并排保留；已有人工整页校对稿单列“人工校对记录”，不覆盖或混入平台正文，英文词照样检查是否核实过。这里只选择正文来源，不改写或删除文字层与识别平台的原始 JSON 缓存；两平台同页的优先级不变（MinerU 优先）。
 
 ## Reducto
+
+- 用户明确要求整份文件进行平台对比时，可在 `reducto.full_document_item_ids` 列出对应编号；这些文件仍须选择 `reducto` 处理方式和获准上传，计划包含全部未解析页。默认仍仅解析难页，已解析缓存、样例门禁和批准范围照常生效。
+- 指定 `pdf_comparison`（`mineru_product_ids`、`reducto_product_ids`、`mineru_training_ids`）时，`render_kb.py` 在运行目录的 `平台提取对比/` 输出带平台标识的逐页原始提取稿和来源哈希清单；不混入原生文字层、不作为已核实知识发布。净化原文来源卡片及 OCR 内容同时标明平台。
+- 人工已核对同名但内容不同的 Word/PDF，可以将 PDF 编号放入 `separate_format_items`，避免按另存格式去重；此选项不跳过来源哈希或其他校验。
 
 - 首次设置：每台电脑运行一次 `scripts/setup_reducto.cmd`，Key 存在 Windows 用户环境变量 `REDUCTO_API_KEY`。`reducto_client.py probe` 只看本机；`health-check` 在线验证 Key 不扣额度，加 `--parse` 解析一页测试 PDF。
 - `reducto_ocr.py plan` 按 `page-triage.json` 列候选页：处理方式是“Reducto 难页 + AI 抽查”的文件（按类型或单个文件）里的 B、C 级页，减去 MinerU 读过的页和同一文件哈希下已经解析过的页。整份读不出内容、单独指定了 Reducto 的文件，所有页都列上（都是 C 级）；单独指定了 Reducto 的单张图片列 1 页，原图上传（上传时带扩展名，Reducto 按扩展名识别类型）。还没有分级时提示先跑流水线。`--samples` 只列还没定处理方式的各类样例的 B、C 页，给用户试读。PPT 先转成 PDF，页码和流水线一致。
 - `run` 只在 `kb-config.json` 有 `"reducto": {approved, approved_by, approved_at, scope}` 时上传，可选 `approved_item_ids`、`max_pages`；只解析列出的页（`page_range`），按原文件页码（`original_page`）存成 `page N ocr`、`engine: reducto` 到 `reducto-units/<item_id>.json`，含 `source_hash`、`pages_read`、`job_ids`。文件变了整份重读。
-- Figure 块是模型对图片的描述，不进正文，单独存在 `figures`，只用来对照。只有 Figure 的页不算读过，仍归 AI 读图。
+- Figure 块是模型对图片、图表的描述，原始结果仍单独存在 `figures`。来源页按原页码在独立的“⚠ Reducto 图表描述（待核对）”小节里展示，注明不是已核实原文、不是 OCR 转写，并标出 JSON 缓存和 `figures` 数组位置；同页完全相同的描述只显示一次。描述经过与正文相同的价格、客户信息等清理，始终保留待核对标记，不进公开导出，也不替换或混入 MinerU、Reducto OCR 或文字层正文。只有 Figure 的页仍不算读过，继续归 AI 读图。
 - 同一页有 MinerU 或 AI 的结果时以它们为准；Reducto 的文字入库标 ⚠“Reducto 识别，待对照原图核对”，算 `ai_read`。
 - 对照只看款号和数字（`120mm` 与 `120 mm`、`F-00053` 与 `F00053` 视为相同）。和 MinerU 不一致的页、没有 MinerU 时漏了文字层款号或数字的页升为 D 级，Reducto 只在图片描述里提到的款号也会进看图核对，附两边原文；只有 Reducto 读过、含款号或数字的页按 `reducto.check_share`（默认 0.3）抽查。差异写进 `reducto-diff.md`。
 - 结果长期存进 `05_数据与审核/70_构建状态/reducto-units/`，重跑时先读这里。

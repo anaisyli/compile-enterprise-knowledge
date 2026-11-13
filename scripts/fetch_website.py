@@ -314,6 +314,12 @@ def main() -> int:
     if args.browser_capture:
         imported = [import_capture(Path(p), config, store, pages) for p in args.browser_capture]
         report = {"imported": len(imported)}
+        previous_report = store / "fetch-report.json"
+        if previous_report.is_file():
+            previous = load_json(previous_report)
+            crawl_report = previous.get("last_crawl", previous)
+            if "fetched" in crawl_report:
+                report["last_crawl"] = crawl_report
     else:
         picture_index = store / "pictures.json"
         pictures = load_json(picture_index) if picture_index.is_file() else {}

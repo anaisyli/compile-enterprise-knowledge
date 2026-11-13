@@ -29,7 +29,7 @@ WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
     "cell-review/decisions.jsonl", "cell-review/sheet-columns.json", "cell-review/t3-audit.json",
-    "page-check/results.json", "sample-decisions.json", "reviewed-pages.json",
+    "page-check/results.json", "page-check/sampling.json", "sample-decisions.json", "reviewed-pages.json",
     # Picture names stay once given, and the AI's picture names are not redone.
     "picture-names.json", "picture-names/answers.json",
     # Home-page candidates the model picked, and which ones a person confirmed.

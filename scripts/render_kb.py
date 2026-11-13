@@ -36,6 +36,7 @@ from kb_common import (
     load_config,
     load_json,
     load_jsonl,
+    normalize_space,
     remaining_ocr_pages,
     safe_name,
     write_json,
@@ -136,7 +137,7 @@ def source_card(doc: dict[str, Any], status: str, issue_links: list[str], layout
                                                 "有人看过没问题后写进 review-decisions.json 的 approve_docs，才算有效。"
                                                 if doc.get("d_unapproved") else "已有人看过并批准。"))
     if doc.get("role") == "reference":
-        rows.append("> - ⚠ 参考整理稿：这份是从别家公开资料或旧稿整理出来的参考，不是公司自己的资料。"
+        rows.append("> - ⚠ 参考整理稿：这份标有参考或草稿属性，事实归属待公司确认。"
                     "里面的参数、款式不能直接当公司事实用；整理页引用时带 ⚠，并找公司自己的资料印证。")
     if layout == "columns":
         rows.append("> - 版面：同一页的文字按栏分段，款号和它下面的特点在同一段；原件没写款号的栏，就没有款号，不要套用别栏的。"
@@ -153,7 +154,8 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
         if flag["type"] == "unverified_name":
             notes.append(f"⚠ 含没核实的词：{'、'.join(flag['terms'][:6])}（{anm}）")
         elif flag["type"] == "report_page":
-            notes.append(f"⚠ 检测或审核报告页，引用前核对日期（{anm}）")
+            notes.append(f"⚠ 验货或检测报告模板，只作流程参考，不作为实际检测或认证证明（{anm}）" if flag.get("template")
+                         else f"⚠ 检测或审核报告页，引用前核对日期、主体和适用范围（{anm}）")
         elif flag["type"] == "screening_hint":
             notes.append(f"⚠ 初筛建议删除（{'、'.join(flag['terms'])}），整理时看是产品内容、规则也没发现价格或客户信息，保留；用前核对")
         elif flag["type"] == "brand_hidden":
@@ -164,7 +166,8 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
         elif flag["type"] == "ai_added":
             notes.append(f"⚠ AI 看图补充：提取的文字里没有、图上有的内容，待对照原图核对（{anm_ids.get('ai_read', '')}）")
         elif flag["type"] == "ai_read" and flag.get("reader") == "reducto":
-            notes.append(f"⚠ Reducto 识别，待对照原图核对（{anm}）")
+            label = "Reducto 图表描述" if block.get("figure_description") else "Reducto 识别"
+            notes.append(f"⚠ {label}，待对照原图核对（{anm}）")
         elif flag["type"] == "ai_read":
             notes.append(f"⚠ AI 读图转写，待对照原图核对（{anm}）")
     return "；".join(notes)
@@ -196,6 +199,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
     parts = [frontmatter(fields), "", f"# {doc['title']}", "", *card]
     current, table_columns, show_images, pending_marked, previous = None, [], False, set(), ""
     row_notes: dict[str, list[str]] = {}
+    figure_groups: set[str] = set()
 
     def flush_row_notes() -> None:
         # A table cell has no room for a sentence: what the ⚠ in a row means is said under the table.
@@ -205,7 +209,8 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             row_notes.clear()
 
     for block in blocks:
-        if block["group"] != current:
+        new_group = block["group"] != current
+        if new_group:
             flush_row_notes()
             current = block["group"]
             parts.extend(["", f"## {current}", ""])
@@ -214,7 +219,10 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             for note in page_notes.get(current, []) if not any(b.get('transcription_review') for b in blocks if b['group'] == current) else []:
                 parts.extend([f"> {line}" for line in note.splitlines()] + [""])
             if any(b.get('transcription_review') for b in blocks if b['group'] == current):
-                parts.extend(['> 已由 Agent 对照本页原图核对提取稿；原始提取及校正依据保留在构建审计记录。', ''])
+                review_message = ('> 本页平台识别正文保持原样，另附已有人工校对记录供对照；两者未合并。'
+                                  if any(b.get('reviewed_supplement') for b in blocks if b['group'] == current)
+                                  else '> 已由 Agent 对照本页原图核对提取稿；原始提取及校正依据保留在构建审计记录。')
+                parts.extend([review_message, ''])
                 for note in dict.fromkeys(b.get('transcription_review_note') for b in blocks
                                          if b['group'] == current and b.get('transcription_review_note')):
                     parts.extend([f'> {literal_dimensions(line)}' for line in note.splitlines()] + [''])
@@ -226,6 +234,15 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             cus = cus_ids.get(f"{doc['item_id']}:{'' if whole else hold}", "")
             parts.extend([f"> 🕒 待客户确认（{cus}）：{block['client_hold']}，回复前不要对外使用。", ""])
         note = flag_note(block, anm_ids)
+        if block.get("ocr"):
+            platform = {"reducto": "Reducto", "ai": "AI 看图"}.get(block.get("reader"), "MinerU")
+            if platform in {"MinerU", "Reducto"}:
+                detail = ("本页采用平台识别结果；尺寸图标注及图纸模型描述按规则排除，同页正文和表格保留"
+                          if any(b.get("dimension_drawing") for b in blocks if b["group"] == current)
+                          else "本页正文整页使用平台识别结果，不并入同页 PDF 原生文字层")
+                parts.extend([f"> 提取平台：{platform}（{detail}）", ""])
+            else:
+                parts.extend([f"> 提取平台：{platform}（与文件文字层分开保留）", ""])
         if block["kind"] == "row":
             if not table_columns:
                 group_rows = [b for b in blocks if b["group"] == current]
@@ -244,8 +261,34 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             parts.append("| " + " | ".join(row) + " |")
         elif block["kind"] == "point":
             parts.append(f"- [{block.get('scope', 'single_communication')}] {block['text']}" + (f" {note}" if note else ""))
+        elif block.get("reviewed_supplement"):
+            parts.extend(["### 人工校对记录（与平台正文分开）", "",
+                          "> 以下为旧库保留的逐页人工校对稿，供核对平台误读、遗漏和分页；未替换或混入上方平台正文。", ""])
+            if note:
+                parts.extend([f"> {note}", ""])
+            parts.extend([literal_dimensions(block["text"]), ""])
+        elif block.get("dimension_drawing"):
+            marker = "⚠ " if not block.get("drawing_model_confirmed") else ""
+            parts.append(f"{marker}{block['text']}，尺寸见原图")
+        elif block.get("figure_description"):
+            if current not in figure_groups:
+                figure_groups.add(current)
+                parts.extend(["### ⚠ Reducto 图表描述（待核对）", "",
+                              "> 以下为模型生成的图表描述，不是已核实原文，也不是 OCR 转写。", ""])
+            parts.extend([f"> 来源：`reducto-units/{doc['item_id']}.json`，`{block['figure_source_locator']}`",
+                          ">"])
+            if note:
+                parts.extend([f"> {note}", ">"])
+            parts.extend([f"> {literal_dimensions(line)}" for line in block["text"].splitlines()] + [""])
         else:
             text = block["text"]
+            # A Word section title is already printed as the heading above. Keep its
+            # flags, but print its words once. Later equal paragraphs remain intact.
+            if new_group and normalize_space(text) == normalize_space(current):
+                if note:
+                    parts.extend([f"> {note}", ""])
+                previous = block["locator"]
+                continue
             table = bool(TABLE_LOCATOR.search(block["locator"]))
             # The rest of a table a removed row split off joins the rows above it, so it stays one table.
             continued = table and block["locator"] == previous
@@ -264,6 +307,57 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
 
 def style_key(text: str) -> str:
     return re.sub(r"[\s\-_/]+", "", text).upper()
+
+
+def write_platform_comparison(run: Path, build: Path, docs: dict[str, dict[str, Any]],
+                              config: dict[str, Any], originals: dict[str, str]) -> None:
+    """Readable, literal platform drafts for an explicitly requested comparison.
+
+    These drafts stay in the run directory, apart from the cleaned knowledge base.
+    They never mix the native PDF text layer into either platform's output.
+    """
+    scope = config.get("pdf_comparison") or {}
+    if not scope:
+        return
+    root = run / "平台提取对比"
+    lines = ["# PDF 平台提取对比", "", "产品 PDF 按文件分组，各平台 5 份；培训 PDF 全部使用 MinerU。", "",
+             "以下为平台逐页返回的提取初稿，未混入 PDF 原生文字层，供与原件对照。看图核对结果及补充文字见净化原文；本目录保留平台初稿，不作为已核实知识使用。",
+             "原稿保留原件内容；正式净化原文另按知识库规则清理。不同文件分组用于观察效果，不代表同一文件的准确率对照。", "",
+             "| 文件 | 用途 | 提取平台 | 原件页数 | 返回正文页数 | 平台提取稿 |", "| --- | --- | --- | --- | --- | --- |"]
+    records = []
+    by_item = {d["item_id"]: d for d in docs.values()}
+    groups = [("MinerU", "mineru-units", scope.get("mineru_product_ids", []), "产品"),
+              ("Reducto", "reducto-units", scope.get("reducto_product_ids", []), "产品"),
+              ("MinerU", "mineru-units", scope.get("mineru_training_ids", []), "培训")]
+    for platform, folder, item_ids, purpose in groups:
+        for item_id in item_ids:
+            doc = by_item.get(item_id)
+            if not doc:
+                continue
+            path = build / folder / f"{item_id}.json"
+            record = load_json(path) if path.is_file() else {}
+            valid = record.get("source_hash") == doc.get("source_sha256") and record.get("source") == platform.lower()
+            units = [u for u in record.get("units", []) if u.get("engine") != "ai"] if valid else []
+            pages = {int(m.group(1)): u["text"] for u in units
+                     if (m := re.fullmatch(r"page (\d+) ocr", u["locator"]))}
+            relative = f"{platform}/{safe_name(doc['title'])}.md"
+            body = [f"# {doc['title']}", "", f"> 提取平台：**{platform}**", f"> 用途：{purpose} PDF 提取效果对比",
+                    f"> 资料编号：`{item_id}`", f"> 原件 SHA-256：`{doc['source_sha256']}`",
+                    "> 状态：平台返回初稿；核对补充和原件疑点见对应净化原文，本稿保留平台原样结果，不混入原生文字层。"]
+            if originals.get(doc["doc_id"]):
+                body.append(f"> [打开原件]({originals[doc['doc_id']]})")
+            for number in range(1, int(doc.get("pages") or max(pages, default=0)) + 1):
+                body.extend(["", f"## 第 {number} 页 · {platform}", "", pages.get(number) or "> 平台未返回本页正文，需对照原件。", ""])
+            for unit in units:
+                if not re.fullmatch(r"page \d+ ocr", unit["locator"]):
+                    body.extend(["", f"## {unit['locator']} · {platform}", "", unit["text"], ""])
+            write_text(root / relative, "\n".join(body) + "\n")
+            lines.append(f"| {doc['title']} | {purpose} | {platform} | {doc.get('pages') or ''} | {sum(bool(t.strip()) for t in pages.values())} | [{platform} 提取稿]({relative}) |")
+            records.append({"item_id": item_id, "platform": platform, "purpose": purpose, "source_hash": doc["source_sha256"],
+                            "expected_pages": doc.get("pages"), "text_pages": sorted(n for n,t in pages.items() if t.strip()),
+                            "record_matches_source": valid, "file": relative})
+    write_text(root / "00_对比目录.md", "\n".join(lines) + "\n")
+    write_json(root / "comparison-manifest.json", records)
 
 
 def product_master(kept: list[dict[str, Any]], docs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -449,6 +543,8 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
             detail = f"{result['pairing']}。" if result.get("pairing") else ""
             if "不作分配" in detail or "归属不清" in detail:
                 page.append(f"⚠ 看图核对：{detail}款号位置已确认，但特征归属不清；保留原图共用文字，不自行分配（{gov['cus_ids'].get('pairing', '')}）")
+            elif result.get("structure") == "表格":
+                page.append(f"⚠ 看图核对：{detail}原件内容的对应关系尚待客户确认，具体疑点见本页核对说明；不要自行确定对应关系（{gov['cus_ids'].get('pairing', '')}）")
             else:
                 page.append(f"⚠ 看图核对：{detail}原件上看不出款号和产品的对应，不要自行配对（{gov['cus_ids'].get('pairing', '')}）")
         elif result.get("pairing"):
@@ -620,7 +716,7 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
     return "；".join(p for p in parts if p) + (f"。{advice}" if advice else "")
 
 
-def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str]) -> dict[str, str]:
+def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False) -> dict[str, str]:
     """doc_id -> link that opens the original file, under a name without the customer in it.
 
     Each original gets a second name in the package, 审计记录/按知识库名字/<knowledge-base name>,
@@ -631,19 +727,21 @@ def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order:
     links: dict[str, str] = {}
     for doc_id in order:
         doc = docs[doc_id]
-        link = alias_link(routes.get(doc["item_id"], {}), Path(doc["file_name"]).stem)
+        link = alias_link(routes.get(doc["item_id"], {}), Path(doc["file_name"]).stem, read_only)
         if link:
             links[doc_id] = link
     return links
 
 
-def alias_link(route: dict[str, Any], stem: str) -> str:
+def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str:
     """The original's second name, <stem><its suffix>, in the package's alias folder; "" when none can be made."""
     if not route.get("package") or not route.get("path"):
         return ""
     source = Path(route["package"]) / route["path"]
     alias = Path(route["package"]) / ALIAS_FOLDER / f"{stem}{source.suffix}"
     try:
+        if read_only:
+            return alias.resolve().as_uri() if alias.exists() and alias.samefile(source) else ""
         if alias.exists() and not alias.samefile(source):
             alias.unlink()  # The name now belongs to another file, or the original was replaced.
         if not alias.exists():
@@ -654,7 +752,7 @@ def alias_link(route: dict[str, Any], stem: str) -> str:
         return ""
 
 
-def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str]) -> dict[str, str]:
+def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False) -> dict[str, str]:
     """doc_id -> link to the PDF of the same document ("" when the PDF has no alias), for pages kept from Word or PowerPoint."""
     page_of = {docs[d]["item_id"]: d for d in order}
     twins: dict[str, str] = {}
@@ -662,7 +760,7 @@ def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: l
         doc_id = page_of.get(route.get("same_as") or "")
         if route.get("reason") == "other_format" and doc_id:
             # The PDF's alias takes the page's name, so the two originals sort side by side.
-            twins[doc_id] = alias_link(route, Path(docs[doc_id]["file_name"]).stem)
+            twins[doc_id] = alias_link(route, Path(docs[doc_id]["file_name"]).stem, read_only)
     return twins
 
 
@@ -820,7 +918,8 @@ def main() -> int:
                            status_info, (passed or args.skip_t3_gate, reason), progress_of(run), effective,
                            show=lambda name: by_name.get(name, "（原名见初筛包对照表）"),
                            own_domains={d.casefold() for d in config.get("own_domains", [])},
-                           own_contacts=config.get("own_contacts", []))
+                           own_contacts=config.get("own_contacts", []),
+                           client_confirmation=config.get("client_confirmation"))
     cleanup_record(build, blocks, docs)
     issues: dict[str, list[str]] = defaultdict(list)
     for item_key, record_id in gov["cus_items"].items():
@@ -830,8 +929,9 @@ def main() -> int:
     published, statuses = {}, {}
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
-    originals = make_aliases(routes, docs, order)
-    twins = twin_links(routes, docs, order)
+    package_read_only = bool(config.get("package_read_only"))
+    originals = make_aliases(routes, docs, order, package_read_only)
+    twins = twin_links(routes, docs, order, package_read_only)
     # Pictures are named before pages are written, so every page links the same name.
     terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
     forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))
@@ -872,8 +972,18 @@ def main() -> int:
         doc, members = docs[doc_id], by_doc[doc_id]
         status = doc_status(doc, members, effective)
         links = sorted(set(issues.get(doc["item_id"], [])) | {gov["anm_ids"][f["type"]] for b in members for f in b.get("flags", []) if f["type"] in gov["anm_ids"]})
-        card = source_card(doc, status, links, status_info.get(doc["item_id"], {}).get("layout", ""), originals.get(doc_id, ""),
-                           twins.get(doc_id))
+        method = method_of(doc_type(doc), load_decisions(build), doc["item_id"])
+        done = False
+        if method in {"mineru", "reducto"}:
+            platform = "MinerU" if method == "mineru" else "Reducto"
+            record_path = build / f"{method}-units" / f"{doc['item_id']}.json"
+            record = load_json(record_path) if record_path.is_file() else {}
+            done = record.get("source") == method and record.get("source_hash") == doc.get("source_sha256")
+        # Column layout describes the native PDF layer, not a platform's page reading.
+        layout = "" if done else status_info.get(doc["item_id"], {}).get("layout", "")
+        card = source_card(doc, status, links, layout, originals.get(doc_id, ""), twins.get(doc_id))
+        if method in {"mineru", "reducto"}:
+            card.append(f"> - 指定解析平台：{platform}；" + ("已取得平台提取稿；有非空整页结果的页，正文整页使用平台识别结果，不并入同页 PDF 原生文字层。" if done else "尚未取得匹配本版原件的平台提取稿。"))
         info = status_info.get(doc["item_id"], {})
         pictures = {page_group(info, page): name for page, name in info.get("page_images", {}).items()
                     if (doc_id, page_group(info, page)) not in unsafe and name in PICTURE_FILES}
@@ -882,11 +992,13 @@ def main() -> int:
         published[doc_id], statuses[doc_id] = doc_path(doc), status
 
     write_table_summary(clean, visible, docs, statuses)
+    write_platform_comparison(run, build, docs, config, originals)
     # The site view also helps while only part is extracted: it shows what is there and what still waits.
     write_site(build, config, routes, docs, order, statuses, originals, media, pictures_named, forbidden, escape_cell)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
-    write_name_maps(routes, docs, published, statuses, same_content)
+    if not package_read_only:
+        write_name_maps(routes, docs, published, statuses, same_content)
     write_json(build / "samples-waiting.json", write_plan_page(build, routes, docs, published, statuses, originals, config, status_info))
     write_picture_index(build, pictures_named, docs, escape_cell, forbidden)
     write_exports(build, visible, docs, styles, statuses)

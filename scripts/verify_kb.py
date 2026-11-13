@@ -30,6 +30,9 @@ from kb_common import (
     load_units,
     normalize_space,
     parse_frontmatter,
+    preferred_page_units,
+    reducto_figure_units,
+    suppress_drawing_dimensions,
     sha256_file,
     write_json,
     write_text,
@@ -197,6 +200,8 @@ def main() -> int:
         if item_id not in units_by_item:
             dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
             units = reviewed_units(build, item_id, doc['source_sha256'], load_units(dirs, item_id))
+            if doc.get("origin") != "website":
+                units.extend(reducto_figure_units(build, item_id, doc.get("original_name") or ""))
             units_by_item[item_id] = squeeze(" ".join(u["text"] for u in units))
         source = units_by_item[item_id]
         # Non-product workbook sheets are rendered as Markdown tables.  The pipes,
@@ -233,7 +238,7 @@ def main() -> int:
                     errors.append(f"text not in source: {doc['title']} {block['locator']}")
                     break
 
-    # Nothing vanishes silently: each source line is kept, held, or a recognised footer.
+    # Each selected source line is kept or held. Only native-text footers may be omitted.
     for doc in docs.values():
         if doc["tier"] not in ("T1", "T2"):
             continue
@@ -242,7 +247,12 @@ def main() -> int:
         accounted_ocr = ocr_format_key("\n".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
         units = reviewed_units(build, doc['item_id'], doc['source_sha256'], load_units(dirs, doc['item_id']))
+        if doc.get("origin") != "website":
+            units.extend(reducto_figure_units(build, doc['item_id'], doc.get("original_name") or ""))
+        units = preferred_page_units(units)
+        units = suppress_drawing_dimensions(units)
         for unit in units:
+            platform_page = bool(re.fullmatch(r"(?:page|slide) \d+ ocr", unit["locator"])) and unit.get("engine") in {None, "", "mineru", "reducto"}
             sheet = SHEET_LOCATOR.match(unit["locator"])
             if sheet and sheet.group(1) != "visible":
                 continue  # Hidden sheets never enter.
@@ -263,7 +273,7 @@ def main() -> int:
                 text = normalize_space(line)
                 if unit["locator"].endswith(" ocr") and ocr_format_key(text) in accounted_ocr:
                     continue  # The same words are present; only OCR list formatting differs.
-                if text and squeeze(text) not in accounted and not FURNITURE.search(text) and doc.get("origin") != "website":
+                if text and squeeze(text) not in accounted and (platform_page or not FURNITURE.search(text)) and doc.get("origin") != "website":
                     errors.append(f"source line lost: {doc['title']} {unit['locator']}")
                     break
 

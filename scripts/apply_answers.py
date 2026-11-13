@@ -164,6 +164,9 @@ def main() -> int:
         # Each answerable row has its own number (P-007-CUS-002.1), even inside a grouped entry.
         records = {item["sub_id"]: {**item, "id": item["sub_id"]}
                    for r in load_json(build / "governance.json").get("CUS", []) for item in r.get("items", [])}
+        records.update({item["client_id"]: {**item, "id": item["sub_id"]}
+                        for r in load_json(build / "governance.json").get("CUS", []) for item in r.get("items", [])
+                        if item.get("client_id")})
         if args.release_awaiting_overrides:
             # Resolved CUS entries disappear from governance.json; their registered IDs persist.
             registry_path = build / "governance-ids.json"
@@ -193,7 +196,7 @@ def main() -> int:
         if not answer or not record:
             continue
         decision = normalized(answer)
-        if not record.get("item_id"):
+        if not record.get("item_id") or record.get("answer_type") == "text":
             # Which fabric, which year: a person decides, the build does not.
             notes.append({"id": record["id"], "question": record["question"], "answer": answer,
                           "at": datetime.now().isoformat(timespec="seconds")})

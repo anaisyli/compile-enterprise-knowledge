@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,10 +14,85 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_extensions import Base, run  # noqa: E402
+from page_check import collect, laid_out  # noqa: E402
+from kb_common import sha256_file  # noqa: E402
+
+
+class CheckedRevisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.build = self.root / "build"
+        self.folder = self.build / "page-check"
+        self.folder.mkdir(parents=True)
+        self.source = self.root / "source.pdf"
+        self.source.write_bytes(b"unchanged original")
+        self.save("routes.json", {"a1": {"package": str(self.root), "path": self.source.name,
+                                         "source_hash": sha256_file(self.source)}})
+        self.save("package-text/a1.json", {"units": [{"locator": "page 1", "text": "Valve DN50"}]})
+        self.save("mineru-units/a1.json", {"units": [{"locator": "page 1 check", "text": "OLD",
+                                                    "engine": "ai", "checked": True}]})
+        self.save("page-check/results.json", {"a1|page 1": {"item_id": "a1", "unit": "page", "page": 1,
+                    "reasons": ["抽查"], "draft": ["文字层"], "unclear": True}})
+        (self.folder / "todo.jsonl").write_text("", encoding="utf-8")
+        self.answer = self.folder / "answer-revised.jsonl"
+        self.record = {"key": "a1|page 1", "missing": "", "unclear": False,
+                       "structure": "表格", "structured": "| Valve | DN50 |"}
+        self.write_answer()
+
+    def save(self, name: str, value: dict) -> None:
+        path = self.build / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def write_answer(self) -> None:
+        self.answer.write_text(json.dumps(self.record) + "\n", encoding="utf-8")
+
+    def test_explicit_revision_reopens_checked_page_and_removes_superseded_addition(self) -> None:
+        report = collect(self.build, revise_checked=True, answer_files=[self.answer])
+        self.assertEqual((report["revised"], report["rejected"], report["left"]), (1, [], 0))
+        result = json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]
+        self.assertFalse(result["unclear"])
+        self.assertEqual(result["structured"], "| Valve | DN50 |")
+        self.assertEqual(json.loads((self.build / "mineru-units/a1.json").read_text(encoding="utf-8"))["units"], [])
+
+    def test_without_revision_mode_checked_result_stays_unchanged(self) -> None:
+        report = collect(self.build)
+        self.assertEqual(report["revised"], 0)
+        self.assertTrue(json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]["unclear"])
+
+    def test_revised_structure_cannot_cite_invented_or_superseded_words(self) -> None:
+        self.record["structured"] = "| Valve | Invented | OLD |"
+        self.write_answer()
+        collect(self.build, revise_checked=True)
+        result = json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]
+        self.assertEqual(result["structured"], "")
+        self.assertEqual(result["structured_refused"], ["Invented", "OLD"])
+
+    def test_changed_original_blocks_revision(self) -> None:
+        self.source.write_bytes(b"changed")
+        report = collect(self.build, revise_checked=True)
+        self.assertEqual(report["rejected"], ["a1|page 1"])
+        self.assertEqual(report["revised"], 0)
+
+    def test_revision_does_not_accept_unknown_page(self) -> None:
+        self.record["key"] = "a1|page 2"
+        self.write_answer()
+        report = collect(self.build, revise_checked=True)
+        self.assertEqual(report["rejected"], ["a1|page 2"])
 
 
 @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "PyMuPDF is not installed")
 class PageCheckTests(Base):
+    def test_structured_table_cells_can_use_line_breaks_without_weakening_source_checks(self) -> None:
+        accepted, refused = laid_out("| Alloy<br>Stellite |", "Alloy Stellite")
+        self.assertEqual(accepted, "| Alloy<br>Stellite |")
+        self.assertEqual(refused, [])
+        accepted, refused = laid_out("| Alloy<br>Invented |", "Alloy Stellite")
+        self.assertEqual(accepted, "")
+        self.assertEqual(refused, ["Invented"])
+
     def setUp(self) -> None:
         super().setUp()
         self.clear_catalog_pending()
@@ -40,9 +116,49 @@ class PageCheckTests(Base):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
     def answer(self, **fields) -> None:
-        record = {"key": "a1|page 1", "missing": "", "text_errors": "", "pairing": "", "unclear": False, **fields}
+        record = {"key": "a1|page 1", "missing": "", "text_errors": "", "pairing": "", "unclear": False,
+                  "structure": "", "structured": "", "drawing_model": "", **fields}
         (self.build / "page-check" / "answer-001.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
         self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
+
+    def test_dimension_drawing_adds_only_caption_keeps_body_and_skips_dimension_text(self) -> None:
+        (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": [
+            {"locator": "page 1", "text": "SHERPA JACKET\nDN≤50\n619.88\nNormal page explanation"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        self.pipeline()
+        self.answer(structure="尺寸图", structured="外形及安装尺寸图", drawing_model="YFD71XA",
+                    pairing="左边是型号 A，右边是型号 B", unclear=True, missing="DN≤50\nR150\nΦD=619.88",
+                    text_errors="SHERPA 印成了 SHAPER")
+        self.assertEqual(self.pipeline().returncode, 0)
+        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+        self.assertIn("YFD71XA 的外形及安装尺寸图，尺寸见原图", page)
+        self.assertIn("Normal page explanation", page)
+        self.assertNotIn("DN≤50", page)
+        self.assertNotIn("619.88", page)
+        self.assertNotIn("R150", page)
+        self.assertNotIn("ΦD", page)
+        self.assertNotIn("看图核对：左边是型号", page)
+        self.assertNotIn("以原图为准", page)
+        results = json.loads((self.build / "page-check" / "results.json").read_text(encoding="utf-8"))
+        self.assertTrue(results["a1|page 1"]["dimension_drawing"])
+        self.assertEqual(results["a1|page 1"]["text_errors"], "")
+        self.assertFalse(results["a1|page 1"]["unclear"])
+        self.assertTrue(results["a1|page 1"]["drawing_model_confirmed"])
+        self.assertNotIn("第 1 页提取的文字和原图不一致",
+                         next((self.build / "vault").rglob("01_源文与事实异常台账.md")).read_text(encoding="utf-8"))
+        checked = run("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
+                      "--out", str(self.out), "--config", str(self.config))
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_unknown_drawing_model_is_marked_and_registered_in_mat(self) -> None:
+        self.pipeline()
+        self.answer(structure="尺寸图", structured="安装尺寸图", drawing_model="型号待确认")
+        self.assertEqual(self.pipeline().returncode, 0)
+        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+        self.assertIn("⚠ 型号待确认 的安装尺寸图，尺寸见原图", page)
+        ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
+        self.assertIn("尺寸图型号待确认", ledger)
+        self.assertIn("第 1 页", ledger)
 
     def test_a_picture_page_is_picked_and_what_it_shows_is_added_marked(self) -> None:
         self.pipeline()
@@ -69,6 +185,53 @@ class PageCheckTests(Base):
         self.assertIn("页提取的文字和原图不一致", anm)
         self.assertRegex(page, r"以原图为准.*ANM-\d{3}")
         self.assertIn("款号和产品对应不清楚", ledgers)
+
+    def test_revised_answers_add_only_the_final_page_transcription(self) -> None:
+        self.pipeline()
+        first = {"key": "a1|page 1", "missing": "NTX S-099 WRONG DRAFT", "text_errors": "", "pairing": "", "unclear": False}
+        final = {**first, "missing": "NTX S-100 SHERPA VEST", "unclear": True}
+        folder = self.build / "page-check"
+        (folder / "answer-001.jsonl").write_text(json.dumps(first) + "\n", encoding="utf-8")
+        (folder / "answer-002.jsonl").write_text(json.dumps(final) + "\n", encoding="utf-8")
+        result = run("page_check.py", "collect", "--out", str(self.out))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        units = json.loads((self.build / "mineru-units/a1.json").read_text(encoding="utf-8"))["units"]
+        additions = [u for u in units if u["locator"] == "page 1 check"]
+        self.assertEqual([u["text"] for u in additions], ["NTX S-100 SHERPA VEST"])
+        answers = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+        self.assertTrue(answers["a1|page 1"]["unclear"])
+
+    def test_a_previously_accepted_answer_is_kept_when_the_page_leaves_the_plan(self) -> None:
+        self.pipeline()
+        self.answer(missing="NTX S-100 SHERPA VEST")
+        folder = self.build / "page-check"
+        (folder / "todo.jsonl").write_text("", encoding="utf-8")
+        result = run("page_check.py", "collect", "--out", str(self.out))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["rejected"], [])
+        self.assertIn("a1|page 1", json.loads((folder / "results.json").read_text(encoding="utf-8")))
+
+    def test_text_page_sample_does_not_expand_on_every_rebuild(self) -> None:
+        import pymupdf
+        document = pymupdf.open()
+        units = []
+        for number in range(1, 11):
+            text = f"SHERPA JACKET technical information page {number}"
+            document.new_page().insert_text((40, 40), text)
+            units.append({"locator": f"page {number}", "text": text})
+        document.save(str(self.package / "A/Catalog.pdf"))
+        document.close()
+        (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": units}), encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        picked = self.todo()
+        self.assertEqual(len(picked), 1)
+        folder = self.build / "page-check"
+        (folder / "answer-001.jsonl").write_text(json.dumps({"key": picked[0]["key"], "missing": "", "text_errors": "", "pairing": "", "unclear": False}) + "\n", encoding="utf-8")
+        self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual(self.todo(), [])
+        self.assertEqual(self.pipeline().returncode, 0)
+        self.assertEqual(self.todo(), [])
 
     def test_unchecked_pages_are_reported_and_half_done_fails(self) -> None:
         self.pipeline()
@@ -152,7 +315,10 @@ class PageCheckTests(Base):
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
         self.assertIn("NTX S-100 SHERPA VEST", page)
         self.assertIn("Reducto 识别，待对照原图核对", page)
-        self.assertNotIn("Photo of a jacket", page)  # The model's picture description is never published.
+        transcript, description = page.split("### ⚠ Reducto 图表描述（待核对）", 1)
+        self.assertNotIn("Photo of a jacket", transcript)
+        self.assertIn("Photo of a jacket", description)
+        self.assertIn("不是已核实原文，也不是 OCR 转写", description)
 
     def test_a_file_read_by_reducto_waits_for_it_and_its_b_page_is_planned_but_nothing_sent_without_approval(self) -> None:
         self.build.mkdir(parents=True, exist_ok=True)

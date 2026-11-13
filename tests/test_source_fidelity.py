@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -8,12 +10,145 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from source_fidelity import literal_dimensions, merged_sheet_table, reviewed_units  # noqa: E402
+from source_fidelity import collect_reviews, literal_dimensions, merged_sheet_table, reviewed_units  # noqa: E402
+from kb_common import BUILD_DIRECTORY, sha256_file, write_json  # noqa: E402
 from verify_kb import squeeze  # noqa: E402
 from extract_blocks import configured_route  # noqa: E402
 
 
 class SourceFidelityTests(unittest.TestCase):
+    def test_read_only_package_never_creates_or_replaces_original_aliases(self):
+        from render_kb import ALIAS_FOLDER, alias_link
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp)
+            (package / 'original.docx').write_bytes(b'original')
+            route = {'package': str(package), 'path': 'original.docx'}
+            self.assertEqual(alias_link(route, 'clean', read_only=True), '')
+            self.assertFalse((package / ALIAS_FOLDER).exists())
+            alias = package / ALIAS_FOLDER / 'clean.docx'
+            alias.parent.mkdir(parents=True)
+            alias.write_bytes(b'unrelated existing file')
+            self.assertEqual(alias_link(route, 'clean', read_only=True), '')
+            self.assertEqual(alias.read_bytes(), b'unrelated existing file')
+
+    def make_review_fixture(self, root):
+        out = root / 'run'
+        build = out / BUILD_DIRECTORY
+        build.mkdir(parents=True)
+        package = root / 'package'
+        package.mkdir()
+        source = package / 'original.docx'
+        source.write_bytes(b'original source')
+        image = build / 'raw-image.png'
+        image.write_bytes(b'original page image')
+        record = {'locator': 'image 2', 'text': '123.4mm', 'reviewed_by': 'independent Agent',
+                  'source_sha256': sha256_file(source), 'image_sha256': sha256_file(image),
+                  'image_file': str(image)}
+        write_json(build / 'routes.json', {'sample': {'package': str(package), 'path': source.name,
+                   'source_hash': sha256_file(source)}})
+        patch_file = out / 'patch.json'
+        write_json(patch_file, {'sample': [record]})
+        return out, build, source, record, patch_file
+
+    def test_collect_checks_evidence_and_makes_portable_backed_up_reviews(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            self.assertEqual(collect_reviews(out, [patch_file])['added'], 1)
+            self.assertFalse((build / 'reviewed-pages.json').exists())
+            collect_reviews(out, [patch_file], apply=True)
+            saved = json.loads((build / 'reviewed-pages.json').read_text(encoding='utf-8'))['sample'][0]
+            self.assertFalse(Path(saved['image_file']).is_absolute())
+            self.assertEqual(sha256_file(build / saved['image_file']), record['image_sha256'])
+            record['text'] = '123.5mm'
+            write_json(patch_file, {'sample': [record]})
+            with self.assertRaisesRegex(ValueError, 'Already reviewed'):
+                collect_reviews(out, [patch_file], apply=True)
+            self.assertEqual(collect_reviews(out, [patch_file], apply=True, replace_reviewed=True)['replaced'], 1)
+            self.assertEqual(len(list(build.glob('reviewed-pages.before-collect-*.bak'))), 1)
+            self.assertEqual(source.read_bytes(), b'original source')
+
+    def test_collect_fails_without_mutation_on_stale_source_or_conflicting_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            conflicting = out / 'conflicting.json'
+            write_json(conflicting, {'sample': [{**record, 'text': '999mm'}]})
+            with self.assertRaisesRegex(ValueError, 'Conflicting review patches'):
+                collect_reviews(out, [patch_file, conflicting], apply=True)
+            source.write_bytes(b'changed source')
+            with self.assertRaisesRegex(ValueError, 'Changed reviewed source'):
+                collect_reviews(out, [patch_file], apply=True)
+            self.assertFalse((build / 'reviewed-pages.json').exists())
+
+    def test_explicit_photo_exclusion_retracts_wrong_text_but_keeps_review_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            record.update(text='', exclude_kind='no_source_text', excluded_reason='Photo has no dimension labels')
+            write_json(patch_file, {'sample': [record]})
+            self.assertEqual(collect_reviews(out, [patch_file], apply=True)['excluded'], 1)
+            result = reviewed_units(build, 'sample', sha256_file(source), [
+                {'locator': 'image 1', 'text': 'keep'}, {'locator': 'image 2 check', 'text': 'wrong dimensions'}])
+            self.assertEqual([u['text'] for u in result], ['keep', ''])
+            self.assertEqual(result[1]['review_exclusion'], 'no_source_text')
+            self.assertTrue((build / json.loads((build / 'reviewed-pages.json').read_text(encoding='utf-8'))['sample'][0]['image_file']).exists())
+            record['text'] = 'not empty'
+            write_json(patch_file, {'sample': [record]})
+            with self.assertRaisesRegex(ValueError, 'Invalid reviewed exclusion'):
+                collect_reviews(out, [patch_file], apply=True, replace_reviewed=True)
+
+    def test_existing_page_review_stays_separate_from_platform_body(self):
+        from extract_blocks import document_blocks
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            record.update(locator='page 2', text='Human reviewed transcript')
+            write_json(patch_file, {'sample': [record]})
+            collect_reviews(out, [patch_file], apply=True)
+            platform = {'locator': 'page 2 ocr', 'engine': None, 'text': 'Platform full-page body'}
+            units = reviewed_units(build, 'sample', sha256_file(source), [
+                {'locator': 'page 2 col 1', 'text': 'Native text must not be mixed'}, platform])
+            blocks = document_blocks('doc', 'sample', units)
+            self.assertEqual([b['locator'] for b in blocks], ['page 2 ocr', 'page 2 review'])
+            self.assertEqual([b['text'] for b in blocks], [platform['text'], record['text']])
+            self.assertTrue(blocks[1]['reviewed_supplement'])
+            self.assertEqual([b['group'] for b in blocks], ['第 2 页', '第 2 页'])
+
+    def test_platform_draft_keeps_literal_text_and_rejects_stale_results(self) -> None:
+        from render_kb import write_platform_comparison
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            build = run / "build"
+            folder = build / "mineru-units"
+            folder.mkdir(parents=True)
+            path = folder / "a1.json"
+            record = {"source": "mineru", "source_hash": "h1", "units": [
+                {"locator": "page 1 ocr", "text": "1.76 MPa"},
+                {"locator": "page 2 check", "text": "AI addition", "engine": "ai"}]}
+            path.write_text(json.dumps(record), encoding="utf-8")
+            docs = {"d1": {"doc_id": "d1", "item_id": "a1", "title": "sample", "source_sha256": "h1", "pages": 2}}
+            config = {"pdf_comparison": {"mineru_product_ids": ["a1"]}}
+            write_platform_comparison(run, build, docs, config, {})
+            output = run / "平台提取对比/MinerU/sample.md"
+            text = output.read_text(encoding="utf-8")
+            self.assertIn("1.76 MPa", text)
+            self.assertNotIn("AI addition", text)
+            self.assertIn("平台未返回本页正文", text)
+            record["source_hash"] = "stale"
+            path.write_text(json.dumps(record), encoding="utf-8")
+            write_platform_comparison(run, build, docs, config, {})
+            self.assertNotIn("1.76 MPa", output.read_text(encoding="utf-8"))
+
+    def test_section_title_prints_once_but_a_later_equal_paragraph_is_kept(self) -> None:
+        from render_kb import render_doc
+        doc = {"doc_id": "d1", "title": "Word sample", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "a1", "source_sha256": "h1"}
+        title = "11. OEM / Private Label & Customization"
+        base = {"kind": "text", "group": title, "status": "kept", "flags": []}
+        blocks = [{**base, "locator": "para 1", "text": title},
+                  {**base, "locator": "para 2", "text": "OEM available."}]
+        result = render_doc(doc, blocks, "有效", [], {}, {})
+        self.assertEqual(result.count(title), 1)
+        result = render_doc(doc, blocks + [{**base, "locator": "para 3", "text": title}], "有效", [], {}, {})
+        self.assertEqual(result.count(title), 2)
+
     def test_literal_star_is_equal_to_markdown_escaped_star_during_source_check(self) -> None:
         self.assertEqual(squeeze(r'590*550*1750MM'), squeeze('590*550*1750MM'))
         self.assertNotEqual(squeeze('590*550*1750MM'), squeeze('5905501750MM'))

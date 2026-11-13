@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from test_pipeline import build_package  # noqa: E402
 import mineru_client  # noqa: E402
 from mineru_ocr import page_units  # noqa: E402
-from extract_blocks import ocr_additions  # noqa: E402
+from extract_blocks import document_blocks, ocr_additions  # noqa: E402
 
 
 def run(script: str, *args: str) -> subprocess.CompletedProcess:
@@ -82,12 +82,53 @@ class MinerUTests(Base):
         self.assertNotEqual(checked.returncode, 0)
         self.assertIn("source line lost", checked.stdout)
 
-    def test_ocr_markdown_bullets_are_not_new_source_content(self) -> None:
+    def test_ai_ocr_markdown_bullets_are_not_new_source_content(self) -> None:
         units = [{"locator": "page 1", "text": "• MACHINE WASHABLE\n• REVERSIBLE DESIGN\nNTX S-018"},
-                 {"locator": "page 1 ocr", "text": "\\- MACHINE WASHABLE - REVERSIBLE DESIGN\nNTX S-018\nNTX S-019"}]
+                 {"locator": "page 1 ocr", "text": "\\- MACHINE WASHABLE - REVERSIBLE DESIGN\nNTX S-018\nNTX S-019",
+                  "engine": "ai"}]
         result = ocr_additions(units)
         self.assertEqual(result[0], units[0])
         self.assertEqual(result[1]["text"], "NTX S-019")
+
+    def test_full_page_ocr_replaces_native_columns_and_tables_but_not_checks(self) -> None:
+        for engine in (None, "", "mineru", "reducto"):
+            with self.subTest(engine=engine):
+                reading = {"locator": "page 2 ocr", "engine": engine,
+                           "text": "VALVE SERIES\n\n| Model | Size |\n| --- | --- |\n| V-100 | DN50 |"}
+                untouched = {"locator": "page 3 col 1", "text": "Unrecognised page stays"}
+                check = {"locator": "page 2 check", "text": "Image label", "engine": "ai", "checked": True}
+                units = [{"locator": "page 2", "text": "VALVE SERIES"},
+                         {"locator": "page 2 col 1", "text": "100 V- DN 50 wrong order"},
+                         {"locator": "page 2 col 2", "text": "VALVE SERIES"},
+                         {"locator": "page 2 table 1", "text": "| Model | Size |"},
+                         check, untouched, reading]
+                self.assertEqual(ocr_additions(units), [check, reading, untouched])
+                self.assertEqual(units[-1], reading)
+                blocks = document_blocks("doc", "item", units)
+                self.assertEqual([b["locator"] for b in blocks], ["page 2 check", "page 2 ocr", "page 3 col 1"])
+                self.assertEqual(blocks[1]["text"], reading["text"])
+                self.assertTrue(blocks[1]["ocr"])
+                self.assertEqual(blocks[1]["reader"], engine)
+                self.assertEqual(blocks[1]["ai_read"], engine == "reducto")
+
+    def test_empty_or_unpaged_ocr_does_not_replace_native_text(self) -> None:
+        for reading in ({"locator": "page 1 ocr", "text": " \n", "engine": "reducto", "empty": True},
+                        {"locator": "mineru ocr", "text": "Whole file, no page mapping"}):
+            with self.subTest(locator=reading["locator"]):
+                native = {"locator": "page 1 col 1", "text": "Native page stays"}
+                blocks = document_blocks("doc", "item", [native, reading])
+                self.assertIn(native["text"], [b["text"] for b in blocks])
+
+    def test_platform_pages_keep_repeated_headers_and_footers(self) -> None:
+        from guard_blocks import strip_repeated_lines
+        for engine in (None, "", "mineru", "reducto"):
+            with self.subTest(engine=engine):
+                blocks = document_blocks("doc", "item", [
+                    {"locator": f"page {page} ocr", "engine": engine,
+                     "text": f"VALVE HEADER\nPage {page} specifications\nwww.example.com"}
+                    for page in range(1, 4)])
+                self.assertEqual(strip_repeated_lines(blocks), 0)
+                self.assertTrue(all("www.example.com" in b["text"] for b in blocks))
 
     def test_image_footnotes_keep_style_labels(self) -> None:
         result = self.root / "result"
@@ -153,16 +194,43 @@ class MinerUTests(Base):
         self.assertEqual(units[0]["locator"], "page 2 ocr")
         self.assertIn("100% COTTON", units[0]["text"])
 
-    def test_ocr_adds_only_new_lines_and_keeps_the_text_layer(self) -> None:
+    def test_full_page_ocr_is_published_without_native_text_and_caches_stay_intact(self) -> None:
         self.clear_catalog_pending()
-        ocr = self.build / "mineru-units"
-        ocr.mkdir(parents=True)
-        (ocr / "a1.json").write_text(json.dumps({"units": [
-            {"locator": "page 1 ocr", "text": "SHERPA SERIES\nNTX S-001 SHERPA JACKET\nSHERPA HOODIE NTX-777"}]}), encoding="utf-8")
-        self.assertEqual(self.pipeline("--tiers", "T1,T2").returncode, 0)
-        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
-        self.assertEqual(page.count("SHERPA SERIES"), 1)
-        self.assertIn("NTX-777", page)
+        native = self.text / "a1.json"
+        native_record = json.loads(native.read_text(encoding="utf-8"))
+        native_record["units"][0]["text"] += "\nSHERPA BROKEN NATIVE ORDER"
+        native_record["units"][1]["text"] = "SHERPA SECOND PAGE"
+        native.write_text(json.dumps(native_record), encoding="utf-8")
+        original_native = native.read_bytes()
+        reducto = self.build / "reducto-units" / "a1.json"
+        mineru = self.build / "mineru-units" / "a1.json"
+        for path in (reducto, mineru):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        reducto.write_text(json.dumps({"source": "reducto", "units": [
+            {"locator": "page 1 ocr", "text": "SHERPA SERIES\nSHERPA REDUCTO NTX-778", "engine": "reducto"}]}),
+            encoding="utf-8")
+        original_reducto = reducto.read_bytes()
+        for use_mineru in (False, True):
+            with self.subTest(use_mineru=use_mineru):
+                if use_mineru:
+                    mineru.write_text(json.dumps({"source": "mineru", "units": [
+                        {"locator": "page 1 ocr", "text": "SHERPA SERIES\nSHERPA HOODIE NTX-777"}]}), encoding="utf-8")
+                    original_mineru = mineru.read_bytes()
+                built = self.pipeline("--tiers", "T1,T2")
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+                self.assertEqual(page.count("SHERPA SERIES"), 1)
+                self.assertNotIn("BROKEN NATIVE ORDER", page)
+                self.assertIn("NTX-777" if use_mineru else "NTX-778", page)
+                if use_mineru:
+                    self.assertNotIn("NTX-778", page)
+                    self.assertEqual(mineru.read_bytes(), original_mineru)
+                self.assertIn("SHERPA SECOND PAGE", page)
+                self.assertEqual(native.read_bytes(), original_native)
+                self.assertEqual(reducto.read_bytes(), original_reducto)
+                checked = run("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
+                              "--out", str(self.out), "--config", str(self.config))
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
     def test_unknown_word_read_from_a_picture_is_published_with_a_mark(self) -> None:
         self.clear_catalog_pending()
@@ -189,6 +257,97 @@ class MinerUTests(Base):
             {"locator": "page 1 ocr", "text": "NTX S-555 LABEL", "engine": "reducto"}]}), encoding="utf-8")
         self.pipeline()
         self.assertEqual(json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]["reason"], "image_read")
+
+    def test_ai_read_size_drawing_image_is_filed_as_a_dimension_picture_and_unknown_model_goes_to_mat(self) -> None:
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["assets"].append({**manifest["assets"][0], "item_id": "p1", "display_name": "unnamed.png",
+                                   "asset_kind": "image", "path": "A/unnamed.png", "source_hash": "p" * 64})
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        (self.package / "A").mkdir(exist_ok=True)
+        (self.package / "A/unnamed.png").write_bytes(b"\x89PNG\r\n\x1a\nimage")
+        self.assertEqual(self.pipeline().returncode, 0)
+        ai_read = self.build / "ai-read"
+        ai_read.mkdir()
+        (ai_read / "todo.jsonl").write_text(        json.dumps({"key": "p1|1", "item_id": "p1",
+                                                        "page": 1, "image": "unused"}) + "\n", encoding="utf-8")
+        (ai_read / "answer-001.jsonl").write_text(json.dumps({
+            "key": "p1|1", "kind": "尺寸图", "drawing_model": "型号待确认", "drawing_name": "外形尺寸图", "text": ""
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        collected = run("ai_read.py", "collect", "--out", str(self.out))
+        self.assertEqual(collected.returncode, 0, collected.stdout + collected.stderr)
+        unit = json.loads((self.build / "mineru-units/p1.json").read_text(encoding="utf-8"))["units"][0]
+        self.assertEqual((unit["locator"], unit["text"]), ("page 1 drawing", "型号待确认 的外形尺寸图"))
+        self.assertTrue(unit["dimension_drawing"])
+        self.assertEqual(self.pipeline().returncode, 0)
+        route = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]
+        self.assertEqual((route["route"], route["reason"], route["picture_kind"]), ("media", "dimension_drawing", "尺寸图"))
+        picture = next(iter(json.loads((self.build / "pictures.json").read_text(encoding="utf-8")).values()))
+        self.assertIn("产品/型号待确认/尺寸图/型号待确认-尺寸图-", picture["file"])
+        self.assertEqual(picture["use"], "待核对")
+        ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
+        self.assertIn("尺寸图型号待确认", ledger)
+
+    def test_reducto_figures_publish_separately_on_their_pages_without_becoming_verified_text(self) -> None:
+        self.clear_catalog_pending()
+        reducto = self.build / "reducto-units" / "a1.json"
+        mineru = self.build / "mineru-units" / "a1.json"
+        for path in (reducto, mineru):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        reducto.write_text(json.dumps({"source": "reducto", "units": [
+            {"locator": "page 1 ocr", "text": "SHERPA REDUCTO TRANSCRIPT", "engine": "reducto"}],
+            "figures": {"1": ["图示：夹克轮廓", "图示：夹克轮廓", "图示：袖口结构", "价格 USD9.20"],
+                        "4": ["图示：口袋位置"], "6": ["图示：仅有图片说明的页面"]}}), encoding="utf-8")
+        mineru.write_text(json.dumps({"source": "mineru", "units": [
+            {"locator": "page 1 ocr", "text": "SHERPA MINERU TRANSCRIPT"}]}), encoding="utf-8")
+        caches = {path: path.read_bytes() for path in (reducto, mineru)}
+        blocks_path = self.build / "blocks.jsonl"
+        for trusted in (False, True):
+            with self.subTest(trusted=trusted):
+                if trusted:
+                    blocks = [json.loads(line) for line in blocks_path.read_text(encoding="utf-8").splitlines()]
+                    keep = [b["block_id"] for b in blocks if b.get("figure_description")]
+                    (self.build / "review-decisions.json").write_text(json.dumps({"keep_blocks": keep}), encoding="utf-8")
+                built = self.pipeline("--tiers", "T1,T2")
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+                self.assertEqual(page.count("图示：夹克轮廓"), 1)
+                self.assertEqual(page.count("图示：袖口结构"), 1)
+                self.assertNotIn("USD9.20", page)
+                self.assertIn("SHERPA MINERU TRANSCRIPT", page)
+                self.assertNotIn("SHERPA REDUCTO TRANSCRIPT", page)
+                sections = {}
+                for part in page.split("\n## ")[1:]:
+                    heading, body = part.split("\n", 1)
+                    sections[heading] = body
+                self.assertIn("图示：夹克轮廓", sections["第 1 页"])
+                self.assertIn('`figures["1"][0]`', sections["第 1 页"])
+                self.assertIn('`figures["1"][2]`', sections["第 1 页"])
+                self.assertIn("图示：口袋位置", sections["第 4 页"])
+                self.assertIn("MACHINE WASHABLE", sections["第 4 页"])
+                self.assertIn("图示：仅有图片说明的页面", sections["第 6 页"])
+                for number in (1, 4, 6):
+                    self.assertEqual(sections[f"第 {number} 页"].count("### ⚠ Reducto 图表描述（待核对）"), 1)
+                    self.assertIn("不是已核实原文，也不是 OCR 转写", sections[f"第 {number} 页"])
+                    self.assertIn("`reducto-units/a1.json`", sections[f"第 {number} 页"])
+                for path, content in caches.items():
+                    self.assertEqual(path.read_bytes(), content)
+                blocks = [json.loads(line) for line in blocks_path.read_text(encoding="utf-8").splitlines()]
+                figures = [b for b in blocks if b.get("figure_description") and b["status"] in {"kept", "flagged"}]
+                self.assertEqual(len(figures), 4)
+                self.assertTrue(all(not b["ocr"] and b["reader"] == "reducto" and
+                                    any(f["type"] == "ai_read" for f in b["flags"]) for b in figures))
+                public = (self.build / "exports" / "blocks-public.jsonl").read_text(encoding="utf-8")
+                self.assertNotIn("图示：", public)
+                checked = run("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
+                              "--out", str(self.out), "--config", str(self.config))
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        blocks_path.write_text("".join(json.dumps(b) + "\n" for b in blocks if not b.get("figure_description")),
+                               encoding="utf-8")
+        checked = run("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
+                      "--out", str(self.out), "--config", str(self.config))
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("source line lost", checked.stdout)
 
     def test_report_page_is_marked_not_dropped(self) -> None:
         self.clear_catalog_pending()
@@ -296,6 +455,21 @@ class WebsiteTests(Base):
         second = {p["url"]: p["fetched_at"] for p in self.crawl()}
         self.assertEqual(first, second)
 
+    def test_browser_import_keeps_crawl_limitations_in_the_ledger(self) -> None:
+        self.crawl()
+        capture = self.root / "capture.json"
+        capture.write_text(json.dumps({"url": f"http://127.0.0.1:{self.server.server_port}/",
+                                      "title": "Home", "blocks": [{"tag": "p", "text": "Our factory makes sherpa garments and supplies retail brands worldwide."}]}), encoding="utf-8")
+        args = ("--out", str(self.out), "--config", str(self.config), "--browser-capture", str(capture))
+        for _ in range(2):
+            result = run("fetch_website.py", *args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            report = json.loads((self.build / "website/fetch-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["last_crawl"]["blocked_by_robots"], 1)
+        self.assertEqual(self.pipeline().returncode, 0)
+        mat = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
+        self.assertIn("网站自动抓取规则阻止读取 1 个网址", mat)
+
 
 class CellReviewTests(Base):
     def test_judged_cells_publish_and_the_gate_holds_until_audited(self) -> None:
@@ -391,6 +565,48 @@ class VaultTests(Base):
 
 
 class AnswerTests(Base):
+    def test_page_specific_question_describes_the_actual_source_conflict(self) -> None:
+        self.edit_config(client_confirmation={"friendly": True, "questions": {
+            "a1|page 1": "第一页的型号和产品说明不同，请确认正确对应关系。"}})
+        self.assertEqual(self.pipeline().returncode, 0)
+        checks = self.build / "page-check" / "results.json"
+        checks.parent.mkdir(exist_ok=True)
+        checks.write_text(json.dumps({"a1|page 1": {"item_id": "a1", "unit": "page", "page": 1,
+                          "unclear": True, "structure": "表格", "pairing": "型号和说明不同"}}, ensure_ascii=False), encoding="utf-8")
+        result = run("render_kb.py", "--out", str(self.out), "--config", str(self.config))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with (self.build / "客户确认表.csv").open(encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        row = next(r for r in rows if r["在文件里的位置"] == "第 1 页")
+        self.assertEqual(row["要确认的问题"], "第一页的型号和产品说明不同，请确认正确对应关系。")
+        self.assertRegex(row["编号"], r"^问题\d+$")
+        self.assertIn("原件内容的对应关系待确认", json.dumps(json.loads(
+            (self.build / "governance.json").read_text(encoding="utf-8")), ensure_ascii=False))
+
+    def test_friendly_confirmation_hides_internal_codes_and_reads_text_answers(self) -> None:
+        self.edit_config(ask_client={"a1": "请确认产品归属"}, client_confirmation={"friendly": True,
+                         "questions": {"a1": "这份资料应归属哪个产品型号？"},
+                         "additional": [{"key": "warranty", "item_ids": ["a1"], "question": "保修期以哪个资料为准？"}]})
+        self.assertEqual(self.pipeline().returncode, 0)
+        csv_path = self.build / "客户确认表.csv"
+        with csv_path.open(encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        row = next(r for r in rows if r["要确认的问题"] == "这份资料应归属哪个产品型号？")
+        self.assertRegex(row["编号"], r"^问题\d+$")
+        self.assertIn("在文件里的位置", row)
+        self.assertTrue(any(r["要确认的问题"] == "保修期以哪个资料为准？" for r in rows))
+        row["回答（保留 / 不用 / 文字）"] = "仅适用于指定型号，需要客户继续说明。"
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        result = run("apply_answers.py", "--out", str(self.out), "--config", str(self.config))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["notes_for_people"], 1)
+        notes = (self.build / "client-notes.jsonl").read_text(encoding="utf-8")
+        self.assertIn("仅适用于指定型号", notes)
+        self.assertIn("a1", json.loads(self.config.read_text(encoding="utf-8"))["ask_client"])
+
     def test_client_yes_releases_the_held_page(self) -> None:
         self.pipeline()
         self.assertIn("🕒", next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8"))
