@@ -139,9 +139,13 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def remaining_ocr_pages(build: Path, item_id: str, pages: list[int]) -> list[int]:
-    path = build / "mineru-units" / f"{item_id}.json"
-    units = load_json(path).get("units", []) if path.is_file() else []
+def remaining_ocr_pages(build: Path, item_id: str, pages: list[int],
+                        folders: tuple[str, ...] = ("mineru-units", "reducto-units")) -> list[int]:
+    units = []
+    # Reducto's reading counts too: a page it read is not sent to MinerU's or the model's queue again.
+    for folder in folders:
+        path = build / folder / f"{item_id}.json"
+        units += load_json(path).get("units", []) if path.is_file() else []
     covered = set()
     for unit in units:
         match = re.search(r"\b(?:page|slide)\s+(\d+)\b", unit.get("locator", ""), re.IGNORECASE)
@@ -149,6 +153,29 @@ def remaining_ocr_pages(build: Path, item_id: str, pages: list[int]) -> list[int
         if match and (unit.get("text", "").strip() or unit.get("empty")):
             covered.add(int(match.group(1)))
     return [page for page in pages if page not in covered]
+
+
+PAGED_FILES = {".pdf", ".pptx", ".ppt"}
+
+
+def read_by(build: Path) -> dict[str, set[str]]:
+    """What read each file beyond its text layer: "mineru", "reducto", "ai" (AI 读图), "check" (pages looked at against the picture)."""
+    found: dict[str, set[str]] = {}
+    folder = build / "mineru-units"
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        record = load_json(path)
+        item_id = record.get("item_id") or path.stem
+        if record.get("source") == "mineru":
+            found.setdefault(item_id, set()).add("mineru")
+        if any(unit.get("engine") == "ai" and not unit.get("checked") for unit in record.get("units", [])):
+            found.setdefault(item_id, set()).add("ai")
+    folder = build / "reducto-units"
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        found.setdefault(load_json(path).get("item_id") or path.stem, set()).add("reducto")
+    results = build / "page-check" / "results.json"
+    for entry in (load_json(results) if results.is_file() else {}).values():
+        found.setdefault(entry["item_id"], set()).add("check")
+    return found
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -30,7 +30,10 @@ from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, remaining_ocr_pages, write_json, write_text
 from office import convert_office
-from samples import METHODS, choose_samples, doc_type, is_confirmed, load_decisions, method_of
+from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of
+from samples import (GRADES, IMAGE_KIND, METHODS, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
+                     image_method, is_confirmed, load_decisions,
+                     method_and_source, unreadable, unreadable_method)
 
 
 FOLDER = "page-check"
@@ -83,19 +86,20 @@ RULES = """# 看图核对规则
 
 
 def page_text(units: list[dict[str, str]], unit: str, number: int) -> str:
-    """The page's draft as the build has it: the text layer, then what MinerU or the model read."""
+    """The page's draft as the build has it: the text layer, then what MinerU, Reducto or the model read."""
     native = re.compile(rf"^{unit} {number}(?: col \d+| table \d+)?$")
     read = re.compile(rf"^{unit} {number} (?:ocr|check)$")
     parts = [u["text"] for u in units if native.match(u["locator"])]
     for u in units:
         if read.match(u["locator"]) and u.get("text", "").strip():
-            label = "AI 看图补充" if u.get("checked") else "AI 读图" if u.get("engine") == "ai" else "MinerU 识别"
+            label = ("AI 看图补充" if u.get("checked") else "AI 读图" if u.get("engine") == "ai"
+                     else "Reducto 识别" if u.get("engine") == "reducto" else "MinerU 识别")
             parts.append(f"【{label}】\n{u['text']}")
     return "\n\n".join(parts)
 
 
 def draft_sources(text: str) -> list[str]:
-    return ["文字层"] + [name for name in ("MinerU 识别", "AI 读图") if f"【{name}】" in text]
+    return ["文字层"] + [name for name in ("MinerU 识别", "Reducto 识别", "AI 读图") if f"【{name}" in text]
 
 
 def code_pattern(prefixes: list[str]) -> re.Pattern[str]:
@@ -136,6 +140,33 @@ def word_pictures(path: Path) -> list[tuple[str, bytes]]:
         return []  # A damaged or mislabelled file has no pictures to check; its text was read or not on its own.
 
 
+def unreadable_entry(item_id: str, route: dict[str, Any], asset: dict[str, Any], build: Path,
+                     decisions: dict[str, dict[str, Any]], pymupdf: Any) -> dict[str, Any] | str:
+    """The page-triage entry of a file nothing was read from, or why it could not be counted."""
+    name = route.get("display_name") or asset["file"].name
+    source = pdf_of(asset["file"], build, asset["source_hash"][:16])
+    if source is None:
+        return f"{name}：没装 LibreOffice，幻灯片没法画成图"
+    try:
+        with pymupdf.open(long_path(source)) as document:
+            count = document.page_count
+    except Exception as exc:  # A damaged file is reported, it does not stop the run.
+        return f"{name}：打不开（{type(exc).__name__}）"
+    method, method_from = unreadable_method(decisions, item_id)
+    grades = {str(n): {"grade": "C", "reasons": ["整份没有文字层，还没人读过"]} for n in range(1, count + 1)}
+    return {"name": name, "kind": UNREADABLE_KIND, "method": method, "method_from": method_from,
+            "unit": "slide" if asset["file"].suffix.casefold() in {".pptx", ".ppt"} else "page",
+            "counts": {g: count if g == "C" else 0 for g in GRADES}, "pages": grades}
+
+
+def image_entry(item_id: str, route: dict[str, Any], asset: dict[str, Any], decisions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """A single picture nobody has read: one grade C page, read by the model unless Reducto is chosen."""
+    method, method_from = image_method(decisions, item_id)
+    return {"name": route.get("display_name") or asset["file"].name, "kind": IMAGE_KIND, "method": method,
+            "method_from": method_from, "unit": "page", "counts": {g: int(g == "C") for g in GRADES},
+            "pages": {"1": {"grade": "C", "reasons": ["单张图片，还没人读过"]}}}
+
+
 def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: list[Path]) -> dict[str, Any]:
     try:
         import pymupdf  # type: ignore[import-not-found]
@@ -150,8 +181,10 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     pictures.mkdir(parents=True, exist_ok=True)
     done = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
     codes = code_pattern(config.get("style_prefixes", []))
+    share = float((config.get("reducto") or {}).get("check_share", CHECK_SHARE))
     rng = random.Random(20261105)
     todo, skipped = [], []
+    triage: dict[str, Any] = {}
     # Until a kind of file is confirmed on its example, only the example is looked at page by page.
     docs = load_jsonl(build / "docs.jsonl")
     by_item = {d["item_id"]: d for d in docs}
@@ -160,22 +193,39 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     deferred: dict[str, int] = {}
     for item_id, route in sorted(routes.items()):
         asset = files.get(item_id)
+        if (unreadable(route) and asset and asset["file"].suffix.casefold() in PAGED
+                and Path(long_path(asset["file"])).is_file()):
+            # Nothing read from it yet: every page is grade C, and its row on the plan page lets a person
+            # choose how it is read (MinerU unless chosen). Once read, it is extracted and checked like the rest.
+            entry = unreadable_entry(item_id, route, asset, build, decisions, pymupdf)
+            if isinstance(entry, str):
+                skipped.append(entry)
+            else:
+                triage[item_id] = entry
+            continue
+        if held_image(route) and asset and asset["file"].suffix.casefold() in PICTURES and Path(long_path(asset["file"])).is_file():
+            triage[item_id] = image_entry(item_id, route, asset, decisions)
+            continue
         if route.get("route") != "kb" or route.get("tier") not in CHECKED_TIERS or not asset or not Path(long_path(asset["file"])).is_file():
             continue
         doc = by_item.get(item_id)
         if doc and doc["doc_id"] not in samples and not is_confirmed(doc_type(doc), decisions, config):
             deferred[doc_type(doc)] = deferred.get(doc_type(doc), 0) + int(doc.get("pages") or 1)
             continue
-        # How a person chose to read this kind: every pictured page is looked at when it is not the text layer.
-        method = method_of(doc_type(doc), decisions) if doc else "text"
+        # How a person chose to read this file (or its kind): it decides what each grade of page gets.
+        kind = doc_type(doc) if doc else ""
+        method, method_from = method_and_source(kind, decisions, item_id) if doc else ("text", "默认")
         suffix = asset["file"].suffix.casefold()
         # The reviewer sees what the build will publish: text layer plus what MinerU or the model read.
-        units = load_units([*text_dirs, build / "mineru-units"], item_id)
+        units = load_units([*text_dirs, build / "reducto-units", build / "mineru-units"], item_id)
+        reducto = compare(build, item_id)
+        reducto_record = record_of(build, item_id)
+        reducto_read = set(reducto_record.get("pages_read", [])) if reducto_record.get("source_hash") == asset.get("source_hash") else set()
         read_path = build / "mineru-units" / f"{item_id}.json"
-        if method == "mineru" and not (read_path.is_file() and load_json(read_path).get("source") == "mineru"):
-            skipped.append(f"{route.get('display_name') or asset['file'].name}：这类按“MinerU 初稿 + AI 复核”处理，等 MinerU 初稿出来再对照")
-            continue
         name = route.get("display_name") or asset["file"].name
+        hold = ""
+        if method == "mineru" and not (read_path.is_file() and load_json(read_path).get("source") == "mineru"):
+            hold = f"{name}：按“MinerU 初稿 + AI 复核”处理，等 MinerU 初稿出来再对照"
         if suffix in WORD:
             try:
                 source = asset["file"] if suffix == ".docx" else convert_office(asset["file"], "docx", build / "converted", asset["source_hash"][:16], 600)
@@ -196,11 +246,12 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
             skipped.append(f"{name}：没装 LibreOffice，幻灯片没法画成图")
             continue
         unit = "slide" if suffix in {".pptx", ".ppt"} else "page"
-        # Pages with no text that nobody has read yet go to MinerU or ai_read.py first. A page MinerU
-        # read is not skipped: OCR alone is not a visual check, it can miss labels or lose layout.
-        # Pages already looked at are in results.json and leave the list below.
-        waiting = set(remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []))
+        # Grade C pages nobody has read yet go to MinerU, Reducto or ai_read.py first. A page OCR read is
+        # not skipped: OCR alone is not a visual check, it can miss labels or lose layout.
+        no_text = set(route.get("ocr_pages") or [])
+        unread = set(remaining_ocr_pages(build, item_id, sorted(no_text)))
         # A page already checked against its picture is done, unless MinerU's draft came after that look.
+        looked_at: set[int] = set()
         read_units = load_json(read_path).get("units", []) if read_path.is_file() else []
         mineru_pages = {int(m.group(1)) for u in read_units if u.get("engine") not in {"ai"} and u.get("text", "").strip()
                         and (m := re.match(r"(?:page|slide) (\d+) ocr$", u.get("locator", ""))) and not u.get("checked")}
@@ -208,27 +259,57 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
             match = re.match(r"(?:page|slide) (\d+)", u.get("locator", ""))
             if u.get("checked") and match:
                 number = int(match.group(1))
-                looked = done.get(f"{item_id}|{'slide' if suffix in {'.pptx', '.ppt'} else 'page'} {number}", {})
+                looked = done.get(f"{item_id}|{unit} {number}", {})
                 if number not in mineru_pages or "MinerU 识别" in looked.get("draft", []) or not looked:
-                    waiting.add(number)
+                    looked_at.add(number)
         try:
             document = pymupdf.open(long_path(source))
         except Exception as exc:  # A damaged file is reported, it does not stop the run.
             skipped.append(f"{name}：打不开（{type(exc).__name__}）")
             continue
+        grades: dict[str, dict[str, Any]] = {}
+        waiting_reducto = 0
         with document:
-            chosen = []
+            chosen, pool = [], set()
             for number, page in enumerate(document, start=1):
-                if number in waiting:
-                    continue  # No text at all: ai_read.py or MinerU reads these whole.
+                if number in unread:
+                    grades[str(number)] = {"grade": "C", "reasons": ["没有文字层，还没人读过"]}
+                    continue
                 text = page_text(units, unit, number)
-                reasons = reasons_for(page, text, codes)
-                if method != "text" and not reasons and has_pictures(page):
+                seen = reducto.get(number)
+                found = reasons_for(page, text, codes)
+                disagree = []
+                if seen is not None:
+                    disagree = check_reasons(seen, text)
+                    if seen.get("only_mineru") or seen.get("only_reducto"):
+                        text += f"\n\n【Reducto 识别（与 MinerU 不一致，以原图为准）】\n{seen['text']}"
+                grade = "D" if disagrees(disagree) else "C" if number in no_text else "B" if found else "A"
+                why = [r for r in disagree if r.startswith(DISAGREE)] if grade == "D" else found or (
+                    ["没有文字层，已读出"] if grade == "C" else [])
+                grades[str(number)] = {"grade": grade, "reasons": why}
+                if number in looked_at or hold:
+                    continue
+                # What each grade gets depends on how the file is read.
+                if (method == "reducto" and seen is None and grade in {"B", "C"} and number not in reducto_read
+                        and number not in mineru_pages):
+                    waiting_reducto += 1  # Reducto reads it first; then it is compared and sampled.
+                    continue
+                if method == "reducto" and seen is not None:
+                    reasons = disagree + (["文字里有乱码"] if ODD.search(text) else [])
+                else:
+                    reasons = disagree + [r for r in found if r not in disagree]
+                if method in {"mineru", "ai"} and not reasons and has_pictures(page):
                     reasons = [f"按“{METHODS[method]}”处理，有图片的页都对照"]
+                if seen is not None and not reasons and not seen["mineru"] and seen["terms"]:
+                    pool.add(number)
                 chosen.append((number, text, reasons))
-            rest = [c for c in chosen if not c[2]]
+            rest = [c for c in chosen if not c[2] and c[0] not in pool]
             for number, text, _ in rng.sample(rest, max(1, round(len(rest) * SAMPLE_SHARE))) if rest else []:
                 chosen[[c[0] for c in chosen].index(number)] = (number, text, ["抽查"])
+            # Codes and numbers only Reducto read are checked more often than the ordinary sample.
+            alone = [c for c in chosen if c[0] in pool]
+            for number, text, _ in rng.sample(alone, max(1, round(len(alone) * share))) if alone else []:
+                chosen[[c[0] for c in chosen].index(number)] = (number, text, ["只有 Reducto 识别，含款号或数字，抽查"])
             for number, text, reasons in chosen:
                 if not reasons:
                     continue
@@ -236,16 +317,28 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 if not target.is_file():
                     document[number - 1].get_pixmap(dpi=DPI).save(str(target))
                 todo.append({"key": f"{item_id}|{unit} {number}", "item_id": item_id, "unit": unit, "page": number, "name": name,
-                             "image": str(target), "text": text, "reasons": reasons, "draft": draft_sources(text)})
-    # A page looked at before MinerU's draft came is looked at again with it.
+                             "image": str(target), "text": text, "reasons": reasons, "draft": draft_sources(text),
+                             "grade": grades[str(number)]["grade"]})
+        if hold:
+            skipped.append(hold)
+        if waiting_reducto:
+            skipped.append(f"{name}：按“{METHODS['reducto']}”处理，{waiting_reducto} 页 B、C 级页等 Reducto 结果再对照")
+        counts = {g: sum(1 for p in grades.values() if p["grade"] == g) for g in GRADES}
+        triage[item_id] = {"name": name, "kind": kind, "method": method, "method_from": method_from, "unit": unit,
+                           "counts": counts, "pages": grades}
+    # A page looked at before MinerU's draft came is looked at again with it; so is one Reducto now disagrees on.
     todo = [t for t in todo if t["key"] not in done
-            or ("MinerU 识别" in t.get("draft", []) and "MinerU 识别" not in done[t["key"]].get("draft", []))]
+            or ("MinerU 识别" in t.get("draft", []) and "MinerU 识别" not in done[t["key"]].get("draft", []))
+            or ("Reducto 识别" in t.get("draft", []) and "Reducto 识别" not in done[t["key"]].get("draft", [])
+                and disagrees(t["reasons"]))]
     with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     write_text(folder / "README.md", RULES)
+    write_json(build / TRIAGE, {"grades": {g: f"{label}：{rule}" for g, (label, rule) in GRADES.items()}, "files": triage})
+    totals = {g: sum(f["counts"][g] for f in triage.values()) for g in GRADES}
     report = {"ok": True, "to_check": len(todo), "checked": len(done), "files": len({t["item_id"] for t in todo}), "skipped": skipped,
-              "deferred": deferred}
+              "deferred": deferred, "grades": totals}
     write_json(folder / "plan.json", report)
     return report
 

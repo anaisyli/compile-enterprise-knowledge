@@ -65,7 +65,9 @@ class PageCheckTests(Base):
         self.assertIn("以原图为准", page)
         self.assertIn("看不出款号和产品的对应", page)
         ledgers = "\n".join(p.read_text(encoding="utf-8") for p in (self.build / "vault").rglob("01_*.md"))
-        self.assertIn("提取文字和原图不一致的页", ledgers)
+        anm = next((self.build / "vault").rglob("01_源文与事实异常台账.md")).read_text(encoding="utf-8")
+        self.assertIn("页提取的文字和原图不一致", anm)
+        self.assertRegex(page, r"以原图为准.*ANM-\d{3}")
         self.assertIn("款号和产品对应不清楚", ledgers)
 
     def test_unchecked_pages_are_reported_and_half_done_fails(self) -> None:
@@ -121,6 +123,54 @@ class PageCheckTests(Base):
         result = run("mineru_ocr.py", "plan", "--out", str(self.out), "--package", str(self.package), "--config", str(self.config))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("MinerU 初稿 + AI 复核", (self.build / "mineru-plan.md").read_text(encoding="utf-8"))
+
+    def write_reading(self, folder: str, text: str, **extra) -> None:
+        engine = {"engine": "reducto"} if folder == "reducto-units" else {}
+        record = {"item_id": "a1", "source": folder.split("-")[0], "units": [{"locator": "page 1 ocr", "text": text, **engine}],
+                  "pages_read": [1], **extra}
+        (self.build / folder).mkdir(parents=True, exist_ok=True)
+        (self.build / folder / "a1.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    def test_a_page_reducto_and_mineru_read_differently_is_looked_at_with_both_drafts(self) -> None:
+        self.write_reading("mineru-units", "NTX S-099 SHERPA JACKET\nNTX S-100 SHERPA VEST")
+        self.write_reading("reducto-units", "NTX S-099 SHERPA JACKET\nNTX S-108 SHERPA VEST")
+        self.pipeline()
+        picked = self.todo()
+        self.assertTrue(any(r.startswith("MinerU 与 Reducto 不一致") and "S100" in r and "S108" in r for r in picked[0]["reasons"]))
+        self.assertIn("【Reducto 识别（与 MinerU 不一致", picked[0]["text"])
+        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+        self.assertIn("NTX S-100", page)  # MinerU's reading is the one published.
+        self.assertNotIn("S-108", page)
+
+    def test_a_page_only_reducto_read_is_published_marked_and_codes_only_in_figures_are_looked_at(self) -> None:
+        self.write_reading("reducto-units", "NTX S-099 SHERPA JACKET\nNTX S-100 SHERPA VEST",
+                           figures={"1": ["Photo of a jacket; the label reads NTX S-777."]})
+        self.pipeline()
+        picked = self.todo()
+        self.assertIn("Reducto 只在图片说明里提到 S777，正文没有", picked[0]["reasons"])
+        self.assertIn("Reducto 识别", picked[0]["draft"])
+        page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
+        self.assertIn("NTX S-100 SHERPA VEST", page)
+        self.assertIn("Reducto 识别，待对照原图核对", page)
+        self.assertNotIn("Photo of a jacket", page)  # The model's picture description is never published.
+
+    def test_a_file_read_by_reducto_waits_for_it_and_its_b_page_is_planned_but_nothing_sent_without_approval(self) -> None:
+        self.build.mkdir(parents=True, exist_ok=True)
+        (self.build / "sample-decisions.json").write_text(json.dumps({"文件:a1": {"method": "reducto"}}, ensure_ascii=False), encoding="utf-8")
+        self.pipeline()
+        triage = json.loads((self.build / "page-triage.json").read_text(encoding="utf-8"))["files"]["a1"]
+        self.assertEqual((triage["method"], triage["method_from"], triage["pages"]["1"]["grade"]), ("reducto", "文件", "B"))
+        self.assertEqual(self.todo(), [])  # Not looked at before Reducto has read it.
+        plan_page = (self.build / "vault" / "02_源资料" / "处理计划与样例.md")
+        plan_page = plan_page if plan_page.is_file() else next((self.build / "vault").rglob("处理计划与样例.md"))
+        self.assertIn("| a1 | ", plan_page.read_text(encoding="utf-8"))
+        args = ("--out", str(self.out), "--package", str(self.package), "--config", str(self.config))
+        result = run("reducto_ocr.py", "plan", *args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads((self.build / "reducto-plan.json").read_text(encoding="utf-8"))
+        self.assertEqual([(e["item_id"], e["pages"]) for e in plan], [("a1", [1])])
+        self.assertEqual(run("reducto_ocr.py", "run", *args).returncode, 2)
+        self.assertFalse((self.build / "reducto-units").exists())
 
 
 if __name__ == "__main__":

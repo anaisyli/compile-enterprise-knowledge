@@ -21,6 +21,8 @@ from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, safe_name, write_t
 
 STATE = "05_数据与审核/70_构建状态"
 MINERU = "02_源资料/20_MinerU按需提取"
+# Reducto's record carries the file hash and the pages it read, so restoring it is the upload cache too.
+REDUCTO = "02_源资料/21_Reducto按需提取"
 WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
@@ -47,7 +49,7 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
         for page in root.glob("*/page.md") if root.is_dir() else []:
             slug = page.parent.name
             found.append((build / "curation" / slug / "page.md", vault / STATE / "curation" / slug / "page.md"))
-    for directory, target in (("mineru-units", MINERU), ("website/units", f"{WEBSITE}/units")):
+    for directory, target in (("mineru-units", MINERU), ("reducto-units", REDUCTO), ("website/units", f"{WEBSITE}/units")):
         for root in (build / directory, vault / target):
             for item in root.glob("*.json") if root.is_dir() else []:
                 found.append((build / directory / item.name, vault / target / item.name))

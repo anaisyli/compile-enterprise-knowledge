@@ -133,6 +133,9 @@ def main() -> int:
     published: dict[str, str] = load_json(build / "published.json")
     terms = load_json(build / "guard-terms.json")
     text_dirs = [Path(raw).resolve() for raw in args.text_dir]
+    # Reducto before MinerU: where both read a page, MinerU's reading is the one used.
+    if (build / "reducto-units").is_dir():
+        text_dirs.append(build / "reducto-units")
     ocr_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else build / "mineru-units"
     if ocr_dir.is_dir():
         text_dirs.append(ocr_dir)
@@ -143,6 +146,12 @@ def main() -> int:
 
     # Every item in the package has a recorded fate.
     asset_ids = {asset["item_id"] for asset in assets}
+    status_path = build / "package-text" / "extract-status.json"
+    extracted = load_json(status_path).get("items", {}) if status_path.is_file() else {}
+    for item_id in sorted(asset_ids):
+        status = extracted.get(item_id, {}).get("status")
+        if status in {"hash_mismatch", "missing_file"}:
+            errors.append(f"package input {status}: {item_id}")
     for item_id in asset_ids - set(routes):
         errors.append(f"no route for {item_id}")
     hashes = {asset["item_id"]: asset["source_hash"] for asset in assets}
@@ -347,8 +356,6 @@ def main() -> int:
             warnings.append(f"还没做看图核对：{waiting} 页等 AI 对照原图看（04_知识库构建/page-check/README.md）")
 
     # A deck without slide pictures still has all its text; say why the pictures are missing.
-    status_path = build / "package-text" / "extract-status.json"
-    extracted = load_json(status_path).get("items", {}) if status_path.is_file() else {}
     no_slides = Counter(item["page_images_skipped"] for item in extracted.values() if item.get("page_images_skipped"))
     if no_slides:
         warnings.append("PPT 没有幻灯片截图：" + "，".join(f"{reason} {count} 份" for reason, count in no_slides.most_common())

@@ -36,6 +36,20 @@ class SourceFidelityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Missing or changed reviewed image'):
                 reviewed_units(Path('build'), 'sample', 'source-hash', native)
 
+    def test_reviewed_image_transcript_replaces_only_its_image_unit(self) -> None:
+        record = {'source_sha256': 'source-hash', 'image_sha256': 'image-hash',
+                  'reviewed_by': 'Agent', 'image_file': 'image.png',
+                  'locator': 'image 2', 'text': '图上实际标注'}
+        native = [{'locator': 'image 1', 'text': 'keep'},
+                  {'locator': 'image 2', 'text': 'wrong transcription'},
+                  {'locator': 'image 2 caption', 'text': 'wrong caption'}]
+        with patch('source_fidelity.load_json', return_value={'sample': [record]}), \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch('source_fidelity.sha256_file', return_value='image-hash'):
+            result = reviewed_units(Path('build'), 'sample', 'source-hash', native)
+        self.assertEqual([(u['locator'], u['text']) for u in result],
+                         [('image 1', 'keep'), ('image 2', '图上实际标注')])
+
     def test_explicit_no_ocr_keeps_image_as_material_and_exclusions_win(self) -> None:
         asset = {"item_id": "image1", "decision": "A", "asset_kind": "image",
                  "display_name": "screen.png", "usable_as_fact": True}

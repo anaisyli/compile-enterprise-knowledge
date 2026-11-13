@@ -44,8 +44,9 @@ from kb_common import (
 )
 from review_cells import progress_of, t3_gate
 from source_fidelity import literal_dimensions, merged_sheet_table
-from samples import (METHOD_HELP, METHODS, PAGED_KINDS, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, choose_samples, doc_type, is_confirmed,
-                     load_decisions, load_gate, method_of, status_of)
+from samples import (FILE_METHODS_HEADING, GRADES, METHOD_HELP, METHODS, PAGED_KINDS, PLAN_PAGE, STRUCTURE_PREFIX, TYPES,
+                     HELD_KINDS, IMAGE_KIND, UNREADABLE_DEFAULT, UNREADABLE_KIND, choose_samples,
+                     doc_type, is_confirmed, load_decisions, load_gate, load_triage, method_of, status_of)
 
 
 SOURCE_ROOT = "02_源资料/10_净化原文"
@@ -162,6 +163,8 @@ def flag_note(block: dict[str, Any], anm_ids: dict[str, str]) -> str:
             continue  # Said once on the card; repeating it on every paragraph buries the text.
         elif flag["type"] == "ai_added":
             notes.append(f"⚠ AI 看图补充：提取的文字里没有、图上有的内容，待对照原图核对（{anm_ids.get('ai_read', '')}）")
+        elif flag["type"] == "ai_read" and flag.get("reader") == "reducto":
+            notes.append(f"⚠ Reducto 识别，待对照原图核对（{anm}）")
         elif flag["type"] == "ai_read":
             notes.append(f"⚠ AI 读图转写，待对照原图核对（{anm}）")
     return "；".join(notes)
@@ -440,7 +443,7 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
     for result in (load_json(path).values() if path.is_file() else []):
         page = notes[result["item_id"]][check_group(result)]
         if result.get("text_errors"):
-            page.append(f"⚠ 看图核对：提取的文字和原图不一致，以原图为准（{result['text_errors']}）{gov['mat_ids'].get('text_errors', '')}")
+            page.append(f"⚠ 看图核对：提取的文字和原图不一致，以原图为准（{result['text_errors']}）{gov['anm_ids'].get('text_errors', '')}")
         if result.get("unclear"):
             # Say what is unclear, so a reader knows which products the code may not cover.
             detail = f"{result['pairing']}。" if result.get("pairing") else ""
@@ -478,9 +481,12 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     lines = ["# 处理计划与样例", "", MARKER_PLAN,
              "每类文件先只提取一份样例给人看，确认后再批量提取同类。还没确认的类，这次只提取了样例那一份，其余的在“要做的事”里写着“确认后提取”。", "",
              "- 怎么确认：在下表“确认状态”一列写“已确认”，或者写“要改：……”说明怎么改；也可以直接告诉 AI。下次建库会读回来，不会被覆盖。",
-             "- 怎么选处理方式（PDF、PPT）：先看“样例情况”，再在“处理方式”一列写下面三种之一，和确认一起生效：",
+             "- 怎么选处理方式（PDF、PPT）：先看“样例情况”，再在“处理方式”一列写下面几种之一，和确认一起生效：",
              *[f"  - **{name}**：{METHOD_HELP[key]}" for key, name in METHODS.items()],
-             "  - 想先看 MinerU 读样例的效果再选，跟 AI 说“样例试读 MinerU”（要批准上传，只传样例）。",
+             "  - 想先看 MinerU 或 Reducto 读样例的效果再选，跟 AI 说“样例试读 MinerU”或“样例试读 Reducto”（要批准上传，只传样例）。",
+             "  - 个别文件要和同类不一样，在最下面“按文件指定处理方式”里改那一行的“处理方式”，或者告诉 AI。",
+             "- 页面分级（PDF、PPT 每页一级，处理方式决定每级怎么处理）：",
+             *[f"  - **{grade} {label}**：{rule}" for grade, (label, rule) in GRADES.items()],
              "- 原文件：点“打开原件”直接打开初筛包里的原文件。原名对照：" + "、".join(f"[打开对照表]({uri})" for uri in maps), ""]
     lines.extend(["## 按资料类型", "", "| 类型 | 份数 | 在初筛包哪里 | 怎么提取 | 样例 | 样例情况 | 要做的事 | 处理方式 | 确认状态 |",
                   "| --- | ---: | --- | --- | --- | --- | --- | --- | --- |"])
@@ -540,6 +546,26 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
                    if r["route"] in {"hold", "skip"} and r["reason"] != "awaiting_sample")  # Those are in the rows above.
     lines.extend(["", "## 不处理的资料", "", "| 初筛类别 | 原因 | 份数 |", "| --- | --- | ---: |"])
     lines.extend(f"| {DECISION_LABELS.get(code, code)} | {reason} | {count} |" for (code, reason), count in sorted(held.items()))
+    graded = {i: f for i, f in load_triage(build).get("files", {}).items() if i in by_item or f.get("kind") in HELD_KINDS}
+    if graded:
+        lines.extend(["", FILE_METHODS_HEADING, "",
+                      "已提取的 PDF、PPT 每份一行，按 C、B 级页多少排。要和同类不一样，就把“处理方式”改成上面几种之一；"
+                      "写着“（随类型）”的跟着上表这一类走。下次建库读回来。", "",
+                      f"类型是“{UNREADABLE_KIND}”的是整份没有文字层的文件（扫描件、全是图的 PPT），每页都是 C 级；"
+                      f"没指定时用 {METHODS[UNREADABLE_DEFAULT]}（免费额度），要用 Reducto 就把这一行改成“{METHODS['reducto']}”，按页计费。", "",
+                      f"类型是“{IMAGE_KIND}”的是还没识别的单张图片，算 1 页 C 级；没指定时 AI 看图（不上传）。"
+                      f"图上字多、表格多的可以改成“{METHODS['reducto']}”，每张按 1 页计费；MinerU 不接单张图片。", "",
+                      "| 文件 | 编号 | 类型 | A 文字页 | B 图文页 | C 难页 | D 冲突页 | 处理方式 |",
+                      "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"])
+        for item_id, info in sorted(graded.items(), key=lambda pair: (-pair[1]["counts"]["C"] - pair[1]["counts"]["B"], pair[1]["name"])):
+            counts = info["counts"]
+            follows = "（默认）" if info["kind"] in HELD_KINDS else "（随类型）"
+            label = "AI 看图" if info["kind"] == IMAGE_KIND and info["method"] == "ai" else METHODS[info["method"]]
+            method = label + ("" if info["method_from"] == "文件" else follows)
+            name = Path(by_item[item_id]["file_name"]).stem if item_id in by_item else Path(info["name"]).stem
+            kind = info["kind"] if info["kind"] in HELD_KINDS else TYPES.get(info["kind"], ("—",))[0]
+            lines.append(f"| {escape_cell(name)} | {item_id} | {kind} "
+                         f"| {counts['A']} | {counts['B']} | {counts['C']} | {counts['D']} | {method} |")
     write_text(build / "vault" / PLAN_PAGE, "\n".join(lines) + "\n")
     return waiting
 
@@ -554,6 +580,9 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
     wrong = sum(1 for r in looked if r.get("text_errors"))
     unclear = sum(1 for r in looked if r.get("unclear"))
     parts = [f"共 {pages} 页" if pages else ""]
+    graded = load_triage(build).get("files", {}).get(item)
+    if graded:
+        parts.append("分级 " + "、".join(f"{g} {n}" for g, n in graded["counts"].items() if n))
     if unread:
         parts.append(f"{len(unread)} 页没有文字层")
     if looked:
@@ -574,10 +603,18 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
         fuller = sum(1 for u in record if u["locator"].endswith(" ocr") and u.get("engine") != "ai"
                      and any(squeeze_key(line) and squeeze_key(line) not in native[u["locator"][:-4]] for line in u["text"].splitlines()))
         parts.append(f"MinerU 试读：{fuller} 页读出了文字层没有的内容")
+    reducto_path = build / "reducto-units" / f"{item}.json"
+    reducto = load_json(reducto_path) if reducto_path.is_file() else {}
+    if reducto.get("pages_read"):
+        conflicts = graded["counts"]["D"] if graded else 0
+        parts.append(f"Reducto 试读：读了 {len(reducto['pages_read'])} 页" + (f"，{conflicts} 页和其他来源对不上（D 级）" if conflicts else ""))
+    hard = graded["counts"]["B"] + graded["counts"]["C"] if graded else 0
     if not looked and not unread:
         advice = ""
+    elif graded and pages and hard * 2 < pages and (unread or added + wrong):
+        advice = "建议：Reducto 难页 + AI 抽查（难页只占少数，按页送更省；也可 MinerU 初稿 + AI 复核，不想上传就选 AI 看图复核）"
     elif unread or (looked and (added + wrong) * 5 >= len(looked)):
-        advice = "建议：MinerU 初稿 + AI 复核（不想上传就选 AI 看图复核）"
+        advice = "建议：MinerU 初稿 + AI 复核（难页只占少数时也可 Reducto 难页 + AI 抽查；不想上传就选 AI 看图复核）"
     else:
         advice = "建议：文字层够用"
     return "；".join(p for p in parts if p) + (f"。{advice}" if advice else "")
@@ -781,7 +818,9 @@ def main() -> int:
     gov = build_governance(config.get("project_id", "P-000"), build, routes, docs, blocks, styles,
                            load_json(build / "sheet-report.json"), load_jsonl(build / "review-queue.jsonl"),
                            status_info, (passed or args.skip_t3_gate, reason), progress_of(run), effective,
-                           show=lambda name: by_name.get(name, "（原名见初筛包对照表）"))
+                           show=lambda name: by_name.get(name, "（原名见初筛包对照表）"),
+                           own_domains={d.casefold() for d in config.get("own_domains", [])},
+                           own_contacts=config.get("own_contacts", []))
     cleanup_record(build, blocks, docs)
     issues: dict[str, list[str]] = defaultdict(list)
     for item_key, record_id in gov["cus_items"].items():

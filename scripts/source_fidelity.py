@@ -25,7 +25,7 @@ def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict
         if not image.is_file() or sha256_file(image) != record['image_sha256']:
             raise ValueError(f'Missing or changed reviewed image: {item_id}')
         locator = record['locator']
-        if not re.fullmatch(r'(?:page|slide) [1-9]\d*', locator):
+        if not re.fullmatch(r'(?:page|slide|image) [1-9]\d*', locator):
             raise ValueError(f'Invalid reviewed locator: {locator}')
         # Raw text and MinerU results remain in their caches; the reviewed transcription
         # passes through the same content guard as any other input. No bypass at render time.

@@ -17,6 +17,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
+from guard_blocks import contact_hits
 from kb_common import load_json, normalize_space, remaining_ocr_pages, write_json, write_text
 
 
@@ -37,7 +38,7 @@ COLUMNS = {
 HUMAN_COLUMNS = ("当前阶段", "下一责任人")
 RECORD_HEADING = "#### 处理记录"
 SOLVED_STAGE = "系统已解决，待确认"
-CLOSED_STAGES = {"已完成", "已关闭", "已解决", "无需询问", SOLVED_STAGE}
+CLOSED_STAGES = {"已完成", "已关闭", "已解决", "无需询问", "已核实，可结案", SOLVED_STAGE}
 FOUNDED = re.compile(r"(?i)(?:成立于|始建于|创立于|创建于|建厂于|established(?:\s+in)?|founded(?:\s+in)?)\s*[:：]?\s*((?:19|20)\d{2})"
                      r"|((?:19|20)\d{2})\s*年\s*(?:成立|创立|创建|建厂)"
                      r"|((?:19|20)\d{2})\s+(?:[A-Z][A-Za-z]+\s+)?estab[-\s]?lished\b")
@@ -48,6 +49,32 @@ MAX_SNIPPET = 40
 HEAVY_SHARE = 0.2
 HEAVY_MIN = 3
 STYLE_LIKE = re.compile(r"^[\w#./-]+(?:\s[\w#./-]+){0,2}$")
+
+
+def screening_location_resolved(location: str, blocks: list[dict[str, Any]]) -> bool:
+    """Close a screening locator only when its reviewed content was actually removed."""
+    if any(b.get("status") == "removed" and
+           b.get("reviewed_removal", {}).get("screening_locator") == location for b in blocks):
+        return True
+    match = re.match(r"(?i)^page (\d+)\s+整页删除", location)
+    if match:
+        page_blocks = [b for b in blocks if re.match(rf"^page {match[1]}(?: |$)", b.get("locator", ""))]
+        return bool(page_blocks) and all(b.get("status") == "removed" for b in page_blocks)
+    return False
+
+
+def screening_contacts_resolved(doc: dict[str, Any], locations: list[str],
+                                blocks: list[dict[str, Any]], own_domains: set[str],
+                                own_contacts: list[str]) -> bool:
+    """Own website contacts follow the same policy as company marketing pages."""
+    if not locations or not all(re.search(r"(?i)联系|电话|邮箱|email|phone", loc) for loc in locations):
+        return False
+    folder = doc.get("folder", "")
+    if doc.get("resource_type") != "marketing" and not (folder == "官网页面" or folder.startswith("官网页面/")):
+        return False
+    remaining = [b for b in blocks if b.get("status") not in {"removed", "dropped"}
+                 and b.get("kind") == "text"]
+    return bool(remaining) and not any(contact_hits(b["text"], own_domains, own_contacts) for b in remaining)
 
 
 class Registry:
@@ -117,6 +144,8 @@ def build(
     cell_progress: dict[str, int],
     effective_tiers: set[str] | None = None,
     show: Callable[[str], str] = lambda name: name,
+    own_domains: set[str] | None = None,
+    own_contacts: list[str] | None = None,
 ) -> dict[str, Any]:
     """show turns an original file name into what the vault may print: customer names hidden."""
     effective_tiers = effective_tiers or {"T1", "T2"}
@@ -244,11 +273,11 @@ def build(
              "- 怎么关闭：请公司确认里面哪些是自己的；确认是公司原始资料的，在 kb-config.json 的 doc_roles 里写 \"original\"。", ""]
             + [f"- {page}" for page in sorted(references)])
     if ai_pages:
-        anm_ids["ai_read"] = add("ANM", "ai_read", f"{len(ai_pages)} 页有 AI 看图转写或补充的文字", f"{len(ai_pages)} 页", "待核对",
+        anm_ids["ai_read"] = add("ANM", "ai_read", f"{len(ai_pages)} 页有 AI 看图或 Reducto 识别的文字", f"{len(ai_pages)} 页", "待核对",
                                  "知识库专员",
-                                 ["- 为什么有风险：图片页没有文字层，MinerU 没有识别，文字由 AI 看图转写，可能看错款号或数字。",
-                                  "- 现在怎么处理：已入库并标 ⚠；整理页引用时必须带 ⚠。",
-                                  "- 怎么关闭：对照原页核对；有 MinerU 时重新识别，MinerU 的结果会替换 AI 转写。", ""]
+                                 ["- 为什么有风险：这些页的文字不是从文字层取的，而是 AI 看图转写或 Reducto 识别的，可能看错款号或数字。",
+                                  "- 现在怎么处理：已入库并标 ⚠；整理页引用时必须带 ⚠。Reducto 和 MinerU 读出的款号、数字不一致的页，已交给 AI 看图核对（见 reducto-diff.md）。",
+                                  "- 怎么关闭：对照原页核对；有 MinerU 时重新识别，MinerU 的结果会替换 AI 转写和 Reducto 识别。", ""]
                                  + [f"- {page}" for page in sorted(ai_pages)])
     if unverified:
         detail = ["- 为什么有风险：可能是品牌、明星或 IP 名，对外使用可能涉及授权。",
@@ -294,14 +323,28 @@ def build(
     checks_path = build_dir / "page-check" / "results.json"
     checks = list(load_json(checks_path).values()) if checks_path.is_file() else []
     heading = lambda r: {"slide": f"第 {r['page']} 张幻灯片", "image": f"图片 {r['page']}"}.get(r["unit"], f"第 {r['page']} 页")
+    from source_fidelity import reviewed_units
+
+    reviewed_locators: set[tuple[str, str]] = set()
+    for item_id, doc in by_item.items():
+        path = build_dir / "mineru-units" / f"{item_id}.json"
+        units = load_json(path).get("units", []) if path.is_file() else []
+        if doc.get("source_sha256"):
+            units = reviewed_units(build_dir, item_id, doc["source_sha256"], units)
+        reviewed_locators.update((item_id, unit["locator"]) for unit in units if unit.get("engine") == "reviewed")
     broken = [f"{link(by_item[r['item_id']], heading(r))}：{r['text_errors']}" for r in checks
-              if r.get("text_errors") and r["item_id"] in by_item]
+              if r.get("text_errors") and r["item_id"] in by_item
+              and (r["item_id"], f"{r['unit']} {r['page']}") not in reviewed_locators
+              and "空白页" not in r["text_errors"]]
     mat_ids: dict[str, str] = {}
     if broken:
-        mat_ids["text_errors"] = add("MAT", "text_errors", "提取文字和原图不一致的页", f"{len(broken)} 页", "等待材料或工具",
-                                     "用 MinerU 重新识别这些页",
-                                     ["- 下一步：用 MinerU 重新识别这些页（要批准上传）；识别后重跑，页面上的提示会消失。",
-                                      "- 现在怎么处理：原文照留，页面上标 ⚠“以原图为准”。", ""] + [f"- {b}" for b in sorted(broken)])
+        # Same risk as ai_read (the text may be wrong), so the same ledger: one person checks both against the page.
+        anm_ids["text_errors"] = add("ANM", "text_errors", f"{len(broken)} 页提取的文字和原图不一致", f"{len(broken)} 页", "待核对",
+                                     "知识库专员",
+                                     ["- 为什么有风险：看图核对时发现，入库文字和原页图片对不上，款号、数字可能有错。",
+                                      "- 现在怎么处理：原文照留，页面上标 ⚠“以原图为准”；整理页引用时必须带 ⚠。",
+                                      "- 怎么关闭：对照原页人工确认后，写进 reviewed 转写；或用 MinerU / Reducto 重新识别这些页后重跑，提示会消失。", ""]
+                                     + [f"- {b}" for b in sorted(broken)])
     unclear = [r for r in checks if r.get("unclear") and r["item_id"] in by_item]
     cus_ids: dict[str, str] = {}
     if unclear:
@@ -348,8 +391,19 @@ def build(
         "检查网址和网络后重跑 fetch_website.py；网站拦截时用浏览器保存页面，再 --browser-capture 导入", "官网恢复访问或改版时")
     # Screening's cleanup marks are advice: where the build kept something they named, a person looks.
     named = {doc["item_id"]: doc for doc in docs.values()}
-    lost = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{'；'.join(r['unreadable_locations'][:3])}"
-            for i, r in sheet_report.get("sheets", {}).items() if r.get("unreadable_locations")]
+    lost = []
+    for item_id, report in sheet_report.get("sheets", {}).items():
+        doc = named.get(item_id)
+        doc_blocks = [b for b in blocks if doc and b["doc_id"] == doc["doc_id"]]
+        locations = [location for location in report.get("unreadable_locations", [])
+                     if not screening_location_resolved(location, doc_blocks)]
+        if not locations:
+            continue
+        doc = named.get(item_id)
+        if doc and screening_contacts_resolved(doc, locations, doc_blocks, own_domains or set(), own_contacts or []):
+            continue
+        label = link(doc) if doc else show(routes.get(item_id, {}).get("display_name", item_id))
+        lost.append(f"{label}：{'；'.join(locations[:3])}")
     mat("removal", "初筛写的清理位置找不到", lost, "份", "待知识库专员判断",
         "这些文件照常清理后入库（价格、客户信息按规则删）；核对一下初筛想删的东西是否已经删掉", "初筛包更新时")
     overruled = [f"{link(named[i]) if i in named else show(routes[i]['display_name'])}：{entry}"

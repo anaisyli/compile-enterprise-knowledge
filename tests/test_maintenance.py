@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from test_extensions import Base, run  # noqa: E402
 from governance import merge_ledger, render_ledger  # noqa: E402
+from publish_vault import normalized_hash  # noqa: E402
 
 
 class MaintenanceTests(Base):
@@ -146,6 +147,20 @@ class MaintenanceTests(Base):
         self.assertTrue(picture.is_file())
         self.assertTrue((self.vault / "03_正式知识/90_素材/00_素材索引.md").is_file())
         self.assertTrue((self.vault / "05_数据与审核/20_知识库覆盖与缺口/01_知识库覆盖与缺口.md").is_file())
+
+    def test_navigation_refresh_updates_receipt_after_timestamp_only_status_change(self) -> None:
+        self.pipeline()
+        self.make_vault()
+        self.publish()
+        overview = self.vault / "01_工作台/00_知识库总览.md"
+        old = overview.read_text(encoding="utf-8")
+        overview.write_text(old.replace("2026-", "2000-", 1), encoding="utf-8")
+        result = run("refresh_navigation.py", "--out", str(self.out), "--vault", str(self.vault), "--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        receipt_path = self.vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(normalized_hash(overview), receipt["files"]["01_工作台/00_知识库总览.md"])
+        self.assertEqual(self.publish().returncode, 0)
 
     def test_founding_year_ignores_collection_years(self) -> None:
         self.write_units("a1", [{"locator": "page 1", "text": "SINCE 2026 NEW ARRIVER"},

@@ -54,6 +54,10 @@ class SheetLayoutTests(unittest.TestCase):
             return any(p.search(text) for p in HARD_PATTERNS.values())
         self.assertTrue(hit("Payment term: Advance payment 20% from Proforma Invoice value, 80% before shipment"))
         self.assertTrue(hit("Price term: EXW SHENZHEN"))
+        self.assertFalse(hit("| 出厂价 | EXW Price | 工厂交货条件下的价格 |"))
+        self.assertFalse(hit("| FOB | Free On Board | 船上交货 |"))
+        for quote in ("FOB NINGBO", "交货条件：FOB 宁波", "EXW Shenzhen", "| FOB | Ningbo |"):
+            self.assertTrue(hit(quote), quote)
         self.assertTrue(hit("30% deposit, balance before shipment"))
         self.assertFalse(hit("One year warranty for free."))
 

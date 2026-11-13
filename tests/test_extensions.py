@@ -120,6 +120,29 @@ class MinerUTests(Base):
         self.assertEqual(result.returncode, 2)
         self.assertIn("超出", result.stdout)
 
+    def test_missing_adds_kb_files_mineru_has_not_read(self) -> None:
+        self.pipeline()
+        args = ("mineru_ocr.py", "plan", "--out", str(self.out), "--package", str(self.package), "--config", str(self.config))
+
+        def planned(*extra: str) -> list[str]:
+            result = run(*args, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return [e["item_id"] for e in json.loads((self.build / "mineru-plan.json").read_text(encoding="utf-8"))]
+
+        self.assertNotIn("a1", planned())
+        self.assertIn("a1", planned("--missing"))
+        ocr = self.build / "mineru-units"
+        ocr.mkdir(parents=True)
+        # Read by the model only: MinerU has still not seen it.
+        (ocr / "a1.json").write_text(json.dumps({"item_id": "a1", "source": "ai", "units": [
+            {"locator": "page 1", "text": "x", "engine": "ai"}]}), encoding="utf-8")
+        self.assertIn("a1", planned("--missing"))
+        (ocr / "a1.json").write_text(json.dumps({"item_id": "a1", "source": "mineru", "units": []}), encoding="utf-8")
+        self.assertNotIn("a1", planned("--missing"))
+        from kb_status import gather
+        reading = gather(self.out, None)["reading"]["PDF"]
+        self.assertEqual((reading["mineru"], reading["text"]), (1, reading["files"] - 1))
+
     def test_content_list_becomes_separate_ocr_page_units(self) -> None:
         result = self.root / "result"
         result.mkdir()
@@ -150,6 +173,22 @@ class MinerUTests(Base):
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
         self.assertIn("Megabrand", page)
         self.assertIn("⚠ 含没核实的词：Megabrand", page)
+
+    def test_picture_read_by_reducto_enters_the_knowledge_base(self) -> None:
+        path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["assets"].append({**manifest["assets"][0], "item_id": "p1", "display_name": "label.png",
+                                   "asset_kind": "image", "path": "A/label.png", "source_hash": "p" * 64})
+        path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        (self.package / "A").mkdir(exist_ok=True)
+        (self.package / "A/label.png").write_bytes(b"\x89PNG")
+        self.pipeline()
+        self.assertEqual(json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]["reason"], "image_needs_review")
+        (self.build / "reducto-units").mkdir(exist_ok=True)
+        (self.build / "reducto-units/p1.json").write_text(json.dumps({"item_id": "p1", "source": "reducto", "units": [
+            {"locator": "page 1 ocr", "text": "NTX S-555 LABEL", "engine": "reducto"}]}), encoding="utf-8")
+        self.pipeline()
+        self.assertEqual(json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]["reason"], "image_read")
 
     def test_report_page_is_marked_not_dropped(self) -> None:
         self.clear_catalog_pending()

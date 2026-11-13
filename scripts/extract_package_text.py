@@ -420,13 +420,30 @@ def main() -> int:
                 continue
             if allowed is not None and asset["item_id"] not in allowed and asset.get("decision") != "E":
                 continue
+            path = package / asset["path"]
+            text_path = text_dir / f"{asset['item_id']}.json"
+            # A manifest hash describes the screened bytes, not necessarily today's
+            # package copy. Check that copy even when its old text is cached.
+            try:
+                problem = "missing_file" if not Path(long_path(path)).is_file() else \
+                    "hash_mismatch" if sha256_file(path) != asset["source_hash"] else ""
+            except OSError:
+                problem = "failed"
+            if problem:
+                text_path.unlink(missing_ok=True)
+                statuses[asset["item_id"]] = {
+                    "display_name": asset.get("display_name"), "source_hash": asset["source_hash"],
+                    "extractor": reader_version(asset.get("display_name") or asset["path"]),
+                    "status": problem, "characters": 0,
+                }
+                continue
             previous = statuses.get(asset["item_id"], {})
             needed = reader_version(asset.get("display_name") or asset["path"])
             done = previous.get("source_hash") == asset["source_hash"] and int(previous.get("extractor") or 1) >= needed \
                 and previous.get("status") in {"read_ok", "partial", "needs_ocr", "unsupported"}
             if done and (previous.get("status") == "unsupported" or (text_dir / f"{asset['item_id']}.json").is_file()):
                 continue  # Same bytes, read the same way as last time: nothing to redo.
-            jobs.append((asset, package / asset["path"]))
+            jobs.append((asset, path))
 
     # Try LibreOffice once on a tiny file before old Office files wait on it one by one.
     legacy = [a for a, _ in jobs if Path(a.get("display_name") or a["path"]).suffix.casefold() in LEGACY_OFFICE
@@ -475,6 +492,8 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for item_id, status in pool.map(one, jobs):
             statuses[item_id] = status
+            if status["status"] not in {"read_ok", "partial", "needs_ocr"}:
+                (text_dir / f"{item_id}.json").unlink(missing_ok=True)
     # Folders an older version left behind when LibreOffice still held them.
     for leftover in cache.glob("lo-*") if cache.is_dir() else []:
         shutil.rmtree(leftover, ignore_errors=True)

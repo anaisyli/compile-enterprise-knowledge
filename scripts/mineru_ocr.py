@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from extract_package_text import markdown_table
-from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, normalize_space, remaining_ocr_pages, write_json, write_text
+from kb_common import BUILD_DIRECTORY, PAGED_FILES, load_config, load_json, load_jsonl, normalize_space, read_by, remaining_ocr_pages, write_json, write_text
 from mineru_client import MinerUError, client_from_env, extract, failure_report, probe
-from samples import METHODS, PAGED_KINDS, TYPES, choose_samples, doc_type, load_decisions, load_gate, method_of
+from samples import (METHODS, PAGED_KINDS, TYPES, choose_samples, doc_type, load_decisions, load_gate, method_and_source,
+                     unreadable, unreadable_method)
 
 
 MINERU_FILES = {".pdf", ".pptx", ".ppt", ".docx", ".doc"}
@@ -31,10 +32,12 @@ OCR_DIRECTORY = "mineru-units"
 CACHE_DIRECTORY = "mineru-cache"
 
 
-def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool = False) -> list[dict[str, Any]]:
+def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool = False, missing: bool = False) -> list[dict[str, Any]]:
     """Files MinerU would read: whole kinds a person chose “MinerU 初稿 + AI 复核” for after seeing their
     sample, pages with no text layer, and files nothing could be read from. With samples_only, the
-    sample of each kind still waiting for a decision, so MinerU's result can be seen before deciding."""
+    sample of each kind still waiting for a decision, so MinerU's result can be seen before deciding.
+    With missing, also every PDF/PPT in the knowledge base MinerU has not read yet."""
+    done = read_by(build) if missing else {}
     routes = load_json(build / "routes.json")
     docs = {d["item_id"]: d for d in load_jsonl(build / "docs.jsonl")} if (build / "docs.jsonl").is_file() else {}
     decisions = load_decisions(build)
@@ -55,13 +58,21 @@ def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool =
             if item_id in trial and route["route"] == "kb":
                 reasons.append("样例试读：看 MinerU 的效果，再定这类文件怎么处理")
         else:
-            if route["route"] == "kb" and method_of(kind, decisions) == "mineru":
-                reasons.append(f"这类（{TYPES.get(kind, ('', ''))[0]}）按“{METHODS['mineru']}”处理")
-            left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" else []
+            method, source = method_and_source(kind, decisions, item_id)
+            if route["route"] == "kb" and method == "mineru":
+                reasons.append(f"这份文件按“{METHODS['mineru']}”处理" if source == "文件"
+                               else f"这类（{TYPES.get(kind, ('', ''))[0]}）按“{METHODS['mineru']}”处理")
+            # Files read by the model (no upload) or by Reducto keep their no-text pages away from MinerU.
+            left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" and method in {"text", "mineru"} else []
             if left:
                 reasons.append(f"{len(left)} 页没有文字层或文字很少，还没人读过")
-            if route["route"] == "hold" and route["reason"] == "no_extractable_content":
-                reasons.append("文件读不出文字")
+            if unreadable(route):
+                held_method, held_from = unreadable_method(decisions, item_id)
+                if held_method in {"mineru", "text"}:
+                    reasons.append("文件读不出文字" + ("（这份文件指定 MinerU）" if held_from == "文件" else ""))
+            if (missing and not reasons and route["route"] == "kb" and Path(name).suffix.casefold() in PAGED_FILES
+                    and "mineru" not in done.get(item_id, set())):
+                reasons.append("已入库，还没走过 MinerU（整批补跑）")
         if reasons:
             path = package_paths[item_id]
             chosen.append({"item_id": item_id, "display_name": name, "path": str(path),
@@ -130,7 +141,8 @@ def write_plan(build: Path, chosen: list[dict[str, Any]], state: dict[str, Any])
     lines.extend(f"| {e['display_name']} | {e['size_mb']} | {'；'.join(e['reasons'])} |" for e in chosen)
     lines.extend(["", f"Token 状态：{state['message']}；{state['expiry']['message']}。", "",
                   "同意上传后，在 kb-config.json 里加：",
-                  '`"mineru": {"approved": true, "approved_by": "姓名", "approved_at": "YYYY-MM-DD", "scope": "本计划全部文件"}`'])
+                  '`"mineru": {"approved": true, "approved_by": "姓名", "approved_at": "YYYY-MM-DD", "scope": "本计划全部文件"}`',
+                  "", "已有 `approved_item_ids` 时，只上传其中列出的文件；要扩大范围，把 `mineru-plan.json` 里的 item_id 加进去，并改写 scope。"])
     write_text(build / "mineru-plan.md", "\n".join(lines) + "\n")
 
 
@@ -141,7 +153,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat for several")
     parser.add_argument("--config", help="kb-config.json")
     parser.add_argument("--only", action="append", default=[], help="item_id to run; default every planned file")
-    parser.add_argument("--samples", action="store_true", help="Only the samples of kinds still waiting for a decision: try MinerU before choosing")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--samples", action="store_true", help="Only the samples of kinds still waiting for a decision: try MinerU before choosing")
+    group.add_argument("--missing", action="store_true", help="Also every PDF/PPT in the knowledge base MinerU has not read yet")
     return parser.parse_args()
 
 
@@ -156,7 +170,7 @@ def main() -> int:
             if asset.get("path"):
                 package_paths[asset["item_id"]] = root / asset["path"]
     routes = load_json(build / "routes.json")
-    chosen = candidates(build, package_paths, args.samples)
+    chosen = candidates(build, package_paths, args.samples, args.missing)
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:

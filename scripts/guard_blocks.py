@@ -44,8 +44,10 @@ HARD_PATTERNS = {
     # \b fails beside Chinese, so Latin terms are bounded by letters only.
     "payment_term": re.compile(r"(?i)(?<![a-z])(?:t/t|l/c|d/p|d/a)(?![a-z])|付款方式|预付款|定金|尾款|deposit\s+\d|balance\s+before"
                                r"|payment\s*terms?\s*[:：]|advance\s+payment\s*\d|\d+\s*%\s*(?:deposit|advance|before\s+shipment|balance|against)"),
-    # Trade terms of a quote (Price term: EXW SHENZHEN): commercial terms, kept out of every document.
-    "trade_term": re.compile(r"(?i)(?:price|trade|delivery)\s*terms?\s*[:：]|(?<![a-z])(?:exw|fob|cif|cfr|ddp|dap)(?![a-z])"),
+    # Trade terms of a quote (Price term: EXW SHENZHEN, FOB Ningbo): commercial terms, kept out of every document.
+    # A glossary naming the term itself (EXW Price | 出厂价, FOB = Free On Board) is not a quote.
+    "trade_term": re.compile(r"(?i)(?:price|trade|delivery)\s*terms?\s*[:：]|(?<![a-z])(?:exw|fob|cif|cfr|ddp|dap)(?![a-z])"
+                             r"(?!\s*[=:：(（|/-]?\s*(?:prices?\b|价|terms?\b|条件|术语|is\b|means\b|stands\b|free\s+on|ex\s+works|cost\b|carriage\b|delivered\b))"),
     "order_number": re.compile(r"(?i)\bP\.?O\.?\s*(?:#|no\.?|number)?\s*[:：]?\s*\d{3,}|\bFPO\d{3,}|订单号"),
     "bare_cost": re.compile(
         r"(?i)\d\s*(?:/\s*(?:m|米|kg|公斤|件|码|yd|yard|pcs?)\b|/\s*(?:米|公斤|件|码)|元|块|毛钱|毛\b|一米|每件|每米|一条|一件)"
@@ -359,7 +361,7 @@ def split_on_hits(blocks: list[dict[str, Any]], hard_terms: re.Pattern[str] | No
     The pieces stay in order, so together they are still the source line word for word."""
     result = []
     for block in blocks:
-        if block["kind"] != "text" or not hard_hits(block["text"], hard_terms, own_domains, own_contacts) \
+        if block.get("reviewed_removal") or block["kind"] != "text" or not hard_hits(block["text"], hard_terms, own_domains, own_contacts) \
                 or hard_hits(block["group"], hard_terms, own_domains, own_contacts):
             result.append(block)
             continue
@@ -498,6 +500,79 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def deduplicate_blocks(blocks: list[dict[str, Any]], keep: set[str], drop: set[str]) -> list[dict[str, Any]]:
+    """Identical package copies share a doc_id; keep their first block identity.
+
+    Location, text, provenance and review decisions must all agree. Repeated text
+    at different locations, or copies with different approvals, is left alone.
+    """
+    seen = set()
+    result = []
+    for block in blocks:
+        content = {key: value for key, value in block.items() if key != "block_id"}
+        reviewed = (block["block_id"] in keep or block.get("part_of") in keep,
+                    block["block_id"] in drop or block.get("part_of") in drop)
+        key = (json.dumps(content, sort_keys=True, ensure_ascii=False), reviewed)
+        if key not in seen:
+            seen.add(key)
+            result.append(block)
+    return result
+
+
+def apply_reviewed_removals(blocks: list[dict[str, Any]], removals: list[dict[str, Any]],
+                           source_hashes: dict[str, str], skipped: list[str] | None = None) -> list[dict[str, Any]]:
+    """Split exact, hash-bound review spans without losing any source characters.
+
+    A rule that no longer fits (file changed, text not found once, spans overlap) is left out and
+    reported in skipped: the block stays whole and the rest of the run goes on."""
+    skipped = skipped if skipped is not None else []
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for removal in removals:
+        by_id.setdefault(removal.get("block_id", ""), []).append(removal)
+    for block_id in list(by_id):
+        if sum(b["block_id"] == block_id for b in blocks) != 1:
+            skipped.append(f"{block_id}：找不到唯一的原文块，这条删除没执行")
+            del by_id[block_id]
+    result = []
+    for block in blocks:
+        decisions = by_id.get(block["block_id"], [])
+        spans = []
+        for decision in decisions:
+            text = decision.get("text", "")
+            if not decision.get("source_sha256") or decision["source_sha256"] != source_hashes.get(block["doc_id"]):
+                skipped.append(f"{block['block_id']}：原件已变，这条删除没执行，请重新核对")
+            elif block["kind"] != "text" or not text or block["text"].count(text) != 1:
+                skipped.append(f"{block['block_id']}：要删的文字在块里不是正好出现一次，这条删除没执行")
+            else:
+                start = block["text"].index(text)
+                if any(start < e and start + len(text) > s for s, e, _ in spans):
+                    skipped.append(f"{block['block_id']}：和另一条删除范围重叠，这条没执行")
+                else:
+                    spans.append((start, start + len(text), decision))
+        if not spans:
+            result.append(block)
+            continue
+        spans.sort(key=lambda span: span[0])
+        pieces, cursor = [], 0
+        for start, end, decision in spans:
+            if start > cursor:
+                pieces.append((block["text"][cursor:start], None))
+            pieces.append((block["text"][start:end], decision))
+            cursor = end
+        if cursor < len(block["text"]):
+            pieces.append((block["text"][cursor:], None))
+        anchor = next((i for i, (text, decision) in enumerate(pieces) if decision is None and text.strip()), 0)
+        for index, (text, decision) in enumerate(pieces):
+            piece = {**block, "text": text}
+            if index != anchor:
+                piece.update(block_id=short_hash(f"{block['block_id']}|reviewed-removal|{index}", 12),
+                             part_of=block["block_id"])
+            if decision is not None:
+                piece["reviewed_removal"] = dict(decision)
+            result.append(piece)
+    return result
+
+
 def main() -> int:
     args = parse_args()
     build = Path(args.out).resolve() / BUILD_DIRECTORY
@@ -509,6 +584,13 @@ def main() -> int:
     drop_blocks = set(decisions.get("drop_blocks", []))
 
     blocks = load_jsonl(build / "blocks-raw.jsonl")
+    before = len(blocks)
+    blocks = deduplicate_blocks(blocks, keep_blocks, drop_blocks)
+    duplicates = before - len(blocks)
+    removal_skipped: list[str] = []
+    blocks = apply_reviewed_removals(blocks, decisions.get("remove_text", []),
+                                    {d["doc_id"]: d.get("source_sha256", "")
+                                     for d in load_jsonl(build / "docs.jsonl")}, removal_skipped)
     cell_decisions = {r["cell_key"]: r for r in load_jsonl(build / "cell-review" / "decisions.jsonl")}
     for block in blocks:
         if block["kind"] == "row" and cell_decisions:
@@ -565,6 +647,8 @@ def main() -> int:
             block["status"], block["hold_reasons"] = "dropped", ["reviewer_dropped_cells"]
         elif not block["text"] or (block["kind"] == "text" and garbled(block["text"])):
             block["status"], block["hold_reasons"] = "dropped", ["empty_or_garbled"]
+        elif block.get("reviewed_removal"):
+            block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped", block["reviewed_removal"]["reason"]]
         elif block["block_id"] in drop_blocks or block.get("part_of") in drop_blocks:
             block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped"]
         elif hard:
@@ -596,8 +680,11 @@ def main() -> int:
                 # A compilation from other suppliers' listings: it can guide, not state the company's facts.
                 block["flags"].append({"type": "reference_draft", "terms": []})
             if block.get("ai_read") and not trusted:
-                # The model read it from a picture; nobody has compared it with the page yet.
-                block["flags"].append({"type": "ai_added" if block.get("ai_checked") else "ai_read", "terms": []})
+                # The model (or Reducto) read it from a picture; nobody has compared it with the page yet.
+                flag = {"type": "ai_added" if block.get("ai_checked") else "ai_read", "terms": []}
+                if block.get("reader") == "reducto":
+                    flag["reader"] = "reducto"
+                block["flags"].append(flag)
             if block.get("client_hold"):
                 block["status"] = "pending_client"
             else:
@@ -645,7 +732,9 @@ def main() -> int:
     write_text(build / "review-queue.md", "\n".join(lines) + "\n")
     print(
         json.dumps(
-            {"counts": dict(counts), "repeated_lines_removed": repeated, "terms_to_review": len(ordered),
+            {"counts": dict(counts), "duplicate_blocks_removed": duplicates,
+             "reviewed_removals_skipped": removal_skipped,
+             "repeated_lines_removed": repeated, "terms_to_review": len(ordered),
              "term_dictionary": {key: len(value) for key, value in terms.items()}},
             ensure_ascii=False,
         )

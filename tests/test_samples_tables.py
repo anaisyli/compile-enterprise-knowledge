@@ -147,6 +147,29 @@ class SampleFirstTests(Base):
         self.assertIn("| MinerU+复核 | 已确认 |", merged)
         self.assertIn("| 文字层（默认） | 待确认 |", merged)  # Untouched rows stay as generated.
 
+    def test_a_method_written_for_one_file_is_read_back_by_its_number(self) -> None:
+        from publish_vault import merge_plan
+        from samples import method_and_source
+        new = ("| 类型 | 份数 | 在初筛包哪里 | 怎么提取 | 样例 | 样例情况 | 要做的事 | 处理方式 | 确认状态 |\n"
+               "| 产品画册 PDF | 2 | A | 读 | [[x]] | — | — | 文字层（默认） | 已确认 |\n\n"
+               "## 按文件指定处理方式\n\n"
+               "| 文件 | 编号 | 类型 | A 文字页 | B 图文页 | C 难页 | D 冲突页 | 处理方式 |\n"
+               "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |\n"
+               "| 画册2024 | a1 | 产品画册 PDF | 3 | 8 | 4 | 0 | 文字层直接提取（随类型） |\n"
+               "| 画册2023 | a2 | 产品画册 PDF | 9 | 1 | 0 | 0 | MinerU 初稿 + AI 复核 |\n"
+               "| 扫描件 | a3 | 读不出内容 | 0 | 0 | 5 | 0 | MinerU 初稿 + AI 复核（默认） |\n"
+               "| 扫描件2 | a4 | 读不出内容 | 0 | 0 | 2 | 0 | MinerU 初稿 + AI 复核（默认） |\n")
+        current = (new.replace("| 文字层直接提取（随类型） |", "| Reducto |").replace("| MinerU 初稿 + AI 复核 |", "| 随类型 |")
+                   .replace("| 5 | 0 | MinerU 初稿 + AI 复核（默认） |", "| 5 | 0 | Reducto |"))
+        merged, answers = merge_plan(current, new)
+        # An untouched “（默认）” row stores nothing: the file keeps following the default.
+        self.assertEqual(answers, {"catalog_pdf": {"status": "已确认"}, "文件:a1": {"method": "reducto"}, "文件:a2": {"method": ""},
+                                   "文件:a3": {"method": "reducto"}})
+        self.assertIn("| 画册2024 | a1 | 产品画册 PDF | 3 | 8 | 4 | 0 | Reducto |", merged)
+        decisions = {**answers, "catalog_pdf": {"status": "已确认", "method": "mineru"}}
+        self.assertEqual(method_and_source("catalog_pdf", decisions, "a1"), ("reducto", "文件"))  # The file wins over its kind.
+        self.assertEqual(method_and_source("catalog_pdf", decisions, "a2"), ("mineru", "类型"))
+
     def test_a_quotation_confirmed_by_an_earlier_version_counts_for_spreadsheets(self) -> None:
         from samples import is_confirmed
         self.assertTrue(is_confirmed("spreadsheet", {"quotation": {"status": "已确认"}}, {}))

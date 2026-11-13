@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, MODULES, TIERS, load_json, load_jsonl, parse_frontmatter, remaining_ocr_pages, write_json, write_text
+from kb_common import BUILD_DIRECTORY, MODULES, PAGED_FILES, TIERS, load_json, load_jsonl, parse_frontmatter, read_by, remaining_ocr_pages, write_json, write_text
 from curate import page_sections
 from mineru_client import probe
 from review_cells import progress_of, t3_gate
@@ -51,6 +51,14 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
             pending = remaining_ocr_pages(build, item_id, route["ocr_pages"])
             if pending:
                 ocr.append((route["display_name"], len(pending)))
+    found, reading = read_by(build), {}
+    for item_id, route in routes.items():
+        suffix = Path(route.get("display_name") or "").suffix.casefold()
+        if route.get("route") != "kb" or suffix not in PAGED_FILES:
+            continue
+        row = reading.setdefault("PDF" if suffix == ".pdf" else "PPT", Counter())
+        how = found.get(item_id, set())
+        row.update(["files", *how] if how else ["files", "text"])
     token = probe()
     passed, reason = t3_gate(run)
     receipt = vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json" if vault else None
@@ -90,7 +98,7 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
         "build": str(build),
         "ledgers": read(build / "governance-summary.json", {}),
         "terms_to_review": len(load_jsonl(build / "review-queue.jsonl")),
-        "cells": progress_of(run), "t3": "可发布" if passed else reason, "ocr": ocr,
+        "cells": progress_of(run), "t3": "可发布" if passed else reason, "ocr": ocr, "reading": reading,
         "token": token["expiry"]["message"] if token["ok"] else token["message"],
         "token_days": token["expiry"].get("days_remaining"),
         "website_pages": len(pages), "website_oldest": oldest,
@@ -264,6 +272,14 @@ def coverage(state: dict[str, Any], run: Path) -> list[str]:
             lines.extend(f"| {row['section']} | {row['available']} 段 | {row['documents']} 份 | {row['status']} | {row['how']} |"
                          for row in mine if row["topic"] == topic)
         lines.append("")
+    if state.get("reading"):
+        lines.extend(["## PDF 和 PPT 怎么读的", "", "| 类型 | 入库 | 走过 MinerU | 有 Reducto 难页 | 有 AI 读图 | 看图核对过 | 只用文字层 |",
+                      "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"])
+        lines.extend(f"| {kind} | {row['files']} | {row['mineru']} | {row.get('reducto', 0)} | {row['ai']} | {row['check']} | {row['text']} |"
+                     for kind, row in sorted(state["reading"].items()))
+        lines.extend(["", "一份文件可能走过几种，所以各列加起来会多于入库份数。“只用文字层”的要整批补跑 MinerU 时，"
+                      "运行 `mineru_ocr.py plan --missing`，用户批准后 `mineru_ocr.py run --missing`。"
+                      "Reducto 只读难页，和 MinerU 的对照在 `04_知识库构建/reducto-diff.md`。", ""])
     lines.extend(["## 其他缺口", ""])
     if state["topics_without_page"]:
         lines.append(f"- 已准备、还没写的主题：{'、'.join(state['topics_without_page'])}（`04_知识库构建/curation`）")

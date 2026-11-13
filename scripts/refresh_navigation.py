@@ -23,6 +23,30 @@ RECEIPT = "05_数据与审核/50_运行记录/compile-enterprise-knowledge-recei
 ARCHIVE = "05_数据与审核/60_版本归档/10_正式知识历史"
 # Written into the vault by kb_status after each publish, never part of a build.
 STATUS_PAGES = ("01_工作台/00_知识库总览.md", "05_数据与审核/20_知识库覆盖与缺口/01_知识库覆盖与缺口.md")
+STATUS_TIMESTAMP = re.compile(r"(?m)^更新于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}(?:；最近发布：\d{8}-\d{6})?。$")
+
+
+def status_page_update_only(current: str, proposed: str) -> bool:
+    """Recognize the generated update timestamp without hiding edits to page content."""
+    marker = "更新于 <generated timestamp>。"
+    return STATUS_TIMESTAMP.sub(marker, current) == STATUS_TIMESTAMP.sub(marker, proposed)
+
+
+def archived_status_timestamp_drift(vault: Path, key: str, digest: str) -> bool:
+    """Prove an old receipt mismatch using its archived page, without accepting content edits."""
+    from publish_vault import normalized_hash
+    if key not in STATUS_PAGES or not (vault / key).is_file():
+        return False
+    current = (vault / key).read_text(encoding="utf-8-sig")
+    if "<!-- compile-enterprise-knowledge -->" not in current or not STATUS_TIMESTAMP.search(current):
+        return False
+    for old in (vault / ARCHIVE).glob(f"*/{key}"):
+        if normalized_hash(old) != digest:
+            continue
+        archived = old.read_text(encoding="utf-8-sig")
+        if STATUS_TIMESTAMP.search(archived) and status_page_update_only(archived, current):
+            return True
+    return False
 
 
 def obsidian_prefix(project: Path) -> str:
@@ -221,7 +245,9 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
     for key in changed:
         if key in receipt["files"] and "30_异常与待决定/" not in key and key != PLAN:
             if normalized_hash(vault / key) != receipt["files"][key]:
-                raise SystemExit(f"文件有人修改，停止维护，不覆盖：{key}")
+                if not archived_status_timestamp_drift(vault, key, receipt["files"][key]) and (key not in STATUS_PAGES or not status_page_update_only(
+                        (vault / key).read_text(encoding="utf-8-sig"), texts[key])):
+                    raise SystemExit(f"文件有人修改，停止维护，不覆盖：{key}")
         elif key not in receipt["files"] and "<!-- compile-enterprise-knowledge -->" not in (vault / key).read_text(encoding="utf-8"):
             raise SystemExit(f"无法确认是生成页，不覆盖：{key}")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + "-navigation"
@@ -237,6 +263,7 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
             (vault / key).write_text(texts[key], encoding=encoding, newline="")
         for key, text in texts.items():
             if key in STATUS_PAGES:
+                receipt["files"][key] = normalized_hash(vault / key)
                 continue  # Vault pages only: a build must stay what a rebuild would make.
             destination = run / CLEAN_DIRECTORY / Path(key).relative_to(SOURCE) if key.startswith(SOURCE + "/") else build / "vault" / key
             destination.parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,7 @@ from governance import merge_ledger
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
-from samples import PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
+from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
 
 
 SOURCE = Path("02_源资料/10_净化原文")
@@ -180,31 +180,46 @@ def update_project_info(vault: Path, packages: list[str]) -> None:
 
 def merge_plan(current: str, new: str) -> tuple[str, dict[str, dict[str, str]]]:
     """Keep the 确认状态 and 处理方式 a person wrote in the plan page; return
-    (page, {kind or structure key: {"status": …, "method": …}}), with only what the person set."""
+    (page, {kind, structure or 文件:<item_id> key: {"status": …, "method": …}}), with only what the person set.
+    In 按文件指定处理方式, “（随类型）” means the file follows its kind; writing 随类型 clears a file's own choice."""
     labels = {label: key for key, (label, _) in TYPES.items()}
 
-    def rows(text: str) -> dict[str, list[str]]:
-        found = {}
+    def sections(text: str):
+        """(in the per-file section, line, cells) for each line."""
+        in_files = False
         for line in text.splitlines():
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-            if len(cells) >= 5 and not set(cells[0]) <= set("-: ") and cells[0] not in {"类型", "结构", "初筛类别"}:
-                found[cells[0]] = cells
-        return found
+            if line.startswith("## "):
+                in_files = line.strip() == FILE_METHODS_HEADING
+            yield in_files, line, [cell.strip() for cell in line.strip().strip("|").split("|")]
 
-    written = rows(current)
+    def is_row(line: str, cells: list[str]) -> bool:
+        return line.startswith("|") and len(cells) >= 5 and not set(cells[0]) <= set("-: ") and cells[0] not in {"类型", "结构", "初筛类别", "文件"}
+
+    written = {cells[0]: cells for in_files, line, cells in sections(current) if not in_files and is_row(line, cells)}
     people = {label: cells[-1] for label, cells in written.items() if cells[-1] and cells[-1] != PENDING}
     # The 处理方式 column sits before 确认状态 in rows of nine cells; “（默认）” means nobody chose yet.
     methods = {label: cells[-2] for label, cells in written.items()
                if label in labels and len(cells) >= 9 and "默认" not in cells[-2] and parse_method(cells[-2])}
+    # Per file rows: 文件 | 编号 | … | 处理方式; keyed by 编号 (item_id), the name can change.
+    file_rows = {cells[1]: cells[-1] for in_files, line, cells in sections(current) if in_files and is_row(line, cells) and len(cells) >= 8}
+    file_methods = {item: text for item, text in file_rows.items()
+                    if "随类型" not in text and "默认" not in text and parse_method(text)}
     answers: dict[str, dict[str, str]] = {}
     for label, status in people.items():
         answers.setdefault(labels.get(label, f"{STRUCTURE_PREFIX}{label}"), {})["status"] = status
     for label, text in methods.items():
         answers.setdefault(labels[label], {})["method"] = parse_method(text)
+    for item, text in file_rows.items():
+        if item in file_methods:
+            answers[f"{FILE_PREFIX}{item}"] = {"method": parse_method(text)}
+        elif ("随类型" in text or "默认" in text) and not parse_method(text):
+            answers[f"{FILE_PREFIX}{item}"] = {"method": ""}  # Back to the kind's way.
     lines = []
-    for line in new.splitlines():
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if line.startswith("|") and len(cells) >= 5 and (cells[0] in people or cells[0] in methods):
+    for in_files, line, cells in sections(new):
+        if in_files and is_row(line, cells) and len(cells) >= 8 and cells[1] in file_methods:
+            cells[-1] = file_methods[cells[1]]
+            line = "| " + " | ".join(cells) + " |"
+        elif not in_files and is_row(line, cells) and (cells[0] in people or cells[0] in methods):
             if cells[0] in people:
                 cells[-1] = people[cells[0]]
             if cells[0] in methods and len(cells) >= 9:
@@ -297,9 +312,13 @@ def main() -> int:
     archived: list[str] = []
     warnings: list[str] = []
     unsure = 0
+    from refresh_navigation import archived_status_timestamp_drift
     for key, digest in previous.items():
         target = vault / key
         if not target.is_file() or key.startswith(LEDGER_ROOT) or key == PLAN_PAGE or normalized_hash(target) == digest:
+            continue
+        if not legacy and archived_status_timestamp_drift(vault, key, digest):
+            warnings.append(f"旧收据仅遗漏自动更新时间，已用匹配收据的归档逐字核实：{key}")
             continue
         if legacy:
             # Old receipts hashed raw bytes, so any spacing looks like an edit. Whatever is replaced

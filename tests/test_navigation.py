@@ -6,13 +6,37 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from governance import merge_ledger, parse_ledger, render_ledger
+from governance import CLOSED_STAGES, merge_ledger, parse_ledger, render_ledger
 from pictures import retained_record
-from refresh_navigation import Links, obsidian_prefix, deduplicate_term_record
+from refresh_navigation import Links, obsidian_prefix, deduplicate_term_record, status_page_update_only, archived_status_timestamp_drift, ARCHIVE
 from publish_vault import normalized_hash
 
 
 class NavigationTests(unittest.TestCase):
+    def test_legacy_timestamp_drift_requires_matching_archive_and_unchanged_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            key = "01_工作台/00_知识库总览.md"
+            old = vault / ARCHIVE / "20261112-navigation" / key
+            current = vault / key
+            old.parent.mkdir(parents=True)
+            current.parent.mkdir(parents=True)
+            text = "<!-- compile-enterprise-knowledge -->\n更新于 2026-11-12 15:05；最近发布：20261112-150423。\n## 内容\n"
+            old.write_text(text, encoding="utf-8")
+            digest = normalized_hash(old)
+            current.write_text(text.replace("15:05", "15:06"), encoding="utf-8")
+            self.assertTrue(archived_status_timestamp_drift(vault, key, digest))
+            self.assertFalse(archived_status_timestamp_drift(vault, key, "unmatched"))
+            current.write_text(text.replace("## 内容", "## 人工内容"), encoding="utf-8")
+            self.assertFalse(archived_status_timestamp_drift(vault, key, digest))
+            self.assertFalse(archived_status_timestamp_drift(vault, "other.md", digest))
+
+    def test_status_refresh_accepts_only_a_generated_timestamp_change(self):
+        old = "<!-- compile-enterprise-knowledge -->\n更新于 2026-11-12 15:05；最近发布：20261112-150423。\n\n## 内容\n"
+        new = old.replace("15:05", "15:06")
+        self.assertTrue(status_page_update_only(old, new))
+        self.assertFalse(status_page_update_only(old, new.replace("## 内容", "## 手工修改")))
+
     def test_empty_machine_table_keeps_resolved_history_and_human_notes(self):
         old = render_ledger("CUS", "台账", "用途", "P-999", "2026-11-01", [
             {"id": "P-999-CUS-001", "row": ["问题", "1 份", "已发客户", "负责人"], "details": [], "updated": "2026-11-01"}])
@@ -69,6 +93,9 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("知识库专员处理中", merge_ledger(previous, current))
         closed = current.replace("知识库专员处理中", "已关闭")
         self.assertIn("已关闭", merge_ledger(closed, current))
+        legacy_closed = current.replace("知识库专员处理中", "已核实，可结案")
+        self.assertIn("已核实，可结案", CLOSED_STAGES)
+        self.assertIn("已核实，可结案", merge_ledger(legacy_closed, current))
 
     def test_obsidian_short_table_alignment_is_only_formatting(self):
         with tempfile.TemporaryDirectory() as folder:

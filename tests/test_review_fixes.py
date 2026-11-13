@@ -15,6 +15,84 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from test_extensions import Base, run  # noqa: E402
 from curate import assign, topics_for  # noqa: E402
 from sections import load_sections  # noqa: E402
+from guard_blocks import apply_reviewed_removals, deduplicate_blocks  # noqa: E402
+from governance import screening_location_resolved, screening_contacts_resolved  # noqa: E402
+from extract_blocks import find_header  # noqa: E402
+
+
+class ProductHeaderTests(unittest.TestCase):
+    def test_terminology_rows_are_not_a_product_header(self) -> None:
+        rows = {1: {"A": "中文术语 / 表达", "B": "English Term / Expression", "C": "说明 / Usage"},
+                2: {"A": "屏幕尺寸", "B": "Screen Size", "C": "显示屏对角线尺寸，通常以英寸表示"}}
+        self.assertIsNone(find_header(rows, [], "terms", {}))
+
+    def test_price_term_row_or_definition_column_is_not_a_glossary(self) -> None:
+        quote = {1: {"A": "Price Term", "B": "FOB Ningbo"}, 3: {"A": "Item No.", "B": "Description", "C": "Unit Price"},
+                 4: {"A": "S-100", "B": "Vest", "C": "3.5"}}
+        self.assertEqual(find_header(quote, [], "quote", {})[0], 3)
+        product = {1: {"A": "Model", "B": "Description", "C": "Definition"}, 2: {"A": "S-100", "B": "Vest", "C": "x"}}
+        self.assertEqual(find_header(product, [], "products", {})[0], 1)
+
+    def test_product_header_below_company_information_is_still_found(self) -> None:
+        rows = {1: {"A": "Company Ltd"}, 3: {"A": "Model", "B": "Description", "C": "Price"},
+                4: {"A": "DS50", "B": "Digital signage", "C": "100"}}
+        self.assertEqual(find_header(rows, [], "products", {})[0], 3)
+
+
+class ReviewedRemovalTests(unittest.TestCase):
+    def test_website_product_contacts_are_checked_after_cleanup(self) -> None:
+        doc = {"resource_type": "product", "folder": "官网页面/产品"}
+        locations = ["第 9 行完整联系信息段落", "第 11 行完整联系信息段落"]
+        blocks = [{"kind": "text", "status": "removed", "text": "Tel: +8613480721502"},
+                  {"kind": "text", "status": "kept", "text": "Email: info@own.example"}]
+        self.assertTrue(screening_contacts_resolved(doc, locations, blocks, {"own.example"}, []))
+        self.assertTrue(screening_contacts_resolved({**doc, "folder": "官网页面"}, locations, blocks, {"own.example"}, []))
+        blocks[1]["text"] = "Email: buyer@external.example"
+        self.assertFalse(screening_contacts_resolved(doc, locations, blocks, {"own.example"}, []))
+
+    def test_contacts_do_not_close_addresses_or_nonwebsite_products(self) -> None:
+        blocks = [{"kind": "text", "status": "kept", "text": "Product data"}]
+        website = {"resource_type": "product", "folder": "官网页面/产品"}
+        self.assertFalse(screening_contacts_resolved(website, ["第 17 行完整详细地址段落"], blocks, set(), []))
+        self.assertFalse(screening_contacts_resolved({"resource_type": "product"}, ["第 9 行完整联系信息段落"], blocks, set(), []))
+        self.assertFalse(screening_contacts_resolved(website, ["联系信息段落"], [], set(), []))
+
+    def test_exact_span_preserves_body_identity_and_audit(self) -> None:
+        block = {"block_id": "first", "doc_id": "doc", "kind": "text", "text": "Before\nPrivate address\nAfter"}
+        decision = {"block_id": "first", "source_sha256": "hash", "text": "Private address",
+                    "reason": "detailed_address", "screening_locator": "line 2"}
+        parts = apply_reviewed_removals([block], [decision], {"doc": "hash"})
+        self.assertEqual("".join(p["text"] for p in parts), block["text"])
+        self.assertEqual(parts[0]["block_id"], "first")
+        self.assertEqual(parts[1]["part_of"], "first")
+        self.assertEqual(parts[1]["reviewed_removal"], decision)
+        self.assertFalse(screening_location_resolved("line 2", parts))
+        parts[1]["status"] = "removed"
+        self.assertTrue(screening_location_resolved("line 2", parts))
+        for given, hashes, why in (([block], {"doc": "changed"}, "原件已变"),
+                                   ([{**block, "text": block["text"] * 2}], {"doc": "hash"}, "正好出现一次")):
+            skipped: list[str] = []
+            self.assertEqual(apply_reviewed_removals(given, [decision], hashes, skipped), given)
+            self.assertIn(why, skipped[0])
+
+    def test_full_page_needs_every_block_removed(self) -> None:
+        location = "page 1 整页删除（联系信息页）"
+        blocks = [{"locator": "page 1 col 1", "status": "removed"},
+                  {"locator": "page 1 col 2", "status": "kept"}]
+        self.assertFalse(screening_location_resolved(location, []))
+        self.assertFalse(screening_location_resolved(location, blocks))
+        blocks[1]["status"] = "removed"
+        self.assertTrue(screening_location_resolved(location, blocks))
+
+
+class DuplicateBlockTests(unittest.TestCase):
+    def test_dedup_preserves_locations_and_review_decisions(self) -> None:
+        first = {"block_id": "first", "doc_id": "doc", "kind": "text", "locator": "para 1", "text": "Same words"}
+        copy = {**first, "block_id": "copy"}
+        other_page = {**copy, "block_id": "other", "locator": "para 2"}
+        self.assertEqual(deduplicate_blocks([first, copy, other_page], set(), set()), [first, other_page])
+        self.assertEqual(deduplicate_blocks([first, copy], {"first"}, set()), [first, copy])
+        self.assertEqual(deduplicate_blocks([first, copy], set(), {"copy"}), [first, copy])
 
 
 class AssignTests(unittest.TestCase):

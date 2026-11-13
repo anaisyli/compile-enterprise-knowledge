@@ -14,22 +14,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, load_jsonl, long_path, remaining_ocr_pages, write_json, write_text
+from kb_common import (BUILD_DIRECTORY, MANIFEST_NAME, load_json, load_jsonl, long_path, remaining_ocr_pages,
+                       sha256_file, write_json, write_text)
+from samples import image_method, load_decisions, unreadable_method
 
 
 FOLDER = "ai-read"
 OCR_DIRECTORY = "mineru-units"
 PICTURES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 DPI = 110
+MAX_PREVIEW_EDGE = 3000
 RULES = """# AI 读图规则
 
-这些页面或图片没有可提取的文字，MinerU 也没识别。请你逐张看图，把图里看得到的文字转写下来。
+这些页面或图片没有可提取的文字，MinerU 也没识别。hold/no_extractable_content 的 PDF 只在原件哈希一致且样例 gate 放行时导出。请你逐张看图，把图里看得到的文字转写下来。
 
 1. 只抄图里的字，逐字照抄，保留原来的大小写、拼写错误和换行；不翻译、不概括、不补充。
 2. 一页有好几款产品时，按款分段：款号和它旁边的特点放在同一段，段与段之间空一行。原图没写款号的，不要套用别款的。
@@ -74,11 +78,18 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
     except ImportError:
         return {"ok": False, "reason": "要先安装 PyMuPDF：python -m pip install pymupdf"}
     routes = load_json(build / "routes.json")
+    # A drawing PDF is intentionally an image asset, not a missing-text document.  Read the
+    # current run config (the build copy may belong to an earlier run) so export cannot turn it
+    # into an AI transcript before extract_blocks has routed it to media.
+    config_path = build.parent / "kb-config.json"
+    config = load_json(config_path) if config_path.is_file() else {}
+    drawing_items = set(config.get("drawing_items", []))
     files = package_files(packages)
     folder = build / FOLDER
     pictures = folder / "pages"
     pictures.mkdir(parents=True, exist_ok=True)
     todo, skipped = [], []
+    decisions = load_decisions(build)
     gate_path = build / "sample-gate.json"
     # Pictures of a kind nobody has confirmed yet: only the sample is read now.
     allowed = set(load_json(gate_path)["allowed"]) if gate_path.is_file() else None
@@ -89,14 +100,31 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
         if allowed is not None and item_id not in allowed:
             continue
         name = route.get("display_name") or asset["file"].name
+        if item_id in drawing_items:
+            continue
         if route.get("route") == "hold" and route.get("reason") == "image_needs_review" and asset["file"].suffix.casefold() in PICTURES:
+            if image_method(decisions, item_id)[0] == "reducto":
+                continue  # Chosen to be read by Reducto (reducto_ocr.py run).
             target = pictures / f"{item_id}-p1{asset['file'].suffix.casefold()}"
             shutil.copyfile(long_path(asset["file"]), target)
             todo.append({"key": f"{item_id}|1", "item_id": item_id, "page": 1, "name": name, "image": str(target)})
             continue
-        pages = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route.get("route") == "kb" else []
-        if not pages:
+        held_pdf = (route.get("route") == "hold" and route.get("reason") == "no_extractable_content"
+                    and asset["file"].suffix.casefold() == ".pdf")
+        if route.get("route") == "hold" and route.get("reason") == "no_extractable_content" and not held_pdf:
+            skipped.append(f"{name}：当前只支持无文字层 PDF 的 AI 读图")
             continue
+        if held_pdf and unreadable_method(decisions, item_id)[0] == "reducto":
+            skipped.append(f"{name}：这份文件指定 Reducto，等 Reducto 读完再抽查")
+            continue
+        pages = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route.get("route") == "kb" else []
+        if not held_pdf and not pages:
+            continue
+        if held_pdf:
+            expected_hash = route.get("source_hash")
+            if not expected_hash or asset.get("source_hash") != expected_hash or sha256_file(asset["file"]) != expected_hash:
+                skipped.append(f"{name}：原件哈希不匹配，未导出")
+                continue
         source = pdf_of(asset["file"], build, asset["source_hash"][:16])
         if source is None:
             skipped.append(f"{name}：没装 LibreOffice，幻灯片没法画成图")
@@ -104,12 +132,15 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
         # Slides keep their own locator, so what was read lands under the right slide.
         unit = "slide" if asset["file"].suffix.casefold() in {".pptx", ".ppt"} else "page"
         with pymupdf.open(long_path(source)) as document:
+            if held_pdf:
+                pages = list(range(1, document.page_count + 1))
             for page in pages:
                 if page > document.page_count:
                     continue
                 target = pictures / f"{item_id}-p{page}.png"
-                if not target.is_file():
-                    document[page - 1].get_pixmap(dpi=DPI).save(str(target))
+                page_rect = document[page - 1].rect
+                scale = min(DPI / 72, MAX_PREVIEW_EDGE / max(page_rect.width, page_rect.height))
+                document[page - 1].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).save(str(target))
                 todo.append({"key": f"{item_id}|{page}", "item_id": item_id, "page": page, "unit": unit, "name": name, "image": str(target)})
     with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
         for entry in todo:
@@ -121,9 +152,24 @@ def export(build: Path, packages: list[str]) -> dict[str, Any]:
 def collect(build: Path) -> dict[str, Any]:
     folder = build / FOLDER
     todo = {entry["key"]: entry for entry in load_jsonl(folder / "todo.jsonl")}
+    routes = load_json(build / "routes.json")
+    already_collected: set[str] = set()
+    for item_id, route in routes.items():
+        path = build / OCR_DIRECTORY / f"{item_id}.json"
+        if not path.is_file():
+            continue
+        record = load_json(path)
+        if record.get("source_hash") != route.get("source_hash"):
+            continue
+        for unit in record.get("units", []):
+            match = re.fullmatch(r"(?:page|slide) ([1-9]\d*) ocr", unit.get("locator", ""))
+            if unit.get("engine") == "ai" and match:
+                already_collected.add(f"{item_id}|{match.group(1)}")
     answers, rejected = {}, []
     for path in sorted(folder.glob("answer-*.jsonl")):
         for record in load_jsonl(path):
+            if record.get("key") not in todo and record.get("key") in already_collected:
+                continue
             if record.get("key") not in todo or not isinstance(record.get("text"), str):
                 rejected.append(record.get("key") or "（没有 key）")
                 continue

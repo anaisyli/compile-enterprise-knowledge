@@ -115,6 +115,31 @@ class PackageOnlyTests(unittest.TestCase):
         self.assertEqual(status["items"]["a1"]["status"], "hash_mismatch")
         self.assertNotIn("被人改过的内容", self.published())
 
+    def test_changed_or_missing_package_copy_invalidates_cached_text(self) -> None:
+        for problem in ("hash_mismatch", "missing_file"):
+            with self.subTest(problem=problem):
+                docx = self.package / "A-原文保留/营销宣传/公司知识库.docx"
+                original = docx.read_bytes()
+                first = self.pipeline()
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                cached = self.out / "04_知识库构建/package-text/a1.json"
+                self.assertTrue(cached.is_file())
+                if problem == "hash_mismatch":
+                    make_docx(docx, ["被人改过的内容"])
+                else:
+                    docx.unlink()
+                result = self.pipeline()
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                build = self.out / "04_知识库构建"
+                status = json.loads((build / "package-text/extract-status.json").read_text(encoding="utf-8"))
+                self.assertEqual(status["items"]["a1"]["status"], problem)
+                self.assertFalse(cached.exists())
+                report = json.loads((build / "校验结果.json").read_text(encoding="utf-8"))
+                self.assertFalse(report["verified"])
+                self.assertTrue(any(f"package input {problem}: a1" in e for e in report["errors"]))
+                self.assertNotIn("被人改过的内容", self.published())
+                docx.write_bytes(original)
+
     def test_reading_almost_nothing_fails_verification(self) -> None:
         for name in ("A-原文保留/营销宣传/公司知识库.docx", "B-待清理/Acme报价单.xlsx"):
             (self.package / name).write_bytes(b"not an office file")

@@ -100,6 +100,9 @@ COMPANY_DOC = re.compile(r"(?i)公司|简介|profile|about|关于我们|品牌�
 WEBSITE_FOLDER = re.compile(r"(?i)网页|官网|website|web\s*page")
 PRODUCT_FOLDER = re.compile(r"(?i)^(?:产品|产品资料|products?)$")
 MAX_HEADER_SCAN = 80
+# Heading cells of a terminology dictionary: “中文术语 / 表达”, “English Term / Expression”, “说明 / Usage”.
+GLOSSARY_TERM = re.compile(r"(?i)术语|terminology|(?<!price )(?<!trade )(?<!payment )(?<!delivery )\bterms?\b(?=\s*(?:/|&|and\b|$))")
+GLOSSARY_MEANING = re.compile(r"(?i)说明|释义|含义|解释|definitions?|meaning|usage|expression")
 # Stricter than these notes already: rows above the header and unrecognised columns never pass.
 COVERED_BY_ALLOWLIST = re.compile(r"表头|全部价格|逐表确认")
 # File properties (author, template, PDF /Info): the knowledge base never carries them, so there is
@@ -468,6 +471,19 @@ def find_header(
     sheet: str,
     header_map: dict[str, str],
 ) -> tuple[int, dict[str, str]] | None:
+    # A terminology dictionary is ordinary source material. Its data can contain
+    # 'Screen Size' and a description, but those cells are not product headers.
+    # Recognise the dictionary's own heading before scanning subsequent rows: two term
+    # columns (中文术语 / English Term), or one beside a meaning column. “Price Term” or a
+    # lone “Definition” column is not enough.
+    for number in sorted(rows)[:MAX_HEADER_SCAN]:
+        values = [value.strip() for value in rows[number].values() if value.strip()]
+        if len(values) >= 2:
+            terms = [v for v in values if GLOSSARY_TERM.search(v)]
+            meanings = [v for v in values if v not in terms and GLOSSARY_MEANING.search(v)]
+            if len(terms) >= 2 or (terms and meanings):
+                return None
+            break
     # Screening's marks do not decide where the header is: a range drawn a row too far
     # would otherwise hide the header and lose the whole sheet.
     for number in sorted(rows)[:MAX_HEADER_SCAN]:
@@ -719,8 +735,9 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]]) -> l
                 "locator": unit["locator"],
                 "text": text,
                 "ocr": unit["locator"].endswith(OCR_SUFFIX),
-                # Read by the model from a picture, not by MinerU: published with a mark.
-                "ai_read": unit.get("engine") == "ai",
+                # Read by the model or by Reducto from a picture, not by MinerU: published with a mark.
+                "ai_read": unit.get("engine") in {"ai", "reducto"},
+                "reader": unit.get("engine", ""),
                 "ai_checked": bool(unit.get("checked")),  # Added on a page check, beside a text layer.
                 "transcription_review": unit.get("reviewed_by", ""),
                 "transcription_review_note": unit.get("review_note", ""),
@@ -1054,6 +1071,9 @@ def main() -> int:
     for raw in args.extract_status:
         status.update(load_json(Path(raw))["items"])
     text_dirs = [Path(raw).resolve() for raw in args.text_dir]
+    # Reducto before MinerU: where both read a page, MinerU's reading is the one used.
+    if (build / "reducto-units").is_dir():
+        text_dirs.append(build / "reducto-units")
     ocr_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else build / "mineru-units"
     if ocr_dir.is_dir():
         text_dirs.append(ocr_dir)
@@ -1063,8 +1083,8 @@ def main() -> int:
         for asset in assets
     }
     for item_id, route in routes.items():
-        # A picture someone (MinerU or the model) has read enters with what was read in it.
-        if route["reason"] == "image_needs_review" and any(u["text"].strip() for u in load_units([ocr_dir], item_id)):
+        # A picture someone (MinerU, Reducto or the model) has read enters with what was read in it.
+        if route["reason"] == "image_needs_review" and any(u["text"].strip() for u in load_units([ocr_dir, build / "reducto-units"], item_id)):
             route.update(route="kb", reason="image_read", tier="T2")
     gate_path = build / "sample-gate.json"
     if gate_path.is_file():

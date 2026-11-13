@@ -147,6 +147,44 @@ class QualityTests(Base):
         self.assertIn("NTX S-077", page)
         self.assertIn("AI 读图转写", page)
 
+    def test_ai_read_exports_hash_verified_hold_pdf_with_bounded_page_images(self) -> None:
+        import hashlib
+        import pymupdf
+
+        self.pipeline()
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        asset = manifest["assets"][0]
+        pdf = self.package / asset["path"]
+        pdf.parent.mkdir(parents=True, exist_ok=True)
+        document = pymupdf.open()
+        document.new_page(width=17000, height=12000)
+        document.new_page(width=600, height=800)
+        document.save(str(pdf))
+        document.close()
+        source_hash = hashlib.sha256(pdf.read_bytes()).hexdigest()
+        asset["source_hash"] = source_hash
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        routes_path = self.build / "routes.json"
+        routes = json.loads(routes_path.read_text(encoding="utf-8"))
+        routes[asset["item_id"]].update(route="hold", reason="no_extractable_content", source_hash=source_hash)
+        routes_path.write_text(json.dumps(routes, ensure_ascii=False), encoding="utf-8")
+
+        from ai_read import export
+
+        result = export(self.build, [str(self.package)])
+        self.assertEqual((result["pictures"], result["files"]), (2, 1))
+        entries = [json.loads(line) for line in (self.build / "ai-read/todo.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([entry["key"] for entry in entries], [f"{asset['item_id']}|1", f"{asset['item_id']}|2"])
+        pix = pymupdf.open(entries[0]["image"])
+        self.assertLessEqual(max(pix[0].rect.width, pix[0].rect.height), 3000)
+        pix.close()
+
+        pdf.write_bytes(b"changed after screening")
+        result = export(self.build, [str(self.package)])
+        self.assertEqual(result["pictures"], 0)
+        self.assertTrue(any("哈希不匹配" in reason for reason in result["skipped"]))
+
     def test_register_reconciles_the_package_by_category(self) -> None:
         self.pipeline()
         register = (self.build / "vault/02_源资料/源资料与可检索性台账.md").read_text(encoding="utf-8")
