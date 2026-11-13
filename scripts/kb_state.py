@@ -16,13 +16,15 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, safe_name, write_text
+from kb_common import BUILD_DIRECTORY, load_json, write_text
 
 
 STATE = "05_数据与审核/70_构建状态"
-MINERU = "02_源资料/20_MinerU按需提取"
+MINERU = f"{STATE}/mineru-units"
 # Reducto's record carries the file hash and the pages it read, so restoring it is the upload cache too.
-REDUCTO = "02_源资料/21_Reducto按需提取"
+REDUCTO = f"{STATE}/reducto-units"
+# Older vaults kept these two inside the source-material folders; they are moved on the next save or restore.
+LEGACY = {"02_源资料/20_MinerU按需提取": MINERU, "02_源资料/21_Reducto按需提取": REDUCTO}
 WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
@@ -124,16 +126,35 @@ def copy_newer(source: Path, target: Path, kept: list[str]) -> bool:
     return True
 
 
+def migrate_legacy(vault: Path) -> None:
+    for old, new in LEGACY.items():
+        source = vault / old
+        if not source.is_dir():
+            continue
+        for item in source.glob("*.json"):
+            target = vault / new / item.name
+            if not target.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(item), target)
+        for item in source.glob("*.md"):
+            item.unlink()
+        try:
+            source.rmdir()
+        except OSError:
+            pass
+
+
 def save(run: Path, vault: Path) -> dict[str, Any]:
+    migrate_legacy(vault)
     build = run / BUILD_DIRECTORY
     kept: list[str] = []
     copied = sum(copy_newer(b, v, kept) for b, v in pairs(build, vault))
     copied += merge_pages(build / "website" / "pages.json", vault / WEBSITE / "pages.json")
-    write_mineru_pages(build, vault)
     return {"saved": copied, "kept_newer_in_vault": kept}
 
 
 def restore(run: Path, vault: Path) -> dict[str, Any]:
+    migrate_legacy(vault)
     build = run / BUILD_DIRECTORY
     build.mkdir(parents=True, exist_ok=True)
     kept: list[str] = []
@@ -151,19 +172,3 @@ def restore(run: Path, vault: Path) -> dict[str, Any]:
             if not target.is_file():
                 target.write_text(json.dumps(mineru, ensure_ascii=False), encoding="utf-8")
     return {"restored": copied, "kept_newer_in_run": kept}
-
-
-def write_mineru_pages(build: Path, vault: Path) -> None:
-    """A readable page next to each MinerU data file, named after the source document."""
-    titles = {d["item_id"]: d["title"] for d in load_jsonl(build / "docs.jsonl")}
-    for item in sorted((vault / MINERU).glob("*.json")) if (vault / MINERU).is_dir() else []:
-        record = load_json(item)
-        title = titles.get(record.get("item_id", ""), item.stem)
-        lines = [f"# MinerU 识别稿：{title}", "", f"- 资料编号：`{record.get('item_id', '')}`",
-                 f"- 识别日期：{record.get('extracted_at', '')}", f"- 页数：{len(record.get('units', []))}",
-                 "- 说明：这是机器识别的文字，只用来补原文字层没有的内容；对外使用前看原件核对。", ""]
-        for unit in record.get("units", []):
-            by_ai = "（AI 看图转写，待核对）" if unit.get("engine") == "ai" else ""
-            lines.extend([f"## {unit['locator'].replace(' ocr', '').replace('page', '第') + (' 页' if unit['locator'].startswith('page') else '')}{by_ai}",
-                          "", unit["text"] or "（这页没有文字）", ""])
-        write_text(vault / MINERU / f"{safe_name('MinerU-' + title)}.md", "\n".join(lines))

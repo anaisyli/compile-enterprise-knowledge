@@ -126,8 +126,7 @@ class MaintenanceTests(Base):
         self.pipeline()
         self.make_vault()
         self.publish()
-        self.assertTrue((self.vault / "02_源资料/20_MinerU按需提取/a1.json").is_file())
-        self.assertTrue(list((self.vault / "02_源资料/20_MinerU按需提取").glob("MinerU-*.md")))
+        self.assertTrue((self.vault / "05_数据与审核/70_构建状态/mineru-units/a1.json").is_file())
         self.assertTrue((self.vault / "05_数据与审核/70_构建状态/kb-config.json").is_file())
         self.assertTrue((self.vault / "05_数据与审核/70_构建状态/governance-ids.json").is_file())
 

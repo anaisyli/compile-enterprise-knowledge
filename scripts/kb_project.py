@@ -20,7 +20,6 @@ from kb_common import SKILL_VERSION, safe_name, write_text
 
 DIRECTORIES = [
     "01_工作台",
-    "02_源资料/20_MinerU按需提取",
     "02_源资料/50_外部调研证据",
     "03_正式知识/10_客户知识/10_公司概述",
     "03_正式知识/10_客户知识/20_产品介绍",
