@@ -135,8 +135,12 @@ class PictureTests(unittest.TestCase):
         named = self.name_all()
         self.assertEqual(named["img-aaaaaaaaaaaaaaaa.png"]["file"], "报价单参考图/报价单参考图-LADIES TANK TOP-aaaaaaaa.png")
         self.assertEqual(named["img-bbbbbbbbbbbbbbbb.png"]["file"], "报价单参考图/报价单参考图-ANSP-004-bbbbbbbb.png")
-        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "产品/2026格子系列/2026格子系列-ANSP-012 SHERPA JACKET-cccccccc.jpg")
-        self.assertEqual(named["img-dddddddddddddddd.jpg"]["file"], "产品/挂毯/挂毯-Elephant jacquard wall tapestry-dddddddd.jpg")
+        # A picture printed in a document: filed by the document, named by its page and the page's only
+        # company code. The page's heading describes it, but half a sentence never becomes a file name.
+        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "文档提取图/2026格子系列/ANSP-012-第3页-cccccccc.jpg")
+        self.assertIn("SHERPA JACKET", named["img-cccccccccccccccc.jpg"]["alt"])
+        self.assertEqual(named["img-dddddddddddddddd.jpg"]["file"],
+                         "官网图片/Elephant Wall Tapestry/挂毯-Elephant jacquard wall tapestry-dddddddd.jpg")
         # A camera file name says nothing; the page's title does.
         self.assertEqual(named["img-eeeeeeeeeeeeeeee.jpg"]["alt"], "Elephant Wall Tapestry")
         self.assertEqual(named["img-dddddddddddddddd.jpg"]["english"], "elephant-jacquard-wall-tapestry-dddddddd.jpg")
@@ -311,7 +315,8 @@ class PictureTests(unittest.TestCase):
         self.assertEqual(named["img-dddddddddddddddd.jpg"]["use"], PUBLIC)
         write_index(self.build, named, self.docs, lambda s: s)
         page = (self.build / "vault" / pictures.INDEX).read_text(encoding="utf-8")
-        self.assertIn("## 产品/挂毯（2 张）", page)
+        self.assertIn("## 官网图片/Elephant Wall Tapestry（2 张）", page)
+        self.assertIn("## 按产品", page)
         self.assertNotIn("![[", page)
         with (self.build / "vault" / pictures.LIST_CSV).open(encoding="utf-8-sig") as handle:
             rows = list(csv.DictReader(handle))
@@ -328,9 +333,10 @@ class PictureTests(unittest.TestCase):
         self.assertEqual(again["img-aaaaaaaaaaaaaaaa.png"]["named_by"], FROM_SOURCE)  # Numbered gave way.
         self.assertEqual(again["img-bbbbbbbbbbbbbbbb.png"]["file"], first["img-bbbbbbbbbbbbbbbb.png"]["file"])  # A name stays.
 
-    def test_ai_names_are_used_for_numbered_pictures_and_marked(self) -> None:
-        self.by_doc["C"][0]["text"] = "2026"  # Nothing to name the catalog picture by.
-        self.assertEqual(self.name_all()["img-cccccccccccccccc.jpg"]["named_by"], NUMBERED)
+    def test_ai_descriptions_go_into_the_alt_and_never_rename_the_file(self) -> None:
+        self.by_doc["C"][0]["text"] = "2026"  # Nothing on the page describes the catalog picture.
+        before = self.name_all()["img-cccccccccccccccc.jpg"]["file"]
+        self.assertEqual(before, "文档提取图/2026格子系列/第3页-cccccccc.jpg")
         out = Path(self.temp.name)
         (out / "04_知识库构建").mkdir(exist_ok=True)
         for item in self.build.iterdir():
@@ -344,9 +350,11 @@ class PictureTests(unittest.TestCase):
             ensure_ascii=False) + "\n", encoding="utf-8")
         pictures.collect(out)
         named = self.name_all()["img-cccccccccccccccc.jpg"]
-        self.assertEqual((named["named_by"], named["use"]), (FROM_AI, CHECK))
-        self.assertIn("格子衬衫 平铺", named["file"])
+        self.assertEqual((named["described_by"], named["use"]), (FROM_AI, CHECK))
+        self.assertEqual(named["file"], before)  # Looking at a picture never renames it.
+        self.assertEqual(named["alt"], "红黑格子衬衫平铺")
         self.assertEqual(named["english"], "red-black-plaid-shirt-cccccccc.jpg")
+        self.assertEqual(pictures.export(out)["todo"], 0)
 
     def test_published_numbered_pictures_move_and_links_follow(self) -> None:
         vault = Path(self.temp.name) / "vault"

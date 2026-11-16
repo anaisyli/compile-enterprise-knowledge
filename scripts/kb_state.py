@@ -33,6 +33,8 @@ FILES = [
     "page-check/results.json", "page-check/sampling.json", "sample-decisions.json", "reviewed-pages.json",
     # Picture names stay once given, and the AI's picture names are not redone.
     "picture-names.json", "picture-names/answers.json",
+    # Which naming rules the picture names follow, and whether the one-time move to them was published.
+    "picture-layout.json",
     # Home-page candidates the model picked, and which ones a person confirmed.
     "site-home.json",
 ]

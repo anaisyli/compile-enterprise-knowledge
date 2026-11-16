@@ -126,8 +126,10 @@ def proposed(config: dict[str, Any], media: list[dict[str, Any]], docs: dict[str
         root = next((i for i, p in enumerate(parts) if PRODUCT_ROOT.match(p)), None)
         if root is not None and root + 1 < len(parts):
             category = parts[root + 1]
-            # The first folder under the category that names something; 分类图片 and the like are skipped.
-            named = [p for p in parts[root + 2:] if not NOT_A_NAME.match(p)]
+            # The first folder under the category that names something; 分类图片 and the like are skipped,
+            # and so is a folder that says what kind of picture (渲染图, 白底图), as the site view does.
+            named = [p for p in parts[root + 2:] if not NOT_A_NAME.match(p)
+                     and not any(pattern.search(p) for _, pattern in PICTURE_KINDS)]
             product = PRODUCT_TAIL.sub("", named[0]).strip() if named else category
             add(product or category, "product", category, "资料包文件夹")
         for part in parts:
@@ -156,7 +158,8 @@ def catalog(config: dict[str, Any], media: list[dict[str, Any]], docs: dict[str,
     for item in given:
         aliases = [a for a in [item["name"], *item.get("aliases", [])] if usable_alias(a)]
         entries.append({"name": item["name"], "kind": item.get("kind", "product"), "category": item.get("category", ""),
-                        "aliases": list(dict.fromkeys(aliases)), "from": ["kb-config.json"]})
+                        "aliases": list(dict.fromkeys(aliases)), "folders": list(item.get("folders") or []),
+                        "from": ["kb-config.json"]})
     return entries + company
 
 
@@ -166,6 +169,8 @@ class Matcher:
 
     def __init__(self, products: list[dict[str, Any]]) -> None:
         self.keys = sorted(((squeeze(a), p) for p in products for a in p["aliases"]), key=lambda kv: len(kv[0]), reverse=True)
+        # Folders a person named exactly ("folders": ["01"]): too short to match as a name.
+        self.exact = {squeeze(f): p for p in products for f in p.get("folders") or []}
 
     def __call__(self, *texts: str) -> dict[str, Any] | None:
         for text in texts:
@@ -176,25 +181,66 @@ class Matcher:
         return None
 
 
+def match_folders(parts: list[str], match: Matcher) -> tuple[dict[str, Any] | None, int | None]:
+    """(product, index of the folder that named it): the deepest folder naming a product wins, and
+    in one folder the longest name. The same rule as curate.place_docs and the site view, so a DS50
+    folder inside "Wall mounted Digital Signage" is DS50, not the category above it."""
+    for index in range(len(parts) - 1, -1, -1):
+        found = match.exact.get(squeeze(parts[index])) or match(parts[index])
+        if found:
+            return found, index
+    return None, None
+
+
 def place_media(media: list[dict[str, Any]], match: Matcher) -> dict[str, dict[str, Any]]:
-    """item_id -> {"product": ..., "kind": picture kind}. Folders decide first, the file name only after."""
+    """item_id -> {"product", "kind" (picture kind), "below" (folders under the product's own folder)}.
+    Folders decide first, deepest first; the file name only after."""
     places = {}
     for entry in media:
-        folders = "/".join(parts_of(entry["relpath"]))
-        product = match(folders) or match(Path(entry["relpath"]).name)
-        places[entry["item_id"]] = {"product": product, "kind": entry.get("picture_kind") or picture_kind(entry["relpath"], entry["kind"])}
+        parts = parts_of(entry["relpath"])
+        product, level = match_folders(parts, match)
+        if product is None:
+            product = match(Path(entry["relpath"]).name)
+        below = parts[level + 1:] if level is not None else []
+        places[entry["item_id"]] = {"product": product, "below": below,
+                                    "kind": entry.get("picture_kind") or picture_kind(entry["relpath"], entry["kind"])}
     return places
 
 
-def material_folders(place: dict[str, Any] | None, namer_forbidden: re.Pattern[str] | None) -> list[str] | None:
-    """Where a matched picture goes under 90_素材/资料包素材: 大类/产品/图片类型."""
+SERIAL_FOLDER = re.compile(r"^\d+$")
+# A serial number in front ("1.上架推广资料", "10_产品图"), not a year ("2025 ISE" keeps its year).
+SERIAL_PREFIX = re.compile(r"^\d{1,3}(?:[.、_\-]+\s*|\s+)(?=\S)")
+KEPT_LEVELS = 3
+
+
+def clean_levels(folders: list[str], product_name: str = "", keep: int = KEPT_LEVELS) -> list[str]:
+    """Folders as they were, tidied: a folder that is only a number goes ("01"), a numbered folder
+    keeps its words ("1.上架推广资料" → "上架推广资料"), a folder that only repeats the product goes,
+    and the deepest few are kept so paths stay short enough for Windows."""
+    kept = []
+    for folder in folders:
+        if SERIAL_FOLDER.match(folder.strip()):
+            continue
+        folder = SERIAL_PREFIX.sub("", folder.strip())
+        if not folder or (product_name and squeeze(folder) == squeeze(product_name)):
+            continue
+        kept.append(folder)
+    return kept[-keep:] if keep else kept
+
+
+def safe_folders(parts: list[str], namer_forbidden: re.Pattern[str] | None) -> list[str]:
+    return [("其他" if namer_forbidden and namer_forbidden.search(p) else safe_name(p, "其他")) for p in parts]
+
+
+def product_folders(place: dict[str, Any] | None, namer_forbidden: re.Pattern[str] | None) -> list[str] | None:
+    """大类/产品 for a matched picture; a product folder straight under its category is written once."""
     if not place or not place.get("product"):
         return None
     product = place["product"]
     category = product["category"] or ("解决方案" if product["kind"] == "solution" else "产品")
-    # A product folder straight under its category (产品\X100\渲染图) is not written twice.
-    parts = [category, place["kind"]] if squeeze(category) == squeeze(product["name"]) else [category, product["name"], place["kind"]]
-    return [("其他" if namer_forbidden and namer_forbidden.search(p) else safe_name(p, "其他")) for p in parts]
+    parts = [category, product["name"]] if squeeze(category) != squeeze(product["name"]) else [category]
+    return safe_folders(parts, namer_forbidden)
+
 
 
 def propose(out: Path, config: dict[str, Any]) -> dict[str, Any]:

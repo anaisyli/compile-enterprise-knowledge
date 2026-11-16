@@ -11,6 +11,7 @@ is saved into the vault, so the run folder can be deleted afterwards.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_
                        parse_frontmatter, run_lock, site_view_enabled, site_view_unset, write_json, write_text)
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
+from pictures import LAYOUT as PICTURE_LAYOUT, UNSEEN_FOLDER
 from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
 
 
@@ -85,14 +87,13 @@ def pictures_of(build: Path) -> dict[str, dict[str, str]]:
     return load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
 
 
-def move_pictures(vault: Path, build: Path, previous: dict[str, str], renamed: list[str]) -> dict[str, str]:
-    """Pictures published under their old numbered names move to their new names; links in the
-    pages people wrote follow. Returns old file name -> new file name."""
-    moved: dict[str, str] = {}
+def picture_moves(vault: Path, build: Path, previous: dict[str, str]) -> list[tuple[str, str]]:
+    """(old key, new key) for every published picture whose name or folder changed this build."""
     pictures = pictures_of(build)
     saved_path = vault / STATE / "picture-names.json"
     saved = load_json(saved_path) if saved_path.is_file() else {}
     old_ids = {entry["file"]: picture_id for picture_id, entry in saved.items() if entry.get("file")}
+    moves = []
     for key in sorted(previous):
         path = Path(key)
         if not key.startswith(ASSETS.as_posix() + "/"):
@@ -101,16 +102,61 @@ def move_pictures(vault: Path, build: Path, previous: dict[str, str], renamed: l
         if picture_id not in pictures:
             continue
         new_key = (ASSETS / pictures[picture_id]["file"]).as_posix()
-        if new_key == key or not (vault / key).is_file():
-            continue
-        if not (vault / new_key).exists():
-            (vault / new_key).parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(vault / key), vault / new_key)
-            previous[new_key] = previous.pop(key)
-            if path.name != Path(new_key).name:
-                moved[path.name] = Path(new_key).name
-            renamed.append(f"{key} → {new_key}")
+        if new_key != key and (vault / key).is_file() and not (vault / new_key).exists():
+            moves.append((key, new_key))
+    return moves
+
+
+def move_pictures(vault: Path, build: Path, previous: dict[str, str], renamed: list[str],
+                  done: list[tuple[str, str]] | None = None) -> dict[str, str]:
+    """Pictures published under their old names move to their new names; links in the pages people
+    wrote follow. Returns old file name -> new file name; done collects (old key, new key)."""
+    moved: dict[str, str] = {}
+    for key, new_key in picture_moves(vault, build, previous):
+        (vault / new_key).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(vault / key), vault / new_key)
+        previous[new_key] = previous.pop(key)
+        if Path(key).name != Path(new_key).name:
+            moved[Path(key).name] = Path(new_key).name
+        renamed.append(f"{key} → {new_key}")
+        if done is not None:
+            done.append((key, new_key))
     return moved
+
+
+def layout_pending(build: Path) -> dict[str, Any] | None:
+    """The picture layout record when its one-time move has not been published yet."""
+    path = build / PICTURE_LAYOUT
+    layout = load_json(path) if path.is_file() else {}
+    return layout if layout.get("layout", 1) >= 2 and not layout.get("applied") else None
+
+
+def unseen_pictures(vault: Path, previous: dict[str, str], planned: dict[str, Path]) -> list[tuple[str, str]]:
+    """(old key, key under 旧版未归类) for published pictures this build did not produce at all."""
+    moves, taken = [], set()
+    for key in sorted(previous):
+        path = Path(key)
+        if (not key.startswith(ASSETS.as_posix() + "/") or key in planned or path.suffix.casefold() in {".md", ".csv"}
+                or key.startswith((ASSETS / UNSEEN_FOLDER).as_posix() + "/") or not (vault / key).is_file()):
+            continue
+        new_key = (ASSETS / UNSEEN_FOLDER / path.name).as_posix()
+        if new_key in taken or (vault / new_key).exists():
+            new_key = (ASSETS / UNSEEN_FOLDER / f"{path.stem}-{len(taken) + 1}{path.suffix}").as_posix()
+        taken.add(new_key)
+        moves.append((key, new_key))
+    return moves
+
+
+def write_rename_list(vault: Path, rows: list[tuple[str, str, str]]) -> str:
+    """90_素材/00_旧名新名对照.csv: every picture published before, where it is now and why."""
+    key = (ASSETS / "00_旧名新名对照.csv").as_posix()
+    target = vault / key
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["旧路径", "新路径", "状态"])
+        writer.writerows(sorted(rows))
+    return key
 
 
 def follow_picture_links(vault: Path, moved: dict[str, str], ours_now: set[str]) -> int:
@@ -371,13 +417,33 @@ def main() -> int:
         raise SystemExit(f"这次发布会让 {len(leaving)} / {live} 份资料变成已失效（{'、'.join(f'{f} {n}' for f, n in folders.most_common())}）。"
                          "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
     if args.dry_run:
+        pending = layout_pending(build)
+        moves = picture_moves(vault, build, previous)
+        # Pictures that will be renamed are not "unseen", though their old keys are not planned yet.
+        staying = {k: v for k, v in previous.items() if k not in {old for old, _ in moves}}
         print(json.dumps({**dry_run_report(vault, planned, previous, new_paths, material, leaving, live, args.allow_withdraw),
-                          "site_view_archived": len(site_closing), "site_view_files": site_closing},
+                          "site_view_archived": len(site_closing), "site_view_files": site_closing,
+                          "pictures_moved": len(moves),
+                          "pictures_to_old_folder": len(unseen_pictures(vault, staying, planned)) if pending else 0,
+                          "picture_layout_migration": bool(pending)},
                          ensure_ascii=False, indent=2))
         return 0
     written: dict[str, str] = {}
     renamed: list[str] = []
-    moved = move_pictures(vault, build, previous, renamed)
+    pictures_before = sorted(k for k in previous if k.startswith(ASSETS.as_posix() + "/") and Path(k).suffix.casefold() not in {".md", ".csv"})
+    moved_pairs: list[tuple[str, str]] = []
+    moved = move_pictures(vault, build, previous, renamed, moved_pairs)
+    # The one-time move to the current picture layout: pictures this build no longer makes go to
+    # 旧版未归类 instead of staying among the new folders, and the old-to-new list is written.
+    migration = layout_pending(build)
+    unseen = unseen_pictures(vault, previous, planned) if migration else []
+    for key, new_key in unseen:
+        (vault / new_key).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(vault / key), vault / new_key)
+        previous[new_key] = previous.pop(key)
+        if Path(key).name != Path(new_key).name:
+            moved[Path(key).name] = Path(new_key).name
+        renamed.append(f"{key} → {new_key}（本次未出现）")
     relinked = follow_picture_links(vault, moved, set(planned))
     for key, source in list(planned.items()):
         target = vault / key
@@ -461,6 +527,16 @@ def main() -> int:
         # Pages earlier versions of this skill wrote, now replaced by the overview and the register.
         if path.is_file() and (MARKER in path.read_text(encoding="utf-8") or path.read_text(encoding="utf-8").startswith("# 知识库资料台账")):
             archive(vault, old_page.as_posix(), stamp, archived, move=True)
+    if migration:
+        moved_from = {k for k, _ in moved_pairs} | {k for k, _ in unseen}
+        rows = ([(k, n, "按新规则改名") for k, n in moved_pairs] + [(k, n, "本次未出现，移到旧版未归类") for k, n in unseen]
+                + [(k, k, "没变") for k in pictures_before if k not in moved_from])
+        rename_key = write_rename_list(vault, rows)
+        written[rename_key] = normalized_hash(vault / rename_key)
+        migration.update(applied=stamp, moved=len(moved_pairs), unseen=len(unseen), unchanged=len(rows) - len(moved_from))
+        write_json(build / PICTURE_LAYOUT, migration)
+        warnings.append(f"素材按新规则整理：{len(moved_pairs)} 张改名或换了文件夹，{len(unseen)} 张本次没出现、移到 "
+                        f"{UNSEEN_FOLDER}/，其他笔记里的链接已跟着改；对照表 {rename_key}")
     if site_closing:
         warnings.append(f"建站资料视图已关闭（kb-config.json 的 site_view.enabled 不是 true）：{SITE_VIEW_ROOT} 的 "
                         f"{len(site_closing)} 个页面移进了归档 {ARCHIVE.as_posix()}/{stamp}；要恢复就运行 site_view.py update")
