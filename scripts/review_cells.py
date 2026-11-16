@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, normalize_space, run_lock, short_hash, write_json, write_jsonl, write_text
+from guard_blocks import HARD_PATTERNS, ROW_PATTERNS, load_vocabulary, unknown_words
+from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, normalize_space, run_lock, short_hash, write_json, write_jsonl, write_text
 
 
 REVIEW_DIRECTORY = "cell-review"
@@ -100,6 +101,50 @@ def all_cells(out: Path) -> dict[str, dict[str, str]]:
     return cells
 
 
+SAFE_STYLE = re.compile(r"^[A-Za-z]{1,6}[-_/\s]?[A-Za-z0-9]{1,10}(?:[-_/\s][A-Za-z0-9]{1,8})?$")
+SAFE_SIZE_SPEC = re.compile(
+    r"^(?:[X2-6]*[SML]|ONE\s*SIZE|FREE\s*SIZE|\d+(?:\.\d+)?(?:\s*[×xX*±/\-~]\s*\d+(?:\.\d+)?)*"
+    r"\s*(?:mm|cm|m|inch|in|g|kg|gsm|oz|ml|l|w|v|hz|nits|%|寸|厘米|毫米|克|公斤)?)+$",
+    re.I,
+)
+
+
+def safe_auto_keep(cell: dict[str, str], allowed_words: set[str], forbidden: re.Pattern[str] | None) -> bool:
+    """True when a structured cell (style, size, clean fabric/spec) has no risk signals and needs no manual look.
+
+    Free-text description cells and any cell matching a price/quantity/quote/note/customer pattern
+    always go to batch-*.jsonl for review.
+    """
+    role, text = cell.get("role", ""), cell.get("text", "").strip()
+    if not text or len(text) > 80 or role not in {"style", "size", "fabric"}:
+        return False
+    if forbidden and forbidden.search(text):
+        return False
+    if any(p.search(text) for p in (*HARD_PATTERNS.values(), *ROW_PATTERNS.values())):
+        return False
+    if role == "style":
+        return bool(SAFE_STYLE.fullmatch(text) and any(c.isalpha() for c in text) and any(c.isdigit() for c in text))
+    if role == "size" and SAFE_SIZE_SPEC.fullmatch(text):
+        return True
+    return not unknown_words(text, allowed_words) and not re.search(r"[：:；;，,。！？!?]", text)
+
+
+def allowed_cell_words(build: Path) -> tuple[set[str], re.Pattern[str] | None]:
+    config_path = build / "kb-config.json"
+    config = load_config(config_path if config_path.is_file() else None)
+    review_path = build / "review-decisions.json"
+    review = load_json(review_path) if review_path.is_file() else {}
+    words = load_vocabulary(config, review)
+    terms_path = build / "guard-terms.json"
+    forbidden = None
+    if terms_path.is_file():
+        terms = load_json(terms_path)
+        bad = [re.escape(t) for t in terms.get("hard", []) + terms.get("soft", []) if t]
+        if bad:
+            forbidden = re.compile("(?i)(?:" + "|".join(bad) + ")")
+    return words, forbidden
+
+
 def progress_of(out: Path) -> dict[str, int]:
     cells = all_cells(out)
     decided = load_decisions(out)
@@ -111,7 +156,16 @@ def export(out: Path, batch_size: int) -> dict[str, Any]:
     folder.mkdir(parents=True, exist_ok=True)
     for old in folder.glob("batch-*.jsonl"):
         old.unlink()
+    build = out / BUILD_DIRECTORY
     decided = load_decisions(out)
+    allowed_words, forbidden = allowed_cell_words(build)
+    auto_kept = 0
+    for key, cell in all_cells(out).items():
+        if key not in decided and safe_auto_keep(cell, allowed_words, forbidden):
+            decided[key] = {"cell_key": key, "decision": "keep", "auto": True}
+            auto_kept += 1
+    if auto_kept:
+        write_jsonl(folder / DECISIONS, decided.values())
     pending = [{"cell_key": key, **cell} for key, cell in all_cells(out).items() if key not in decided]
     for index in range(0, len(pending), batch_size):
         write_jsonl(folder / f"batch-{index // batch_size + 1:03d}.jsonl", pending[index:index + batch_size])
@@ -127,7 +181,7 @@ def export(out: Path, batch_size: int) -> dict[str, Any]:
     write_jsonl(folder / "templates.jsonl", todo)
     write_text(folder / "README.md", INSTRUCTIONS)
     characters = sum(len(cell["text"]) for cell in pending)
-    return {"cells_to_judge": len(pending), "batches": (len(pending) + batch_size - 1) // batch_size,
+    return {"cells_to_judge": len(pending), "auto_kept": auto_kept, "batches": (len(pending) + batch_size - 1) // batch_size,
             "characters": characters, "templates_to_judge": len(todo), "folder": str(folder)}
 
 
