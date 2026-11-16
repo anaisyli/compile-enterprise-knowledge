@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, merge_ledger, parse_ledger, render_ledger
-from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, write_json, write_text
+from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, run_lock, write_json, write_text
 from pictures import INDEX, LIST_CSV, PUBLIC, CONFIRMED_MEDIA, retained_media, retained_section
 
 REGISTER = "02_源资料/源资料与可检索性台账.md"
@@ -288,6 +288,8 @@ def main() -> int:
     parser.add_argument("--recover-ledger-history", action="store_true", help="Recover vanished rows as resolved history from the latest archive")
     parser.add_argument("--all-links", action="store_true", help="Repair links in every receipt-managed Markdown page")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), "refresh_navigation.py"):
+        return 3
     print(json.dumps(refresh(Path(args.out), Path(args.vault), args.apply, args.recover_ledger_history, args.all_links), ensure_ascii=False, indent=2))
     return 0
 

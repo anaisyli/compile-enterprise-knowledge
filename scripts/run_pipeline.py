@@ -8,7 +8,6 @@ online; their results sit in the build folder and are picked up here automatical
 from __future__ import annotations
 
 import argparse
-import atexit
 import os
 import shutil
 import subprocess
@@ -16,7 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from kb_common import BUILD_DIRECTORY, load_json, write_json
+from kb_common import BUILD_DIRECTORY, LOCK_HOLDER, load_json, run_lock, sha256_file, write_json
 from kb_state import STATE, config_base, json_object, record_adopted, restore
 
 
@@ -26,7 +25,9 @@ SCREENING_WORKBOOK = "客户确认表.xlsx"
 
 def step(script: str, *arguments: str) -> int:
     print(f"== {script}", flush=True)
-    return subprocess.run([sys.executable, str(HERE / script), *arguments]).returncode
+    # The steps take the same run lock; this pid in the environment lets them pass as ours.
+    env = {**os.environ, LOCK_HOLDER: str(os.getpid())}
+    return subprocess.run([sys.executable, str(HERE / script), *arguments], env=env).returncode
 
 
 def repeat(flag: str, values: list[str]) -> list[str]:
@@ -100,43 +101,6 @@ def sync_config(out: Path, vault: Path, config_path: Path | None = None) -> dict
     return restored
 
 
-LOCK_NAME = ".run_pipeline.lock"
-
-
-def take_lock(run: Path) -> Path | None:
-    """One build at a time per run folder: two would overwrite each other's files halfway."""
-    run.mkdir(parents=True, exist_ok=True)
-    lock = run / LOCK_NAME
-    if lock.is_file():
-        try:
-            pid = int(lock.read_text(encoding="utf-8").split()[0])
-        except (ValueError, IndexError, OSError):
-            pid = 0
-        if pid and pid != os.getpid() and alive(pid):
-            print(f"这个运行目录已经有一次建库在跑（进程 {pid}）。等它跑完再来；确定它已经停了，删掉 {lock} 再重跑。")
-            return None
-    lock.write_text(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}\n", encoding="utf-8")
-    atexit.register(lambda: lock.unlink(missing_ok=True))
-    return lock
-
-
-def alive(pid: int) -> bool:
-    if os.name == "nt":
-        import ctypes
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return code.value == 259  # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a knowledge base from one or more preparation packages.")
     parser.add_argument("--package", action="append", default=[], help="Verified preparation package; repeat. With --vault, defaults to the packages last used")
@@ -156,7 +120,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if take_lock(Path(args.out).resolve()) is None:
+    if not run_lock(Path(args.out).resolve(), "run_pipeline.py"):
         return 3
     if args.vault:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
@@ -190,13 +154,32 @@ def main() -> int:
         if workbook.is_file() and args.config:
             if step("apply_answers.py", "--out", args.out, "--config", args.config, "--answers", str(workbook)):
                 print(f"   读不了初筛包的客户确认表，跳过：{workbook}")
+    # sync_config and apply_answers may legitimately rewrite the config; from here on a change
+    # means someone edited it by hand mid-build, and the result would mix two configs.
+    config_path = Path(args.config).resolve() if args.config else None
+    config_hash = sha256_file(config_path) if config_path and config_path.is_file() else None
+
+    def config_changed(script: str) -> bool:
+        if config_path is None:
+            return False
+        now = sha256_file(config_path) if config_path.is_file() else None
+        if now == config_hash:
+            return False
+        print(f"kb-config.json 在建库过程中被改过（{script} 之后发现）：这次结果混用了改动前后的配置，已停下。改完后重跑一次。")
+        return True
+
     # Before anything is read: one sample of each kind of file nobody has confirmed yet.
     gate = ["--out", args.out, *repeat("--package", args.package), *(["--config", args.config] if args.config else [])]
-    if step("sample_gate.py", *gate):
+    code = step("sample_gate.py", *gate)
+    if config_changed("sample_gate.py"):
+        return 5
+    if code:
         return 1
     if not args.text_dir:
         # Colleagues hand over the package, not the screening work folder, so read it again.
         code = step("extract_package_text.py", *repeat("--package", args.package), "--out", args.out)
+        if config_changed("extract_package_text.py"):
+            return 5
         if code:
             return code
         text_dir = Path(args.out).resolve() / "04_知识库构建" / "package-text"
@@ -221,6 +204,8 @@ def main() -> int:
     stages.append(("verify_kb.py", [*sources, *ocr, *common]))
     for script, arguments in stages:
         code = step(script, *arguments)
+        if config_changed(script):
+            return 5
         if code:
             return code
     return 0

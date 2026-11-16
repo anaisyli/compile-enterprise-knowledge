@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from extract_package_text import markdown_table
-from kb_common import BUILD_DIRECTORY, PAGED_FILES, load_config, load_json, load_jsonl, normalize_space, read_by, remaining_ocr_pages, write_json, write_text
+from kb_common import BUILD_DIRECTORY, PAGED_FILES, load_config, load_json, load_jsonl, normalize_space, read_by, remaining_ocr_pages, run_lock, write_json, write_text
 from mineru_client import MinerUError, client_from_env, extract, failure_report, probe
 from samples import (METHODS, PAGED_KINDS, TYPES, choose_samples, doc_type, load_decisions, load_gate, method_and_source,
                      unreadable, unreadable_method)
@@ -161,6 +161,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), f"mineru_ocr.py {args.command}"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     config = load_config(Path(args.config) if args.config else None)
     package_paths = {}

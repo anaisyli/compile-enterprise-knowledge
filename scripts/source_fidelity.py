@@ -9,7 +9,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from kb_common import BUILD_DIRECTORY, load_json, sha256_file, write_json
+from kb_common import BUILD_DIRECTORY, load_json, run_lock, sha256_file, write_json
 
 
 EXCLUDE_KINDS = {'no_source_text', 'product_label', 'demonstration_content'}
@@ -224,5 +224,7 @@ if __name__ == '__main__':
     parser.add_argument('--apply', action='store_true', help='Without this option, only validate and preview')
     parser.add_argument('--replace-reviewed', action='store_true', help='Allow reviewed text corrections after inspecting the patch')
     args = parser.parse_args()
+    if not run_lock(args.out, "source_fidelity.py collect"):
+        raise SystemExit(3)
     print(json.dumps(collect_reviews(args.out, args.patch, apply=args.apply,
                                     replace_reviewed=args.replace_reviewed), ensure_ascii=False))

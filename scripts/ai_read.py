@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kb_common import (BUILD_DIRECTORY, MANIFEST_NAME, load_json, load_jsonl, long_path, remaining_ocr_pages,
-                       sha256_file, write_json, write_text)
+                       run_lock, sha256_file, write_json, write_text)
 from samples import image_method, load_decisions, unreadable_method
 
 
@@ -217,6 +217,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--package", action="append", default=[], help="Preparation package; repeat (export)")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"ai_read.py {args.command}"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     if args.command == "export":
         if not args.package:

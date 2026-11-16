@@ -39,6 +39,7 @@ from kb_common import (
     load_jsonl,
     normalize_space,
     remaining_ocr_pages,
+    run_lock,
     safe_name,
     write_json,
     write_jsonl,
@@ -861,6 +862,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "render_kb.py"):
+        return 3
     run = Path(args.out).resolve()
     build, clean = run / BUILD_DIRECTORY, run / CLEAN_DIRECTORY
     config = load_config(Path(args.config) if args.config else None)

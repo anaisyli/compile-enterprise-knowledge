@@ -46,6 +46,7 @@ from kb_common import (
     normalize_space,
     preferred_page_units,
     reducto_figure_units,
+    run_lock,
     suppress_drawing_dimensions,
     safe_name,
     short_hash,
@@ -1108,6 +1109,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "extract_blocks.py"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     build.mkdir(parents=True, exist_ok=True)
     config = load_config(Path(args.config) if args.config else None)

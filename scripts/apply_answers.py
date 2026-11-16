@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, load_jsonl, write_json, write_jsonl
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, load_jsonl, run_lock, write_json, write_jsonl
 
 
 KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
@@ -147,6 +147,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "apply_answers.py"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     config_path = Path(args.config).resolve()
     answers_path = Path(args.answers).resolve() if args.answers else build / "客户确认表.csv"

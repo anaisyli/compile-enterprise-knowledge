@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree as ET
 
-from kb_common import BUILD_DIRECTORY, MODULES, SKILL_VERSION, load_config, load_json, normalize_space, short_hash, write_json, write_text
+from kb_common import BUILD_DIRECTORY, MODULES, SKILL_VERSION, load_config, load_json, normalize_space, run_lock, short_hash, write_json, write_text
 from kb_state import restore
 
 
@@ -303,6 +303,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "fetch_website.py"):
+        return 3
     config = load_config(Path(args.config))
     if not config.get("websites"):
         raise SystemExit('kb-config.json 里没有 "websites"，例如 [{"url": "https://www.example.com", "role": "primary"}]')

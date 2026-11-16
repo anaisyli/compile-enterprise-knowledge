@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_read import package_files, pdf_of
-from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, normalize_space, write_json, write_text
+from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, normalize_space, run_lock, write_json, write_text
 from mineru_ocr import html_table
 from reducto_client import KEY_PAGE, MODEL, PRICING_PAGE, ReductoError, client_from_env, failure_report, parse_pages, probe
 from samples import GRADES, METHODS, PAGED_KINDS, PICTURES, choose_samples, held_image, load_gate, load_triage, unreadable
@@ -298,6 +298,8 @@ def main() -> int:
     parser.add_argument("--only", action="append", default=[], help="item_id to run; default every planned file")
     parser.add_argument("--samples", action="store_true", help="Only the samples of kinds still waiting for a decision")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"reducto_ocr.py {args.command}"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     routes = load_json(build / "routes.json")
     names = {item_id: route.get("display_name") or item_id for item_id, route in routes.items()}

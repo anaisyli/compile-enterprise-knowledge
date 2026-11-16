@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, MODULES, PAGED_FILES, TIERS, load_json, load_jsonl, parse_frontmatter, read_by, remaining_ocr_pages, write_json, write_text
+from kb_common import BUILD_DIRECTORY, MODULES, PAGED_FILES, TIERS, load_json, load_jsonl, parse_frontmatter, read_by, remaining_ocr_pages, run_lock, write_json, write_text
 from curate import page_sections
 from mineru_client import probe
 from review_cells import progress_of, t3_gate
@@ -305,6 +305,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "kb_status.py"):
+        return 3
     run = Path(args.out).resolve()
     vault = Path(args.vault).resolve() if args.vault else None
     state = gather(run, vault)

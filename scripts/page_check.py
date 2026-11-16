@@ -29,7 +29,7 @@ from typing import Any
 from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
-                       remaining_ocr_pages, sha256_file, suppress_drawing_dimensions, write_json, write_text)
+                       remaining_ocr_pages, run_lock, sha256_file, suppress_drawing_dimensions, write_json, write_text)
 from office import convert_office
 from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of
 from samples import (GRADES, IMAGE_KIND, METHODS, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
@@ -516,6 +516,8 @@ def main() -> int:
     parser.add_argument("--answer-file", action="append", help="Only collect this answer file; repeat for several files")
     parser.add_argument("--include-page", action="append", help="Explicit extra visual-check key item|page N (plan); validates original hash and page bounds")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"page_check.py {args.command}"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     if args.command == "plan":
         if not args.package:

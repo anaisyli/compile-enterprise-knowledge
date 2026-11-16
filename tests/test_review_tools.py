@@ -253,7 +253,7 @@ class ReviewToolTests(Base):
         (self.out / ".run_pipeline.lock").write_text(f"{os.getpid()} test\n", encoding="utf-8")
         result = self.pipeline()
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("已经有一次建库在跑", result.stdout)
+        self.assertIn("这个运行目录正在运行 建库", result.stdout)
         (self.out / ".run_pipeline.lock").unlink()
         self.built()
         self.assertFalse((self.out / ".run_pipeline.lock").exists())

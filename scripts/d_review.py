@@ -29,8 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kb_common import (BUILD_DIRECTORY, TRIAGE_NAME, file_extension, load_json, load_jsonl, unapproved_d, write_json,
-                       write_jsonl, write_text)
+from kb_common import (BUILD_DIRECTORY, TRIAGE_NAME, file_extension, load_json, load_jsonl, run_lock, unapproved_d,
+                       write_json, write_jsonl, write_text)
 
 
 FOLDER = "d-review"
@@ -253,6 +253,8 @@ def collect(build: Path, config_path: Path | None) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), f"d_review.py {args.command}"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     if args.command == "export":
         result = export(build)

@@ -24,6 +24,7 @@ from kb_common import (
     load_json,
     load_jsonl,
     normalize_space,
+    run_lock,
     write_json,
     write_jsonl,
     write_text,
@@ -587,6 +588,8 @@ def apply_reviewed_removals(blocks: list[dict[str, Any]], removals: list[dict[st
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "guard_blocks.py"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     config = load_config(Path(args.config) if args.config else None)
     routes = load_json(build / "routes.json")

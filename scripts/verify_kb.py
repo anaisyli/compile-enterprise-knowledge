@@ -32,6 +32,7 @@ from kb_common import (
     parse_frontmatter,
     preferred_page_units,
     reducto_figure_units,
+    run_lock,
     suppress_drawing_dimensions,
     sha256_file,
     write_json,
@@ -154,6 +155,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "verify_kb.py"):
+        return 3
     run = Path(args.out).resolve()
     build = run / BUILD_DIRECTORY
     clean = run / CLEAN_DIRECTORY

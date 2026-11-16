@@ -71,6 +71,8 @@
     |-- coverage.csv, 抽样核对.md, 校验结果.json, 总览.md
 ```
 
+- **一个运行目录一次只能跑一个脚本：**所有带 `--out <运行目录>` 的命令（`run_pipeline.py`、`publish_vault.py`、`site_view.py`、`d_review.py`、`pictures.py`、`mineru_ocr.py`、`reducto_ocr.py` 等）共用运行目录根的 `.run_pipeline.lock`。锁里记着持有进程的编号和在跑什么；有活进程占着时退出码 3，并打印是谁在跑。流水线派生的子步骤和发布时调用的 `kb_status.py` 继承锁，不会互相挡；持有进程结束时锁自动删掉，进程没了留下的锁由下一个进程接管。建库过程中不要改 `kb-config.json`：流水线在 `sample_gate.py` 之后每一步都核对配置哈希，发现被改过就以退出码 5 停下（这一步的结果混用了改动前后的配置），改完重跑一次。
+
 ## kb-config.json
 
 ```json

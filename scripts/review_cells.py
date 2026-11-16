@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, normalize_space, short_hash, write_json, write_jsonl, write_text
+from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, normalize_space, run_lock, short_hash, write_json, write_jsonl, write_text
 
 
 REVIEW_DIRECTORY = "cell-review"
@@ -172,6 +172,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), f"review_cells.py {args.command}"):
+        return 3
     out = Path(args.out).resolve()
     if args.command == "export":
         report = export(out, args.batch_size)

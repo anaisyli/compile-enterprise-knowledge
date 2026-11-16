@@ -24,7 +24,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, safe_name, sha256_file,
+from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, run_lock, safe_name, sha256_file,
                        short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from products import material_folders
@@ -606,6 +606,8 @@ def main() -> int:
     parser.add_argument("--vault", help="Published vault to read when restoring names")
     parser.add_argument("--id", action="append", dest="picture_ids", default=[], help="Picture id to restore (repeatable)")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"pictures.py {args.command}"):
+        return 3
     out = Path(args.out).resolve()
     if args.command == "restore-names":
         if not args.vault or not args.picture_ids:

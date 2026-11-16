@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from guard_blocks import HARD_PATTERNS
-from kb_common import BUILD_DIRECTORY, MODULES, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, safe_name, write_json, write_text
+from kb_common import BUILD_DIRECTORY, MODULES, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, run_lock, safe_name, write_json, write_text
 from products import Matcher, parts_of, squeeze, usable_alias
 from sections import load_sections
 
@@ -535,6 +535,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--config", help="kb-config.json")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"curate.py {args.command}"):
+        return 3
     out = Path(args.out).resolve()
     config = load_config(Path(args.config) if args.config else None)
     if args.command == "prepare":

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from extract_blocks import configured_route, format_pairs, is_catalog
-from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json, run_lock
 from samples import TYPES, gate, kind_of, load_decisions, save_gate
 
 
@@ -44,6 +44,8 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--config")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), "sample_gate.py"):
+        return 3
     config = load_config(Path(args.config) if args.config else None)
     config.setdefault("client_answers", {})
     build = Path(args.out).resolve() / BUILD_DIRECTORY

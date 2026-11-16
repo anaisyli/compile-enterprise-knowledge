@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -199,6 +201,61 @@ def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(long_path(path), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
+
+
+RUN_LOCK = ".run_pipeline.lock"   # Same file name as the pipeline's old lock; tests rely on it.
+LOCK_HOLDER = "CEK_RUN_LOCK"      # Env var naming the pid of the process holding the lock.
+
+
+def alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def run_lock(run: Path, what: str) -> bool:
+    """One script at a time per run folder: two would overwrite each other's files halfway.
+
+    The lock file holds "<pid> <time> <what>". A step spawned by the holder inherits
+    LOCK_HOLDER and passes without touching the file; the holder's atexit removes it, and
+    only while it still holds our pid. Returns False when a live foreign process holds it."""
+    run.mkdir(parents=True, exist_ok=True)
+    lock = run / RUN_LOCK
+    if lock.is_file():
+        try:
+            parts = lock.read_text(encoding="utf-8").split()
+            pid = int(parts[0])
+        except (ValueError, IndexError, OSError):
+            parts, pid = [], 0
+        if pid and pid != os.getpid() and os.environ.get(LOCK_HOLDER) != str(pid) and alive(pid):
+            holder = " ".join(parts[2:]) if len(parts) > 2 else "建库"
+            print(f"这个运行目录正在运行 {holder}（进程 {pid}）。等它跑完再来；确定它已经停了，删掉 {lock} 再重跑。")
+            return False
+        if pid and os.environ.get(LOCK_HOLDER) == str(pid):
+            return True  # Inherited from the parent that holds the lock; the parent removes it.
+    lock.write_text(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')} {what}\n", encoding="utf-8")
+    mine = str(os.getpid())
+
+    def release() -> None:
+        try:
+            if lock.is_file() and lock.read_text(encoding="utf-8").split()[:1] == [mine]:
+                lock.unlink()
+        except OSError:
+            pass
+
+    atexit.register(release)
+    return True
 
 
 def file_extension(name: str) -> str:

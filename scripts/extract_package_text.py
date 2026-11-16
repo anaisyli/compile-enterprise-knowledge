@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, sha256_file, short_hash, write_json
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_json, long_path, run_lock, sha256_file, short_hash, write_json
 from layout import ordered_text
 from source_fidelity import literal_dimensions
 from office import ConversionError, convert_office, disable as disable_office, self_test as office_self_test
@@ -403,6 +403,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "extract_package_text.py"):
+        return 3
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     text_dir, cache = build / TEXT_DIRECTORY, build / CONVERTED_DIRECTORY
     text_dir.mkdir(parents=True, exist_ok=True)

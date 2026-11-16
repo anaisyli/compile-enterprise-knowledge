@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from governance import merge_ledger
-from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, write_json, write_text
+from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, run_lock, write_json, write_text
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
 from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
@@ -296,6 +297,8 @@ def dry_run_report(vault: Path, planned: dict[str, Path], previous: dict[str, st
 
 def main() -> int:
     args = parse_args()
+    if not run_lock(Path(args.out).resolve(), "publish_vault.py"):
+        return 3
     run, vault = Path(args.out).resolve(), Path(args.vault).resolve()
     build = run / BUILD_DIRECTORY
     report = load_json(build / "校验结果.json")
@@ -469,7 +472,7 @@ def main() -> int:
     with (vault / RUN_LOG).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     subprocess.run([sys.executable, str(Path(__file__).with_name("kb_status.py")), "--out", str(run), "--vault", str(vault)],
-                   capture_output=True)
+                   capture_output=True, env={**os.environ, LOCK_HOLDER: str(os.getpid())})
     manage = run_manage(Path(args.manage_skill).resolve() / "scripts", vault) if args.manage_skill else {}
     print(json.dumps({**entry, "index_chunks": index["chunks"], "manage": manage, "warnings": warnings}, ensure_ascii=False))
     return 1 if any(manage.values()) else 0

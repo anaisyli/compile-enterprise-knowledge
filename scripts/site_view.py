@@ -28,7 +28,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from kb_common import BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, run_lock, safe_name, write_json, write_jsonl, write_text
 from guard_blocks import HARD_PATTERNS
 from kb_state import STATE, config_base, json_object, merge_settings
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
@@ -611,6 +611,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--vault", help="Published project (update)")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"site_view.py {args.command}"):
+        return 3
     out = Path(args.out).resolve()
     if args.command == "update":
         if not args.vault:

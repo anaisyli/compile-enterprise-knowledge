@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, safe_name, write_json, write_text
+from kb_common import BUILD_DIRECTORY, SKILL_VERSION, frontmatter, load_config, load_json, load_jsonl, run_lock, safe_name, write_json, write_text
 
 
 PRODUCT_ROOT = re.compile(r"(?i)^(?:产品|产品资料|产品图片|产品图|products?)$")
@@ -230,6 +230,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--config", help="kb-config.json")
     args = parser.parse_args()
+    if not run_lock(Path(args.out).resolve(), f"products.py {args.command}"):
+        return 3
     config = load_config(Path(args.config) if args.config else None)
     print(json.dumps(propose(Path(args.out).resolve(), config), ensure_ascii=False, indent=2))
     return 0
