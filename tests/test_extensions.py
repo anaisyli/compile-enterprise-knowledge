@@ -283,7 +283,7 @@ class MinerUTests(Base):
         route = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]
         self.assertEqual((route["route"], route["reason"], route["picture_kind"]), ("media", "dimension_drawing", "尺寸图"))
         picture = next(iter(json.loads((self.build / "pictures.json").read_text(encoding="utf-8")).values()))
-        self.assertIn("产品/型号待确认/尺寸图/型号待确认-尺寸图-", picture["file"])
+        self.assertEqual(picture["file"], "产品/型号待确认/尺寸图/型号待确认-尺寸图-pppppppp.png")
         self.assertEqual(picture["use"], "待核对")
         ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
         self.assertIn("尺寸图型号待确认", ledger)

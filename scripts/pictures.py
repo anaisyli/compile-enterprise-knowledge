@@ -20,7 +20,7 @@ import csv
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -92,7 +92,7 @@ def english_name(entry: dict[str, Any], namer: Namer, suffix: str) -> str:
     if not any(re.search(r"[A-Za-z]", w) for w in words):
         words = []
     slug = "-".join(w.casefold() for w in words)[:60].strip("-") or namer.english.get(entry.get("line", ""), "")
-    return f"{slug}-{entry['id'][4:12]}{suffix}" if slug else ""
+    return f"{slug}-{entry.get('short') or entry['id'][4:12]}{suffix}" if slug else ""
 
 
 def first_line(blocks: list[dict[str, Any]]) -> str:
@@ -152,7 +152,8 @@ def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: 
 
 def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]], order: list[str],
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
-               max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+               max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None,
+               match: Callable[..., dict[str, Any] | None] | None = None) -> list[dict[str, Any]]:
     """Every picture the vault will show or keep, with the words that can name it. held: (doc, locator)
     of every passage removed or waiting for the client."""
     found: list[dict[str, Any]] = []
@@ -190,22 +191,19 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     english_source=words, location=block["locator"])
         info = status_info.get(doc["item_id"], {})
         page_unit = info.get("page_unit", "page")
+        placed = material_folders((places or {}).get(doc["item_id"]), namer.forbidden)
 
         def dimension_result(page: str) -> dict[str, Any]:
             result = page_checks.get(f"{doc['item_id']}|{page_unit} {page}", {})
             return result if result.get("dimension_drawing") else {}
-
-        def drawing_folder(result: dict[str, Any]) -> tuple[str, str]:
-            model = safe_name(result.get("drawing_model") or "型号待确认", "型号待确认")
-            placed = material_folders((places or {}).get(doc["item_id"]), namer.forbidden)
-            return "/".join(placed[:-1] + ["尺寸图"] if placed else ["产品", model, "尺寸图"]), model
 
         for page, name in info.get("page_images", {}).items():
             group = page_group(info, page)
             if (doc_id, group) not in unsafe:
                 drawing = dimension_result(page)
                 if drawing:
-                    folder, model = drawing_folder(drawing)
+                    model = safe_name(drawing.get("drawing_model") or "型号待确认", "型号待确认")
+                    folder = drawing_folder(model, placed, match, namer.forbidden)
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
                         alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True)
                 else:
@@ -219,7 +217,8 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 continue
             drawing = dimension_result(page)
             if drawing:
-                folder, model = drawing_folder(drawing)
+                model = safe_name(drawing.get("drawing_model") or "型号待确认", "型号待确认")
+                folder = drawing_folder(model, placed, match, namer.forbidden)
                 drawing_names = drawing.get("drawing_picture_ids", names)
                 for name in names:
                     if name not in drawing_names:
@@ -260,7 +259,10 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 add(picture["id"], doc_id, own[0]["group"] if own else blocks[0]["group"], folder=folder, prefix=folder.split("/")[-1], label=alt or title,
                     line="" if company else category, alt=alt or title, use=CHECK if flagged else PUBLIC,
                     english_source=alt or doc.get("original_name", ""), location=section)
-    for entry in load_media(build):
+    media = load_media(build)
+    # Pages of one drawing PDF share the hash in their ids; each gets its own code and a page number.
+    drawing_pages = Counter(entry["item_id"] for entry in media if entry.get("drawing"))
+    for entry in media:
         # A product's pictures go under 大类/产品/图片类型; what matches no product keeps its own folders.
         place = (places or {}).get(entry["item_id"])
         placed = material_folders(place, namer.forbidden)
@@ -269,18 +271,26 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
         prefix = (safe_name(place["product"]["name"], "其他") if placed else folders[-1]) if folders else ""
         use, alt = PUBLIC, ""
+        folder = "/".join([MEDIA_ROOT, *folders])
+        fields: dict[str, Any] = {}
         if entry.get("status") == "dimension_drawing":
             model = safe_name(entry.get("drawing_model") or "型号待确认", "型号待确认")
-            folders = placed[:-1] + ["尺寸图"] if placed else ["产品", model, "尺寸图"]
+            folder = drawing_folder(model, placed, match, namer.forbidden)
             prefix, label = model, "尺寸图"
             use, alt = CHECK, "尺寸见原图"
+            fields["dimension_drawing"] = True
+        if entry.get("drawing") and drawing_pages[entry["item_id"]] > 1:
+            page = entry.get("page") or 1
+            label = f"{label}-第{page}页" if label else f"第{page}页"
+            if entry.get("id"):
+                fields["short"] = short_hash(entry["id"], 8)
         location = "/".join(media_folders(entry["relpath"], namer)) or "根目录"
         if entry.get("id"):
-            add(entry["id"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=label,
+            add(entry["id"], "", "", folder=folder, prefix=prefix, label=label,
                 alt=alt or " ".join(p for p in (prefix, label) if p), use=use, english_source=stem, location=location,
-                source_relpath=entry["relpath"])
+                source_relpath=entry["relpath"], **fields)
         if entry.get("cover"):
-            add(entry["cover"], "", "", folder="/".join([MEDIA_ROOT, *folders]), prefix=prefix, label=f"{label}-封面" if label else "视频封面",
+            add(entry["cover"], "", "", folder=folder, prefix=prefix, label=f"{label}-封面" if label else "视频封面",
                 alt=f"视频封面：{' '.join(p for p in (prefix, label) if p)}", use=PUBLIC, english_source=stem, location=location)
     return found
 
@@ -295,6 +305,16 @@ def media_folders(relpath: str, namer: Namer) -> list[str]:
     return [("其他" if namer.forbidden and namer.forbidden.search(p) else safe_name(p, "其他")) for p in parts[-MEDIA_DEPTH:]]
 
 
+def drawing_folder(model: str, placed: list[str] | None, match: Callable[..., dict[str, Any] | None] | None,
+                   forbidden: re.Pattern[str] | None) -> str:
+    """Where an AI-classified dimension drawing goes: with its product's drawings, else under its model."""
+    if not placed and match and model != "型号待确认":
+        product = match(model)
+        if product and product.get("kind") in {"product", "solution"}:
+            placed = material_folders({"product": product, "kind": "尺寸图"}, forbidden)
+    return "/".join([MEDIA_ROOT, *placed[:-1], "尺寸图"] if placed else ["产品", model, "尺寸图"])
+
+
 def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str, Any], namer: Namer) -> dict[str, dict[str, Any]]:
     """id -> the picture's place in 90_素材 and what to say about it. The first use of a picture wins."""
     entries: dict[str, dict[str, Any]] = {}
@@ -303,7 +323,7 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
             entries[item["id"]]["more"] += 1
             continue
         suffix = Path(item["id"]).suffix.casefold()
-        short = item["id"][4:12]
+        short = item.get("short") or item["id"][4:12]
         named_by, label, alt = (FROM_SOURCE, item["label"], item["alt"]) if item["label"] else (NUMBERED, "", item["alt"])
         answer = answers.get(item["id"]) or {}
         if answer.get("drop"):
@@ -487,9 +507,9 @@ def retained_section(records: list[dict[str, Any]], escape: Callable[[str], str]
 def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]],
                    order: list[str], statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any],
                    forbidden: re.Pattern[str] | None, max_row_images: int, held: set[tuple[str, str]],
-                   places: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+                   places: dict[str, Any] | None = None, match: Callable[..., dict[str, Any] | None] | None = None) -> dict[str, dict[str, Any]]:
     namer = Namer(config, forbidden)
-    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places)
+    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places, match)
     saved = load_json(build / STATE) if (build / STATE).is_file() else {}
     answers = load_json(build / AI_ANSWERS) if (build / AI_ANSWERS).is_file() else {}
     entries = assign(found, saved, answers, namer)

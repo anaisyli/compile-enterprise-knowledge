@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import pictures  # noqa: E402
 from pictures import CHECK, FROM_AI, FROM_SOURCE, INTERNAL, NUMBERED, PUBLIC, Namer, build_pictures, write_index  # noqa: E402
+from products import COMPANY_GROUPS, Matcher  # noqa: E402
 from publish_vault import follow_picture_links, move_pictures  # noqa: E402
 
 CONFIG = {"style_prefixes": ["ANSP"], "categories": {"wall-tapestry": "挂毯"}}
@@ -125,9 +126,10 @@ class PictureTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def name_all(self, forbidden=None) -> dict:
+    def name_all(self, forbidden=None, match=None, places=None) -> dict:
+        extra = {"match": match} if match is not None else {}
         return build_pictures(self.build, CONFIG, self.docs, self.by_doc, ["Q", "C", "W"], {"Q": "有效", "C": "有效", "W": "有效"},
-                              set(), self.status_info, forbidden, 2, set())
+                              set(), self.status_info, forbidden, 2, set(), places, **extra)
 
     def test_names_come_from_the_words_beside_the_picture(self) -> None:
         named = self.name_all()
@@ -147,6 +149,91 @@ class PictureTests(unittest.TestCase):
         entry = named["img-cccccccccccccccc.jpg"]
         self.assertEqual(entry["file"], "产品/YFD71XA/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
         self.assertEqual(entry["use"], CHECK)
+
+    def test_page_drawing_files_with_the_product_its_model_matches(self) -> None:
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|page 3": {
+            "dimension_drawing": True, "drawing_model": "YFD71XA", "drawing_name": "外形及安装尺寸图"}}), encoding="utf-8")
+        products = [{"name": "YFD71XA 蝶阀", "kind": "product", "category": "阀门", "aliases": ["YFD71XA"]}]
+        named = self.name_all(match=Matcher(products))
+        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"],
+                         "资料包素材/阀门/YFD71XA 蝶阀/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
+
+    def test_page_drawing_never_files_under_a_company_group_or_waits_for_a_model(self) -> None:
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({
+            "c|page 3": {"dimension_drawing": True, "drawing_model": "工厂", "drawing_name": "车间尺寸图"},
+            "c|page 4": {"dimension_drawing": True, "drawing_model": "型号待确认"}}, ensure_ascii=False), encoding="utf-8")
+        (self.build / "assets" / "img-9999999999999999.jpg").write_bytes(b"x")
+        self.status_info["c"]["page_pictures"]["4"] = ["img-9999999999999999.jpg"]
+        named = self.name_all(match=Matcher(COMPANY_GROUPS))
+        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "产品/工厂/尺寸图/工厂-尺寸图-cccccccc.jpg")
+        self.assertNotIn("资料包素材", named["img-cccccccccccccccc.jpg"]["file"])
+        self.assertEqual(named["img-9999999999999999.jpg"]["file"],
+                         "产品/型号待确认/尺寸图/型号待确认-尺寸图-99999999.jpg")
+
+    def test_single_image_dimension_drawing_files_under_its_model(self) -> None:
+        media = [{"item_id": "m1", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
+                  "drawing_model": "型号待确认", "relpath": "待归类/外形图.png", "id": "img-1111111111111111.png"}]
+        (self.build / "media.json").write_text(json.dumps(media, ensure_ascii=False), encoding="utf-8")
+        (self.build / "assets" / "img-1111111111111111.png").write_bytes(b"x")
+        named = self.name_all()
+        self.assertEqual(named["img-1111111111111111.png"]["file"],
+                         "产品/型号待确认/尺寸图/型号待确认-尺寸图-11111111.png")
+
+    def test_single_image_dimension_drawing_files_with_the_product_its_model_matches(self) -> None:
+        media = [{"item_id": "m2", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
+                  "drawing_model": "YFD71XA", "relpath": "待归类/外形图.png", "id": "img-2222222222222222.png"}]
+        (self.build / "media.json").write_text(json.dumps(media, ensure_ascii=False), encoding="utf-8")
+        (self.build / "assets" / "img-2222222222222222.png").write_bytes(b"x")
+        products = [{"name": "YFD71XA 蝶阀", "kind": "product", "category": "阀门", "aliases": ["YFD71XA"]}]
+        named = self.name_all(match=Matcher(products))
+        self.assertEqual(named["img-2222222222222222.png"]["file"],
+                         "资料包素材/阀门/YFD71XA 蝶阀/尺寸图/YFD71XA-尺寸图-22222222.png")
+
+    def test_a_published_single_image_drawing_moves_folder_but_keeps_its_name(self) -> None:
+        media = [{"item_id": "m1", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
+                  "drawing_model": "型号待确认", "relpath": "待归类/外形图.png", "id": "img-3333333333333333.png"}]
+        (self.build / "media.json").write_text(json.dumps(media, ensure_ascii=False), encoding="utf-8")
+        (self.build / "assets" / "img-3333333333333333.png").write_bytes(b"x")
+        (self.build / pictures.STATE).write_text(json.dumps(
+            {"img-3333333333333333.png": {"file": "资料包素材/产品/型号待确认/尺寸图/X-33333333.png",
+                                          "named_by": FROM_SOURCE}}), encoding="utf-8")
+        named = self.name_all()
+        self.assertEqual(named["img-3333333333333333.png"]["file"], "产品/型号待确认/尺寸图/X-33333333.png")
+
+    def drawing_pdf(self, item_id: str, digest: str, pages: int, relpath: str) -> list:
+        return [{"item_id": item_id, "kind": "image", "picture_kind": "尺寸图", "status": "media_kept",
+                 "drawing": True, "page": number, "id": f"img-{digest}-p{number}.png", "relpath": relpath}
+                for number in range(1, pages + 1)]
+
+    def install_media(self, entries: list) -> None:
+        (self.build / "media.json").write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        for entry in entries:
+            (self.build / "assets" / entry["id"]).write_bytes(b"x")
+
+    def test_a_multi_page_drawing_pdf_names_each_page_and_a_single_one_stays_plain(self) -> None:
+        from kb_common import short_hash
+        entries = self.drawing_pdf("dwg1", "0123456789abcdef", 2, "产品/YFD71XA/尺寸图/外形尺寸图.pdf")
+        entries += self.drawing_pdf("dwg2", "a" * 16, 1, "产品/YFD71XA/尺寸图/单页图.pdf")
+        self.install_media(entries)
+        named = self.name_all()
+        for number in (1, 2):
+            picture_id = f"img-0123456789abcdef-p{number}.png"
+            self.assertEqual(named[picture_id]["file"],
+                             f"资料包素材/产品/YFD71XA/尺寸图/尺寸图-外形尺寸图-第{number}页-{short_hash(picture_id, 8)}.png")
+        single = f"img-{'a' * 16}-p1.png"
+        self.assertEqual(named[single]["file"], f"资料包素材/产品/YFD71XA/尺寸图/尺寸图-单页图-{single[4:12]}.png")
+
+    def test_a_saved_drawing_page_keeps_its_file(self) -> None:
+        entries = self.drawing_pdf("dwg1", "0123456789abcdef", 2, "产品/YFD71XA/尺寸图/外形尺寸图.pdf")
+        self.install_media(entries)
+        saved = "产品/YFD71XA/尺寸图/旧名字-aaaa1111.png"
+        (self.build / pictures.STATE).write_text(json.dumps(
+            {"img-0123456789abcdef-p2.png": {"file": saved, "named_by": FROM_SOURCE}}), encoding="utf-8")
+        named = self.name_all()
+        self.assertEqual(named["img-0123456789abcdef-p2.png"]["file"], saved)
+        self.assertIn("-第1页-", named["img-0123456789abcdef-p1.png"]["file"])
 
     def test_mixed_drawing_page_keeps_photograph_in_its_existing_category(self) -> None:
         (self.build / "page-check").mkdir(parents=True)
