@@ -111,6 +111,86 @@ def scan_text(
     return hits
 
 
+PAGE_PICTURE = re.compile(r"!\[\[([^|\]]+)\|360\]\]")
+MAX_PAGE_PICTURES = 80
+
+
+def original_page_count(path: Path) -> int | None:
+    """Pages of a PDF or slides of a PPTX, counted from the original itself; None when unknown."""
+    suffix = path.suffix.casefold()
+    try:
+        if suffix == ".pdf":
+            import pymupdf  # type: ignore[import-not-found]
+            with pymupdf.open(str(path)) as document:
+                return document.page_count
+        if suffix == ".pptx":
+            import zipfile
+            with zipfile.ZipFile(path) as archive:
+                return sum(1 for n in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n))
+    except Exception:  # noqa: BLE001 - an unreadable original is reported by the extraction checks.
+        return None
+    return None
+
+
+def page_picture_errors(build: Path, clean: Path, docs: dict[str, dict[str, Any]], published: dict[str, str],
+                        blocks: list[dict[str, Any]], routes: dict[str, Any],
+                        warnings: list[str] | None = None) -> list[str]:
+    """Page pictures, counted on the published pages and checked against the originals.
+
+    Built independently of the render: the render and an earlier version of this check read the
+    same extraction record, so a build that never got its pictures (text reused with --text-dir)
+    passed both. Here the page count comes from the original file and the pictures from the page."""
+    try:
+        import pymupdf  # type: ignore[import-not-found]  # noqa: F401
+    except ImportError:
+        return []
+    status_path = build / "extract-status.json"
+    status = load_json(status_path).get("items", {}) if status_path.is_file() else {}
+    named = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
+    # Pages link a picture by its path in the vault (03_正式知识/90_素材/<file>), older ones by name alone.
+    files = {}
+    for picture_id, entry in named.items():
+        files[f"03_正式知识/90_素材/{entry['file']}"] = picture_id
+        files.setdefault(Path(entry["file"]).name, picture_id)
+    held_pages: dict[str, set[str]] = {}
+    text_pages: dict[str, set[str]] = {}
+    for block in blocks:
+        page = re.match(r"^((?:page|slide) \d+)(?: |$)", block.get("locator", ""))
+        if not page:
+            continue
+        number = page.group(1).split(" ")[1]
+        if block["status"] in {"removed", "pending_client"}:
+            held_pages.setdefault(block["doc_id"], set()).add(number)
+        elif block["status"] in {"kept", "flagged"}:
+            text_pages.setdefault(block["doc_id"], set()).add(number)
+    errors, unrecorded = [], []
+    for doc_id, relative in published.items():
+        doc, route = docs[doc_id], routes.get(docs[doc_id]["item_id"], {})
+        if not route.get("package") or not route.get("path"):
+            continue
+        original = Path(route["package"]) / route["path"]
+        pages = original_page_count(original) if original.suffix.casefold() in {".pdf", ".pptx"} else None
+        if not pages or pages > MAX_PAGE_PICTURES or status.get(doc["item_id"], {}).get("page_images_skipped"):
+            continue
+        text = (clean / relative).read_text(encoding="utf-8")
+        shown = PAGE_PICTURE.findall(text)
+        for name in shown:
+            if name not in files or not (build / "assets" / files[name]).is_file():
+                errors.append(f"原页图文件不见了：{doc['title']} {name}")
+        # A page with no text has no section to hang a picture on, and a page something was removed
+        # from or held on deliberately shows none; any other page with text should have one.
+        if not shown and text_pages.get(doc_id, set()) - held_pages.get(doc_id, set()):
+            if doc["item_id"] in status:
+                errors.append(f"来源页一张原页图都没有（原件 {pages} 页）：{doc['title']}")
+            else:
+                # No extraction record at all: whether pictures were made cannot be told.
+                unrecorded.append(doc["title"])
+    if unrecorded and warnings is not None:
+        warnings.append(f"{len(unrecorded)} 份 PDF/PPT 没有提取记录，确认不了该不该有原页图（比如 {unrecorded[0]}）："
+                        "用 --text-dir 时一并用 --extract-status 传入那个文本目录的 extract-status.json")
+    return errors
+
+
 def drawing_page_errors(build: Path, docs: dict[str, dict[str, Any]], blocks: list[dict[str, Any]],
                         published: dict[str, str]) -> list[str]:
     """Pages confirmed as dimension drawings, checked from the page-check results themselves, not
@@ -182,7 +262,7 @@ def main() -> int:
 
     # Every item in the package has a recorded fate.
     asset_ids = {asset["item_id"] for asset in assets}
-    status_path = build / "package-text" / "extract-status.json"
+    status_path = build / "extract-status.json"
     extracted = load_json(status_path).get("items", {}) if status_path.is_file() else {}
     for item_id in sorted(asset_ids):
         status = extracted.get(item_id, {}).get("status")
@@ -347,13 +427,15 @@ def main() -> int:
             if "⚠" not in page.read_text(encoding="utf-8"):
                 errors.append(f"标了风险的内容没有 ⚠：{docs[block['doc_id']]['title']} {block['locator']}")
     errors.extend(drawing_page_errors(build, docs, blocks, published))
+    picture_warnings: list[str] = []
+    errors.extend(page_picture_errors(build, clean, docs, published, blocks, routes, picture_warnings))
     curation = build / "curation-report.json"
     for slug, result in (load_json(curation).items() if curation.is_file() else []):
         if not result["ok"]:
             errors.append(f"整理页没通过核对，未发布：{result['title']}（{'；'.join(result['errors'][:2])}）")
 
     # A knowledge layer left half written must not look finished.
-    warnings: list[str] = []
+    warnings: list[str] = list(picture_warnings)
     d_path = build / "review-decisions.json"
     # Report the status actually rendered: reference drafts are not pending originals.
     statuses = load_json(build / "statuses.json")
