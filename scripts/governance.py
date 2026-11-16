@@ -371,15 +371,21 @@ def build(
             units = reviewed_units(build_dir, item_id, doc["source_sha256"], units)
         reviewed_locators.update((item_id, unit["locator"]) for unit in units
                                  if unit.get("engine") == "reviewed" and not unit.get("review_withheld"))
+        split_path = build_dir / "page-check" / "split-results.json"
+        split_results = load_json(split_path) if split_path.is_file() else {}
         for unit in units:
-            if unit.get("review_withheld"):
+            if unit.get("review_withheld") and not unit.get("review_resolved"):
                 unit_kind, number = unit["locator"].split(" ")[:2]
-                withheld.append(link(doc, heading({"unit": unit_kind, "page": number})))
+                result = split_results.get(f"{item_id}|{unit_kind} {number}", {})
+                note = (f"（判为无法拆分，需人工处理：{result.get('note') or '一行里尺寸和正文分不开'}）"
+                        if result.get("unsplittable") else "")
+                withheld.append(link(doc, heading({"unit": unit_kind, "page": number})) + note)
     mat("drawing_review_withheld", "尺寸图页的旧人工整页稿没有进正文", sorted(withheld), "页", "待知识库专员判断",
         "这些页后来确认是尺寸图，正文只显示“型号 的图名，尺寸见原图”和原图；改尺寸图之前做的整页人工稿保留在构建状态"
-        "（reviewed-pages.json）供追溯，不进正文、整理页和检索。只有尺寸标注的不用处理；同页还有参数表或正文的，"
-        "重新看图核对，把非图纸部分单独写成 part 为 non_drawing 的核对稿，用 source_fidelity.py collect --replace-reviewed 收回",
-        "重新核对拆分后")
+        "（reviewed-pages.json）供追溯，不进正文、整理页和检索。按 page-check/SPLIT-README.md 对照原页图，"
+        "在 split-answer-*.jsonl 里写出旧稿中不属于尺寸图的行号（只有尺寸标注写 []），运行 page_check.py collect 后重跑；"
+        "标了“无法拆分”的页由人重新核对，把非图纸部分写成 part 为 non_drawing 的核对稿，用 source_fidelity.py collect --replace-reviewed 收回",
+        "拆分或人工核对后")
     checks = checks + [r["non_drawing_review"] for r in checks
                        if r.get("dimension_drawing") and r.get("non_drawing_review")]
     broken = [f"{link(by_item[r['item_id']], heading(r))}：{r['text_errors']}" for r in checks
