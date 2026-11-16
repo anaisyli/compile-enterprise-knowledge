@@ -193,26 +193,42 @@ def page_picture_errors(build: Path, clean: Path, docs: dict[str, dict[str, Any]
 
 
 def drawing_page_errors(build: Path, docs: dict[str, dict[str, Any]], blocks: list[dict[str, Any]],
-                        published: dict[str, str]) -> list[str]:
+                        published: dict[str, str], clean: Path | None = None) -> list[str]:
     """Pages confirmed as dimension drawings, checked from the page-check results themselves, not
     through the merge that builds the text: a check that reused it would share its blind spots.
 
-    - The drawing label is still on the page (a restored old transcript must not replace it).
+    - The drawing label is still on the page (a restored old transcript must not replace it), and sits
+      under its own page/slide/image group (not a neighbouring Word paragraph heading).
+    - Where the source page is rendered and nothing on that page/image is held or removed, the original
+      drawing image is embedded under that heading.
     - No old full-page transcript sits in the text of a drawing page, unless it was re-reviewed
       as the page's non-drawing part only."""
-    path = build / "page-check" / "results.json"
-    results = load_json(path).values() if path.is_file() else []
+    from pictures import drawing_entries
+    results = drawing_entries(build).values()
     reviewed = load_json(build / "reviewed-pages.json") if (build / "reviewed-pages.json").is_file() else {}
     by_item = {doc["item_id"]: doc for doc in docs.values() if doc["doc_id"] in published}
-    present = {(b["doc_id"], b["locator"]) for b in blocks if b["status"] in {"kept", "flagged", "pending_client"}}
+    by_locator = {(b["doc_id"], b["locator"]): b for b in blocks if b["status"] in {"kept", "flagged", "pending_client"}}
+    unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
     errors = []
     for result in results:
         doc = by_item.get(result.get("item_id"))
         if not result.get("dimension_drawing") or not doc:
             continue
-        locator = f"{result['unit']} {result['page']}"
-        if (doc["doc_id"], f"{locator} drawing") not in present:
+        unit, page = result["unit"], result["page"]
+        locator = f"{unit} {page}"
+        expected_group = {"slide": f"第 {page} 张幻灯片", "image": f"图片 {page}"}.get(unit, f"第 {page} 页")
+        label_block = by_locator.get((doc["doc_id"], f"{locator} drawing"))
+        if not label_block:
             errors.append(f"尺寸图标签不见了（可能被恢复的旧人工稿覆盖）：{doc['title']} {locator}")
+        elif label_block.get("group") and label_block["group"] != expected_group:
+            errors.append(f"尺寸图文字块分组错位（在“{label_block['group']}”，应在“{expected_group}”）：{doc['title']} {locator}")
+        if clean is not None and (doc["doc_id"], expected_group) not in unsafe:
+            md_path = clean / published[doc["doc_id"]]
+            if md_path.is_file():
+                text = md_path.read_text(encoding="utf-8")
+                section = re.search(rf"(?ms)^## {re.escape(expected_group)}\n(.*?)(?=^## |\Z)", text)
+                if not section or not PAGE_PICTURE.search(section.group(1)):
+                    errors.append(f"尺寸图来源页没有附原图：{doc['title']} {expected_group}")
         split = {r["locator"] for r in reviewed.get(doc["item_id"], []) if r.get("part") == "non_drawing"}
         for block in blocks:
             if (block["doc_id"] == doc["doc_id"] and block["status"] in {"kept", "flagged", "pending_client"}
@@ -427,7 +443,7 @@ def main() -> int:
             page = clean / published[block["doc_id"]]
             if "⚠" not in page.read_text(encoding="utf-8"):
                 errors.append(f"标了风险的内容没有 ⚠：{docs[block['doc_id']]['title']} {block['locator']}")
-    errors.extend(drawing_page_errors(build, docs, blocks, published))
+    errors.extend(drawing_page_errors(build, docs, blocks, published, clean))
     if (build / "reviewed-pages.json").is_file():
         errors.extend(split_errors(load_json(build / "reviewed-pages.json")))
     picture_warnings: list[str] = []

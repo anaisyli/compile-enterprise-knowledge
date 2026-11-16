@@ -638,7 +638,7 @@ def group_for(unit: dict[str, str], heading: str) -> str:
     match = re.fullmatch(r"(page|slide) (\d+) drawing", locator)
     if match:
         return f"第 {match.group(2)} 页" if match.group(1) == "page" else f"第 {match.group(2)} 张幻灯片"
-    match = re.fullmatch(r"image (\d+)(?: ocr| check)?", locator)
+    match = re.fullmatch(r"image (\d+)(?: ocr| check| drawing| review)?", locator)
     if match:
         return f"图片 {match.group(1)}"  # A picture inside a Word document, read by MinerU or the model.
     match = SHEET_UNIT.match(locator)

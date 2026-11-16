@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -144,7 +145,7 @@ def page_label(group: str) -> str:
 
 def page_group(info: dict[str, Any], page: str) -> str:
     """The heading a page, slide or embedded Word picture has in the source layer."""
-    if str(page).startswith("image "):
+    if str(page).startswith("image ") or info.get("page_unit") == "image":
         return f"图片 {str(page).split()[-1]}"
     return f"第 {page} 张幻灯片" if info.get("page_unit") == "slide" else f"第 {page} 页"
 
@@ -189,7 +190,9 @@ def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: 
         info = status_info.setdefault(item, {})
         images = info.setdefault("page_images", {})
         key = f"image {page}" if unit == "image" else page
-        if images.get(key) and (assets / images[key]).is_file():
+        existing = images.get(key) or (images.get(page) if unit == "image" else None)
+        if existing and (assets / existing).is_file():
+            images[key] = existing
             continue
         if unit == "image":
             source = Path(route["package"]) / route["path"]
@@ -206,7 +209,8 @@ def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: 
                 raise ValueError(f"Cannot render dimension drawing: {item} image {page}")
             member, data = word_cache[item][index]
             suffix = Path(member).suffix.casefold().replace(".jpeg", ".jpg") or ".png"
-            name = "img-" + short_hash(f"{route['source_hash']}|drawing image {page}", 16) + suffix
+            # Use the same content-hash id as other extracted images so existing 90_素材 entries are reused.
+            name = f"img-{hashlib.sha256(data).hexdigest()[:16]}{suffix}"
             if not (assets / name).is_file():
                 assets.mkdir(parents=True, exist_ok=True)
                 (assets / name).write_bytes(data)

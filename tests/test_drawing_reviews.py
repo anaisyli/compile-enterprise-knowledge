@@ -84,28 +84,44 @@ class DrawingReviewTests(unittest.TestCase):
                                                        "source_sha256": SOURCE, "part": "drawing", **self.image})
 
     def test_callouts_from_a_drawing_in_a_word_file_are_filtered_too(self) -> None:
-        units = [{"locator": "para 1", "text": "安装说明"},
+        from extract_blocks import document_blocks
+        units = [{"locator": "para 1", "text": "一、产品特点"},
                  {"locator": "image 2 check", "text": f"1476.5\n851.5\n{TABLE}", "engine": "ai", "checked": True},
                  self.label("image 2")]
         shown = "\n".join(u["text"] for u in suppress_drawing_dimensions(units))
         self.assertNotIn("1476.5", shown)
         self.assertIn("| 整机 | 120W |", shown)
-        self.assertIn("安装说明", shown)
+        self.assertIn("一、产品特点", shown)
+        blocks = document_blocks("DOC-1", "i1", units)
+        by_loc = {b["locator"]: b["group"] for b in blocks}
+        self.assertEqual(by_loc["image 2 drawing"], "图片 2")  # Must not inherit "一、产品特点".
 
     def test_verify_catches_a_lost_label_and_a_transcript_in_the_text(self) -> None:
         page_check = self.build / "page-check"
         page_check.mkdir()
         (page_check / "results.json").write_text(json.dumps({"i1|page 1": {
-            "item_id": "i1", "unit": "page", "page": 1, "dimension_drawing": True}}), encoding="utf-8")
+            "item_id": "i1", "unit": "page", "page": 1, "dimension_drawing": True},
+            "i1|image 2": {"item_id": "i1", "unit": "image", "page": 2, "dimension_drawing": True}}), encoding="utf-8")
         docs = {"DOC-1": {"doc_id": "DOC-1", "item_id": "i1", "title": "公司资料-DS50规格书"}}
         published = {"DOC-1": "公司资料/公司资料-DS50规格书.md"}
-        lost = [{"doc_id": "DOC-1", "locator": "page 1", "status": "kept", "reader": "reviewed"}]
+        lost = [{"doc_id": "DOC-1", "locator": "page 1", "status": "kept", "reader": "reviewed"},
+                {"doc_id": "DOC-1", "locator": "image 2 drawing", "group": "一、产品特点", "status": "kept", "reader": "ai"}]
         errors = drawing_page_errors(self.build, docs, lost, published)
         self.assertTrue(any("尺寸图标签不见了" in e for e in errors), errors)
+        self.assertTrue(any("尺寸图文字块分组错位" in e for e in errors), errors)
         self.assertTrue(any("旧人工整页稿进了正文" in e for e in errors), errors)
-        fine = [{"doc_id": "DOC-1", "locator": "page 1 drawing", "status": "kept", "reader": "ai"},
+        fine = [{"doc_id": "DOC-1", "locator": "page 1 drawing", "group": "第 1 页", "status": "kept", "reader": "ai"},
+                {"doc_id": "DOC-1", "locator": "image 2 drawing", "group": "图片 2", "status": "kept", "reader": "ai"},
                 {"doc_id": "DOC-1", "locator": "page 1", "status": "kept", "reader": ""}]
         self.assertEqual(drawing_page_errors(self.build, docs, fine, published), [])
+        clean = self.build / "clean"
+        md = clean / published["DOC-1"]
+        md.parent.mkdir(parents=True)
+        md.write_text("## 第 1 页\n\n![[03_正式知识/90_素材/a.png|360]]\n\n## 图片 2\n\nDS50 的安装尺寸图，尺寸见原图\n", encoding="utf-8")
+        self.assertTrue(any("尺寸图来源页没有附原图" in e and "图片 2" in e
+                            for e in drawing_page_errors(self.build, docs, fine, published, clean)))
+        md.write_text("## 第 1 页\n\n![[03_正式知识/90_素材/a.png|360]]\n\n## 图片 2\n\n![[03_正式知识/90_素材/b.png|360]]\n", encoding="utf-8")
+        self.assertEqual(drawing_page_errors(self.build, docs, fine, published, clean), [])
         self.review(text=TABLE, part="non_drawing")
         split = fine + [{"doc_id": "DOC-1", "locator": "page 1", "status": "kept", "reader": "reviewed"}]
         self.assertEqual(drawing_page_errors(self.build, docs, split, published), [])
