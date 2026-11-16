@@ -15,7 +15,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from kb_common import BUILD_DIRECTORY, MODULES, PAGED_FILES, TIERS, load_json, load_jsonl, parse_frontmatter, read_by, remaining_ocr_pages, run_lock, write_json, write_text
+from kb_common import (BUILD_DIRECTORY, MODULES, PAGED_FILES, TIERS, load_json, load_jsonl, parse_frontmatter, read_by,
+                       remaining_ocr_pages, run_lock, site_view_enabled, write_json, write_text)
 from curate import page_sections
 from mineru_client import probe
 from review_cells import progress_of, t3_gate
@@ -86,6 +87,8 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
         "ledger_names": names,
         "ledger_counts": ledger_counts,
         "build_stage": read(build / "kb-config.json", {}).get("build_stage", "full"),
+        # Linked only when made: a link to a view that is switched off would be dead.
+        "site_view": site_view_enabled(read(build / "kb-config.json", {})),
         "picture_count": len(pictures),
         "retained_count": sum(e.get("id") not in pictures for e in media),
         "risk_terms": len(flagged_terms),
@@ -112,8 +115,9 @@ def overview(state: dict[str, Any]) -> list[str]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = ["# 知识库总览", "", MARKER, f"更新于 {now}；最近发布：{state['last_publish'] or '未发布'}。", ""]
 
-    lines.extend(["## 建站资料与素材", "",
-                  "- 按栏目和产品查资料：[[03_正式知识/80_建站资料/00_建站资料总览|建站资料总览]]",
+    site = (["- 按栏目和产品查资料：[[03_正式知识/80_建站资料/00_建站资料总览|建站资料总览]]"] if state.get("site_view")
+            else ["- 建站资料视图没有打开；要按网站栏目看客户资料，运行 `site_view.py update`。"])
+    lines.extend(["## 建站资料与素材", "", *site,
                   f"- 图片和原件素材：[[03_正式知识/90_素材/00_素材索引|素材索引]]（库内图片 {state.get('picture_count', 0)} 张；原位置素材 {state.get('retained_count', 0)} 份）",
                   "- 建站用表格：[[03_正式知识/90_素材/00_素材清单.csv|素材清单]]",
                   "- 大图、视频和设计稿可按记录打开原件；已确认可用的素材不列为待处理问题。", "",

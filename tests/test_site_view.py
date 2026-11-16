@@ -166,6 +166,9 @@ class SiteViewTests(unittest.TestCase):
         build.mkdir(parents=True)
         (build / "pictures.json").write_text(json.dumps({"img-1111111111111111.jpg": {
             "file": "资料包素材/广告机/Wall mounted Digital Signage/白底图/a-11111111.jpg", "use": "可用于官网"}}), encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            site_view.export_home(out)  # The view is off by default: candidates for it make no sense yet.
+        (build / "kb-config.json").write_text(json.dumps({"site_view": {"enabled": True}}), encoding="utf-8")
         self.assertEqual(site_view.export_home(out)["todo"], 1)
         (build / "site-home" / "answers.jsonl").write_text(json.dumps({"id": "img-1111111111111111.jpg", "reason": "白底完整"},
                                                                        ensure_ascii=False) + "\n", encoding="utf-8")

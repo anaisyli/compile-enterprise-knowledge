@@ -258,6 +258,19 @@ def run_lock(run: Path, what: str) -> bool:
     return True
 
 
+SITE_VIEW_ROOT = "03_正式知识/80_建站资料"
+
+
+def site_view_enabled(config: dict[str, Any]) -> bool:
+    """The 80_建站资料 view is made only when asked for: "site_view": {"enabled": true}."""
+    setting = config.get("site_view")
+    return isinstance(setting, dict) and setting.get("enabled") is True
+
+
+def site_view_unset(config: dict[str, Any]) -> bool:
+    return not isinstance(config.get("site_view"), dict) or "enabled" not in config["site_view"]
+
+
 def file_extension(name: str) -> str:
     """Lower-case extension. A file called just ".jpg" is a picture with no stem: Path gives it no
     suffix, so the name itself is the extension. ".DS_Store" comes out as ".ds_store"."""

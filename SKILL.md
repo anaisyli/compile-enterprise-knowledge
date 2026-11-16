@@ -114,7 +114,9 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - 旁边没有可用文字的图名字只有“编号”。要起名时运行 `pictures.py export --out <运行目录>`，按 `04_知识库构建/picture-names/README.md` 逐张看图写 `answers.jsonl`，再 `pictures.py collect --out <运行目录>`，重跑第 2 步。
    - 名字定了就不变。视频、音频、过大的图片和设计稿原件留在初筛包，不等客户确认的算已确认可用，逐个记名称、类型、大小、原位置、确认状态，写在建站页、《素材索引》和素材清单里（不进台账）；只有要识别文字、转图或等确认的才进“还没处理”。
 
-10. **建站资料视图**（`03_正式知识/80_建站资料/`，每次建库自动生成；规则见合同“建站资料视图”）：
+10. **建站资料视图**（`03_正式知识/80_建站资料/`，默认不生成；规则见合同“建站资料视图”）：
+    - 用户要按网站栏目看客户资料时才打开：运行 `site_view.py update --out <运行目录> --vault <知识库>`，它会把 `"site_view": {"enabled": true}` 写进运行目录和知识库两份配置，以后每次建库都生成。知识库里已经有 `80_建站资料` 的旧项目，带 `--vault` 重跑时自动保持打开。
+    - 不要了就把配置改成 `"enabled": false`，下次发布时旧页面移进归档，发布提示和版本说明里会写明；先用 `publish_vault.py --dry-run` 看会归档哪些。
     - 归类只看文件夹名和标题，不看内容猜；归不了的进“待归类”，不硬分。
     - **产品清单要人确认：**运行 `products.py propose --out <运行目录> --config <kb-config.json>`，读 `04_知识库构建/products/README.md` 和总览页“要人确认的”，整理成配置的 `products`（格式见合同“kb-config.json”），给用户过目后重跑。规则分错的非产品文件夹写进 `site_sections`。
     - **首页候选：**运行 `site_view.py home-candidates export --out <运行目录>`，按 `04_知识库构建/site-home/README.md` 挑候选写 `answers.jsonl`，再 `site_view.py home-candidates collect --out <运行目录>`，重跑。用户确认后，把 `site-home.json` 里那张图的 `confirmed` 改成 `true`。
