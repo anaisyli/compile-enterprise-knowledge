@@ -23,6 +23,50 @@ CONFIG = {"style_prefixes": ["ANSP"], "categories": {"wall-tapestry": "挂毯"}}
 
 
 class PictureTests(unittest.TestCase):
+    def test_restore_published_names_checks_all_hashes_before_writing_and_protects_ai(self) -> None:
+        from kb_state import STATE as VAULT_STATE
+        out = Path(self.temp.name) / "run"
+        build = out / "04_知识库构建"
+        vault = Path(self.temp.name) / "published"
+        originals = {"img-a.png": {"file": "产品/A/a.png", "named_by": NUMBERED},
+                     "img-b.png": {"file": "产品/B/b.png", "named_by": FROM_SOURCE}}
+        current = {key: {"file": "证书/" + Path(value["file"]).name, "named_by": FROM_SOURCE}
+                   for key, value in originals.items()}
+        (build / "assets").mkdir(parents=True)
+        for key, entry in originals.items():
+            original = vault / pictures.ASSETS / entry["file"]
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(key.encode())
+            (build / "assets" / key).write_bytes(key.encode())
+        pictures.write_json(vault / VAULT_STATE / pictures.STATE, originals)
+        pictures.write_json(build / pictures.STATE, current)
+        before = (build / pictures.STATE).read_bytes()
+        (build / "assets/img-b.png").write_bytes(b"wrong")
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            pictures.restore_names(out, vault, list(originals))
+        self.assertEqual((build / pictures.STATE).read_bytes(), before)
+        (build / "assets/img-b.png").write_bytes(b"img-b.png")
+        current["img-b.png"]["named_by"] = FROM_AI
+        pictures.write_json(build / pictures.STATE, current)
+        with self.assertRaisesRegex(ValueError, "Protected picture name"):
+            pictures.restore_names(out, vault, list(originals))
+        current["img-b.png"]["named_by"] = FROM_SOURCE
+        pictures.write_json(build / pictures.STATE, current)
+        result = pictures.restore_names(out, vault, list(originals))
+        self.assertEqual(result["restored"], 2)
+        self.assertEqual(pictures.load_json(build / pictures.STATE), originals)
+        self.assertEqual(pictures.load_json(vault / VAULT_STATE / pictures.STATE), originals)
+
+    def test_restore_names_rejects_path_outside_published_assets(self) -> None:
+        from kb_state import STATE as VAULT_STATE
+        out = Path(self.temp.name) / "run"
+        vault = Path(self.temp.name) / "published"
+        state = {"img-a.png": {"file": "../../outside.png", "named_by": FROM_SOURCE}}
+        pictures.write_json(out / "04_知识库构建" / pictures.STATE, state)
+        pictures.write_json(vault / VAULT_STATE / pictures.STATE, state)
+        with self.assertRaisesRegex(ValueError, "outside assets"):
+            pictures.restore_names(out, vault, ["img-a.png"])
+
     def test_large_size_classification_repair_preserves_the_given_basename(self) -> None:
         old = "资料包素材/广告机/Wall mounted Digital Signage/尺寸图/DS50-aabbccdd.jpg"
         item = {"id": "img-aabbccddeeff0011.jpg", "folder": "资料包素材/广告机/Wall mounted Digital Signage/详情图",
@@ -103,6 +147,66 @@ class PictureTests(unittest.TestCase):
         entry = named["img-cccccccccccccccc.jpg"]
         self.assertEqual(entry["file"], "产品/YFD71XA/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
         self.assertEqual(entry["use"], CHECK)
+
+    def test_mixed_drawing_page_keeps_photograph_in_its_existing_category(self) -> None:
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|page 3": {
+            "dimension_drawing": True, "drawing_model": "YFD71XA", "drawing_picture_ids": []}}), encoding="utf-8")
+        (self.build / "assets" / "img-ffffffffffffffff.png").write_bytes(b"x")
+        self.status_info["c"]["page_images"] = {"3": "img-ffffffffffffffff.png"}
+        named = self.name_all()
+        self.assertIn("/尺寸图/", named["img-ffffffffffffffff.png"]["file"])
+        self.assertNotIn("/尺寸图/", named["img-cccccccccccccccc.jpg"]["file"])
+
+    def test_explicit_drawing_classification_moves_old_asset_category_but_keeps_basename(self) -> None:
+        item = {"id": "img-cccccccccccccccc.jpg", "folder": "产品/YFD71XA/尺寸图", "dimension_drawing": True,
+                "prefix": "YFD71XA", "label": "尺寸图", "alt": "尺寸见原图", "use": CHECK}
+        saved = {item["id"]: {"file": "页面图/old-stable-cccccccc.jpg", "named_by": FROM_SOURCE}}
+        actual = pictures.assign([item], saved, {}, Namer(CONFIG, None))
+        self.assertEqual(actual[item["id"]]["file"], "产品/YFD71XA/尺寸图/old-stable-cccccccc.jpg")
+
+    def test_mixed_page_drawing_caption_cannot_name_photographs(self) -> None:
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|page 3": {
+            "dimension_drawing": True, "drawing_picture_ids": [], "drawing_caption": "ANSP-012 的安装尺寸图"}}), encoding="utf-8")
+        self.by_doc["C"] = [{"kind": "text", "status": "flagged", "doc_id": "C", "group": "第 3 页",
+                              "text": "Photo", "flags": [{"type": "unvetted_term"}]},
+                            {"kind": "text", "status": "kept", "doc_id": "C", "group": "第 3 页",
+                              "text": "ANSP-012 的安装尺寸图", "dimension_drawing": True}]
+        named = self.name_all()
+        self.assertNotIn("安装尺寸图", named["img-cccccccccccccccc.jpg"]["file"])
+
+    def test_repair_only_automatic_photograph_name_from_adjacent_drawing(self) -> None:
+        item = {"id": "img-10f6ad79b36a62ba.png", "folder": "产品/YFD71XA", "prefix": "YFD71XA",
+                "label": "", "alt": "", "use": CHECK, "excluded_drawing_caption": "YFD71XA 的蝶阀外形及安装尺寸图",
+                "excluded_drawing_name": "蝶阀外形及安装尺寸图"}
+        old = {item["id"]: {"file": "产品/YFD71XA/YFD71XA-蝶阀外形及安装尺寸图-10f6ad79.png", "named_by": FROM_SOURCE}}
+        actual = pictures.assign([item], old, {}, Namer(CONFIG, None))
+        self.assertEqual(actual[item["id"]]["file"], "产品/YFD71XA/YFD71XA-10f6ad79.png")
+        old[item["id"]]["named_by"] = FROM_AI
+        self.assertEqual(pictures.assign([item], old, {}, Namer(CONFIG, None))[item["id"]]["file"], old[item["id"]]["file"])
+
+    def test_vector_drawing_page_gets_preview_without_ocr_and_changed_source_is_rejected(self) -> None:
+        import pymupdf
+        from kb_common import sha256_file
+        source = self.build / "vector.pdf"
+        with pymupdf.open() as doc:
+            page = doc.new_page()
+            page.draw_rect(pymupdf.Rect(20, 20, 200, 200))
+            doc.save(str(source))
+        (self.build / "page-check").mkdir(parents=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|page 1": {
+            "item_id": "c", "unit": "page", "page": 1, "dimension_drawing": True}}), encoding="utf-8")
+        routes = {"c": {"route": "kb", "source_hash": sha256_file(source), "package": str(self.build), "path": source.name}}
+        info = {"c": {"page_images": {}}}
+        pictures.ensure_dimension_previews(self.build, routes, info)
+        self.assertTrue((self.build / "assets" / info["c"]["page_images"]["1"]).is_file())
+        for image in (self.build / "assets").glob("img-*.png"):
+            if image.name == info["c"]["page_images"]["1"]:
+                image.unlink()
+        source.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "Drawing source changed"):
+            pictures.ensure_dimension_previews(self.build, routes, info)
 
     def test_buyers_numbers_and_customer_names_stay_out_of_names(self) -> None:
         namer = Namer(CONFIG, re.compile("Acme"))

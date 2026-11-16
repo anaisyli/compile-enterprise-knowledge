@@ -13,6 +13,9 @@ from kb_common import BUILD_DIRECTORY, load_json, sha256_file, write_json
 
 
 EXCLUDE_KINDS = {'no_source_text', 'product_label', 'demonstration_content'}
+# A transcript re-reviewed after its page became a dimension drawing, holding only what is not
+# the drawing (a parameter table, prose). Only such a transcript enters a drawing page's text.
+PARTS = {'non_drawing'}
 
 
 def validate_review(build: Path, item_id: str, source_hash: str, record: dict) -> Path:
@@ -29,6 +32,8 @@ def validate_review(build: Path, item_id: str, source_hash: str, record: dict) -
         raise ValueError(f'Incomplete page review: {item_id}')
     if not re.fullmatch(r'(?:page|slide|image) [1-9]\d*', record.get('locator', '')):
         raise ValueError(f"Invalid reviewed locator: {record.get('locator')}")
+    if record.get('part') and record['part'] not in PARTS:
+        raise ValueError(f"Invalid reviewed part: {item_id} {record['part']}")
     if not record.get('image_file'):
         raise ValueError(f'Missing reviewed image: {item_id}')
     image = build / record['image_file']
@@ -43,11 +48,24 @@ def literal_dimensions(text: str) -> str:
 
 
 def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict]) -> list[dict]:
+    """Put reviewed page transcripts in place of the page's machine text.
+
+    A page later classified as a dimension drawing decides how it is shown, not the transcript
+    made before: the drawing label always stays, and an old full-page transcript (callouts and
+    all) is withheld from the text. It stays in reviewed-pages.json as evidence; a marker unit
+    with no text says it was withheld, for the ledger. A transcript re-reviewed as the page's
+    non-drawing part ("part": "non_drawing") enters as usual."""
     path = build / 'reviewed-pages.json'
     records = load_json(path).get(item_id, []) if path.is_file() else []
+    drawing_pages = {u['locator'].removesuffix(' drawing') for u in units if u.get('dimension_drawing')}
     for record in records:
         validate_review(build, item_id, source_hash, record)
         locator = record['locator']
+        if locator in drawing_pages and not record.get('exclude_kind') and record.get('part') != 'non_drawing':
+            units.append({'locator': locator + ' review-withheld', 'text': '', 'engine': 'reviewed',
+                          'review_withheld': True, 'reviewed_by': record['reviewed_by'],
+                          'review_note': record.get('note', '')})
+            continue
         platform_page = any(u['locator'] == locator + ' ocr'
                             and u.get('engine') in {None, '', 'mineru', 'reducto'}
                             and u['text'].strip() for u in units)
@@ -60,7 +78,9 @@ def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict
             continue
         # Raw text and MinerU results remain in their caches; the reviewed transcription
         # passes through the same content guard as any other input. No bypass at render time.
-        units = [u for u in units if u['locator'] != locator and not u['locator'].startswith(locator + ' ')]
+        # The drawing label is a later, separate decision about this page: never replaced here.
+        units = [u for u in units if u.get('dimension_drawing')
+                 or (u['locator'] != locator and not u['locator'].startswith(locator + ' '))]
         units.append({'locator': locator, 'text': record['text'], 'engine': 'reviewed',
                       'reviewed_by': record['reviewed_by'], 'review_note': record.get('note', ''),
                       'review_exclusion': record.get('exclude_kind', ''),
@@ -100,7 +120,8 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
                 if not image.is_relative_to(out):
                     raise ValueError(f'Review image must be inside run directory: {item_id}')
                 normalized = {k: record[k] for k in ('locator', 'text', 'reviewed_by', 'note',
-                              'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason') if k in record}
+                              'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part')
+                              if k in record}
                 normalized['image_file'] = (Path('reviewed-page-images') / item_id /
                     (record['image_sha256'] + image.suffix.lower())).as_posix()
                 key = (item_id, record['locator'])
@@ -117,7 +138,7 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
         if prior:
             # Image paths may differ before this collector made them portable.
             same = all(prior[0].get(k, '') == record.get(k, '') for k in
-                       ('text', 'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason'))
+                       ('text', 'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part'))
             if same:
                 unchanged += 1
             elif not replace_reviewed:

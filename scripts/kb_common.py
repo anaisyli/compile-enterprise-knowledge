@@ -278,45 +278,61 @@ def is_drawing_dimension_line(text: str) -> bool:
     # A parameter table stays a table, even when printed beside a drawing.
     if not line or line.startswith("|") or re.search(r"<\s*(?:table|tr|td|th)\b", line, re.I):
         return False
+    line = re.sub(r"</?(?:b|strong|span)(?:\s[^>]*)?>", "", line, flags=re.I).strip()
+    if re.fullmatch(r"(?i)[-*•]?\s*(?:D[12]?|N-Th|d)(?:\s*[-–:]\s*|\s+)(?:Flange outer diameter|Bolt circle diameter|"
+                    r"Diameter of sealing surface|Bolt size|Bolt hole diameter)", line):
+        return True
     line = re.sub(r"^#{1,6}\s+", "", line)
     if re.fullmatch(r"(?i)(?:[ΦφØ⌀]?[ABCDHLMNRSTWXZ]\d?|n\s*[-−]\s*[ΦφØ⌀]?[A-Z]?|"
                     r"[□ΦφØ⌀]?b\s*[×x*]\s*b|[ΦφØ⌀][A-Z]?|N-Th|BXB|n-b|n-d)", line):
         return True
+    if re.fullmatch(r"(?i)[●○⚫⚪+]?\s*(?:Blind hole thread|Through hole|Drilling through)", line):
+        return True
     if not re.search(r"\d", line):
         return False
-    labels = re.compile(r"(?i)\b(?:DN|VESA|PCD|BCD|OD|ID|mm|cm|inch|in|deg|kg|lb)\b|"
+    labels = re.compile(r"(?i)\b(?:DN|PN|VESA|PCD|BCD|OD|ID)(?=\s*[\d≤≥<>=:(（])|"
+                        r"\b(?:DN|VESA|PCD|BCD|OD|ID|mm|cm|inch|in|deg|kg|lb)\b|"
                         r"[ΦØ⌀]\s*(?:D|L|W|H|R|M)(?=\s*[=<>≤≥±]?\s*\d)|"
                         r"(?<!\w)(?:L|W|H|R|M|D)(?=\s*[=<>≤≥±]?\s*\d)|[ΦØ⌀]")
     remainder = labels.sub("", line)
-    if re.fullmatch(r"[\d\s.,+\-±~≤≥<>=:：/×xX*()'\"°%寸米厘纳]+", remainder):
+    if re.fullmatch(r"[\d\s.,+\-–−±~≤≥<>=:：/×xX*()'\"′″°%寸米厘纳]+", remainder):
         return True
     return False
 
 
 def suppress_drawing_dimensions(units: list[dict[str, str]]) -> list[dict[str, str]]:
     """Exclude dimension callouts only on pages explicitly reviewed as dimension drawings."""
-    pages = {
-        unit["locator"].removesuffix(" drawing")
-        for unit in units if unit.get("dimension_drawing")
-    }
+    pages = {unit["locator"].removesuffix(" drawing"): unit
+             for unit in units if unit.get("dimension_drawing")}
     if not pages:
         return units
     result = []
     for unit in units:
         locator = unit["locator"]
-        page = re.match(r"^((?:page|slide) \d+)(?: |$)", locator)
+        # Word documents carry their pictures as "image N"; a drawing there is filtered the same way.
+        page = re.match(r"^((?:page|slide|image) \d+)(?: |$)", locator)
         if unit.get("dimension_drawing") or page is None or page.group(1) not in pages:
             result.append(unit)
             continue
         # The drawing is an image asset; its model-generated description must not
         # reintroduce hole counts, dimensions or inferred geometry into prose.
         if unit.get("figure_description"):
+            drawing = pages[page.group(1)]
+            index = int(locator.rsplit(" ", 1)[-1])
+            selected = drawing.get("drawing_figure_indexes")
+            if selected is None or index in selected:
+                continue
+            result.append(unit)
             continue
         # Human full-page supplements are independent evidence, not OCR drafts.
         if unit.get("reviewed_supplement") or unit.get("engine") == "reviewed":
             result.append(unit)
             continue
-        lines = [line for line in unit["text"].splitlines() if not is_drawing_dimension_line(line)]
+        original_lines = unit["text"].splitlines()
+        page_number = page.group(1).rsplit(" ", 1)[-1]
+        lines = [line for index, line in enumerate(original_lines)
+                 if (index >= len(original_lines) - 3 and line.strip() == page_number)
+                 or not is_drawing_dimension_line(line)]
         if lines:
             result.append({**unit, "text": "\n".join(lines), "drawing_filtered": True})
     return result

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_extensions import Base, run  # noqa: E402
-from page_check import collect, laid_out  # noqa: E402
+from page_check import collect, laid_out, plan  # noqa: E402
 from kb_common import sha256_file  # noqa: E402
 
 
@@ -62,6 +62,24 @@ class CheckedRevisionTests(unittest.TestCase):
         self.assertEqual(report["revised"], 0)
         self.assertTrue(json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]["unclear"])
 
+    def test_drawing_revision_preserves_independent_table_review_and_open_question(self) -> None:
+        prior = json.loads((self.folder / "results.json").read_text(encoding="utf-8"))
+        prior["a1|page 1"].update(structure="表格", structured="| Valve | DN50 |",
+                                text_errors="Parameter cell needs checking", pairing="Columns unclear")
+        self.save("page-check/results.json", prior)
+        self.record.update(structure="尺寸图", structured="安装尺寸图", drawing_model="型号待确认",
+                           drawing_picture_ids=[], drawing_figure_indexes=[1, 3], preserve_non_drawing_review=True)
+        self.write_answer()
+        collect(self.build, revise_checked=True, answer_files=[self.answer])
+        result = json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]
+        self.assertEqual(result["non_drawing_review"], prior["a1|page 1"])
+        self.assertTrue(result["unclear"])
+        self.assertEqual(result["drawing_picture_ids"], [])
+        self.assertEqual(result["drawing_figure_indexes"], [1, 3])
+        drawing = next(u for u in json.loads((self.build / "mineru-units/a1.json").read_text(encoding="utf-8"))["units"]
+                       if u.get("dimension_drawing"))
+        self.assertEqual(drawing["drawing_figure_indexes"], [1, 3])
+
     def test_revised_structure_cannot_cite_invented_or_superseded_words(self) -> None:
         self.record["structured"] = "| Valve | Invented | OLD |"
         self.write_answer()
@@ -93,6 +111,17 @@ class PageCheckTests(Base):
         self.assertEqual(accepted, "")
         self.assertEqual(refused, ["Invented"])
 
+    def test_explicit_extra_visual_check_requires_existing_page_and_matching_source(self) -> None:
+        self.pipeline()
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        report = plan(self.build, [str(self.package)], config, [self.text], ["a1|page 1"])
+        self.assertTrue(report["ok"])
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            plan(self.build, [str(self.package)], config, [self.text], ["a1|page 99"])
+        (self.package / "A/Catalog.pdf").write_bytes(b"changed")
+        with self.assertRaises(ValueError):
+            plan(self.build, [str(self.package)], config, [self.text], ["a1|page 1"])
+
     def setUp(self) -> None:
         super().setUp()
         self.clear_catalog_pending()
@@ -108,6 +137,10 @@ class PageCheckTests(Base):
         target = self.package / "A" / "Catalog.pdf"
         target.parent.mkdir(parents=True, exist_ok=True)
         document.save(str(target))
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        next(a for a in manifest["assets"] if a["item_id"] == "a1")["source_hash"] = sha256_file(target)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": [{"locator": "page 1", "text": "SHERPA JACKET"}]}),
                                            encoding="utf-8")
 
@@ -129,7 +162,8 @@ class PageCheckTests(Base):
         self.answer(structure="尺寸图", structured="外形及安装尺寸图", drawing_model="YFD71XA",
                     pairing="左边是型号 A，右边是型号 B", unclear=True, missing="DN≤50\nR150\nΦD=619.88",
                     text_errors="SHERPA 印成了 SHAPER")
-        self.assertEqual(self.pipeline().returncode, 0)
+        built = self.pipeline()
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
         self.assertIn("YFD71XA 的外形及安装尺寸图，尺寸见原图", page)
         self.assertIn("Normal page explanation", page)
@@ -153,7 +187,8 @@ class PageCheckTests(Base):
     def test_unknown_drawing_model_is_marked_and_registered_in_mat(self) -> None:
         self.pipeline()
         self.answer(structure="尺寸图", structured="安装尺寸图", drawing_model="型号待确认")
-        self.assertEqual(self.pipeline().returncode, 0)
+        built = self.pipeline()
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
         self.assertIn("⚠ 型号待确认 的安装尺寸图，尺寸见原图", page)
         ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")

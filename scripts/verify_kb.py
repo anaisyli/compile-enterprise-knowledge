@@ -110,6 +110,36 @@ def scan_text(
     return hits
 
 
+def drawing_page_errors(build: Path, docs: dict[str, dict[str, Any]], blocks: list[dict[str, Any]],
+                        published: dict[str, str]) -> list[str]:
+    """Pages confirmed as dimension drawings, checked from the page-check results themselves, not
+    through the merge that builds the text: a check that reused it would share its blind spots.
+
+    - The drawing label is still on the page (a restored old transcript must not replace it).
+    - No old full-page transcript sits in the text of a drawing page, unless it was re-reviewed
+      as the page's non-drawing part only."""
+    path = build / "page-check" / "results.json"
+    results = load_json(path).values() if path.is_file() else []
+    reviewed = load_json(build / "reviewed-pages.json") if (build / "reviewed-pages.json").is_file() else {}
+    by_item = {doc["item_id"]: doc for doc in docs.values() if doc["doc_id"] in published}
+    present = {(b["doc_id"], b["locator"]) for b in blocks if b["status"] in {"kept", "flagged", "pending_client"}}
+    errors = []
+    for result in results:
+        doc = by_item.get(result.get("item_id"))
+        if not result.get("dimension_drawing") or not doc:
+            continue
+        locator = f"{result['unit']} {result['page']}"
+        if (doc["doc_id"], f"{locator} drawing") not in present:
+            errors.append(f"尺寸图标签不见了（可能被恢复的旧人工稿覆盖）：{doc['title']} {locator}")
+        split = {r["locator"] for r in reviewed.get(doc["item_id"], []) if r.get("part") == "non_drawing"}
+        for block in blocks:
+            if (block["doc_id"] == doc["doc_id"] and block["status"] in {"kept", "flagged", "pending_client"}
+                    and block.get("reader") == "reviewed" and locator not in split
+                    and re.match(rf"^{re.escape(locator)}(?: |$)", block["locator"])):
+                errors.append(f"尺寸图页的旧人工整页稿进了正文：{doc['title']} {block['locator']}")
+    return errors
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify a built knowledge base.")
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat")
@@ -313,6 +343,7 @@ def main() -> int:
             page = clean / published[block["doc_id"]]
             if "⚠" not in page.read_text(encoding="utf-8"):
                 errors.append(f"标了风险的内容没有 ⚠：{docs[block['doc_id']]['title']} {block['locator']}")
+    errors.extend(drawing_page_errors(build, docs, blocks, published))
     curation = build / "curation-report.json"
     for slug, result in (load_json(curation).items() if curation.is_file() else []):
         if not result["ok"]:

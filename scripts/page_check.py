@@ -172,7 +172,8 @@ def image_entry(item_id: str, route: dict[str, Any], asset: dict[str, Any], deci
             "pages": {"1": {"grade": "C", "reasons": ["单张图片，还没人读过"]}}}
 
 
-def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: list[Path]) -> dict[str, Any]:
+def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: list[Path],
+         include_pages: list[str] | None = None) -> dict[str, Any]:
     try:
         import pymupdf  # type: ignore[import-not-found]
     except ImportError:
@@ -180,6 +181,9 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         write_json(build / FOLDER / "plan.json", report)
         return report
     routes = load_json(build / "routes.json")
+    requested, included = set(include_pages or []), set()
+    if any(not re.fullmatch(r"[^|]+\|(?:page|slide) [1-9]\d*", key) for key in requested):
+        raise ValueError("Invalid explicit page-check key")
     files = package_files(packages)
     folder = build / FOLDER
     pictures = folder / "pages"
@@ -312,6 +316,11 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     reasons = disagree + (["文字里有乱码"] if ODD.search(text) else [])
                 else:
                     reasons = disagree + [r for r in found if r not in disagree]
+                if f"{item_id}|{unit} {number}" in requested:
+                    if sha256_file(asset["file"]) != asset.get("source_hash"):
+                        raise ValueError(f"Explicit page source changed: {item_id}")
+                    included.add(f"{item_id}|{unit} {number}")
+                    reasons = reasons or ["主动补充看图核对"]
                 if method in {"mineru", "ai"} and not reasons and has_pictures(page):
                     reasons = [f"按“{METHODS[method]}”处理，有图片的页都对照"]
                 if seen is not None and not reasons and not seen["mineru"] and seen["terms"]:
@@ -350,6 +359,8 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         counts = {g: sum(1 for p in grades.values() if p["grade"] == g) for g in GRADES}
         triage[item_id] = {"name": name, "kind": kind, "method": method, "method_from": method_from, "unit": unit,
                            "counts": counts, "pages": grades}
+    if requested - included:
+        raise ValueError(f"Explicit pages unavailable: {sorted(requested - included)}")
     # A page looked at before MinerU's draft came is looked at again with it; so is one Reducto now disagrees on.
     todo = [t for t in todo if t["key"] not in done
             or ("MinerU 识别" in t.get("draft", []) and "MinerU 识别" not in done[t["key"]].get("draft", []))
@@ -440,6 +451,7 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
     # A later answer revises the same page; do not append both drafts to its source text.
     for key, record in answers.items():
         entry = todo.get(key) or reopened[key]
+        prior = dict(results.get(key) or {})
         missing = (record.get("missing") or "").strip()
         structure = (record.get("structure") or "").strip()
         dimension_drawing = structure == "尺寸图"
@@ -461,6 +473,20 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
                         "drawing_model_confirmed": dimension_drawing and drawing_model != "型号待确认",
                         "drawing_name": drawing_name if dimension_drawing else "",
                         "drawing_caption": drawing_caption}
+        if dimension_drawing and isinstance(record.get("drawing_picture_ids"), list):
+            # A mixed page may contain photographs too. Only explicitly selected
+            # embedded images change kind; its whole-page drawing preview is kept.
+            results[key]["drawing_picture_ids"] = [name for name in record["drawing_picture_ids"] if isinstance(name, str)]
+        if dimension_drawing and isinstance(record.get("drawing_figure_indexes"), list):
+            results[key]["drawing_figure_indexes"] = [n for n in record["drawing_figure_indexes"]
+                                                       if isinstance(n, int) and not isinstance(n, bool) and n > 0]
+        if dimension_drawing and record.get("preserve_non_drawing_review"):
+            # Classifying the illustration must not discard a previously reviewed
+            # parameter table or silently resolve its outstanding customer question.
+            supplement = prior.get("non_drawing_review") or (prior if prior.get("structure") == "表格" else {})
+            if supplement:
+                results[key]["non_drawing_review"] = supplement
+                results[key]["unclear"] = bool(supplement.get("unclear"))
         if missing or key in reopened:
             # A locator of its own: on a page MinerU read, MinerU's "page N ocr" must not swallow it.
             by_item.setdefault(entry["item_id"], []).append(
@@ -469,6 +495,8 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
             by_item.setdefault(entry["item_id"], []).append(
                 {"locator": f"{entry['unit']} {entry['page']} drawing", "text": drawing_caption,
                  "engine": "ai", "checked": True, "dimension_drawing": True,
+                 **({"drawing_figure_indexes": results[key]["drawing_figure_indexes"]}
+                    if "drawing_figure_indexes" in results[key] else {}),
                  "drawing_model_confirmed": drawing_model != "型号待确认"})
     store_ai_units(build, by_item)
     write_json(build / RESULTS, results)
@@ -486,13 +514,14 @@ def main() -> int:
     parser.add_argument("--config", help="kb-config.json")
     parser.add_argument("--revise-checked", action="store_true", help="Explicitly recheck answers for already accepted pages (collect)")
     parser.add_argument("--answer-file", action="append", help="Only collect this answer file; repeat for several files")
+    parser.add_argument("--include-page", action="append", help="Explicit extra visual-check key item|page N (plan); validates original hash and page bounds")
     args = parser.parse_args()
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     if args.command == "plan":
         if not args.package:
             parser.error("plan 要指定 --package")
         dirs = [Path(d).resolve() for d in args.text_dir] or [build / "package-text"]
-        report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs)
+        report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs, args.include_page)
     else:
         report = collect(build, revise_checked=args.revise_checked,
                          answer_files=[Path(p).resolve() for p in args.answer_file] if args.answer_file else None,

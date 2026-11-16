@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from governance import build as build_governance, cleanup_record
-from pictures import build_pictures, load_media, page_group, write_index as write_picture_index
+from pictures import (build_pictures, ensure_dimension_previews, load_media, page_group,
+                      write_index as write_picture_index)
 from products import Matcher, catalog as product_catalog, place_media
 from site_view import write_site
 from guard_blocks import HARD_PATTERNS, compile_terms
@@ -536,8 +537,16 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
     notes: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for result in (load_json(path).values() if path.is_file() else []):
         page = notes[result["item_id"]][check_group(result)]
+        if result.get("dimension_drawing") and result.get("non_drawing_review"):
+            supplemental = result["non_drawing_review"]
+            if supplemental.get("text_errors"):
+                page.append("⚠ 同页参数表的旧人工核对记录（与尺寸图分开，尚待核对）：" + supplemental["text_errors"])
+            if supplemental.get("structured"):
+                page.append("⚠ 同页表格的旧人工整理稿（与平台正文分开，待核对）：\n\n" + supplemental["structured"])
         if result.get("text_errors"):
             page.append(f"⚠ 看图核对：提取的文字和原图不一致，以原图为准（{result['text_errors']}）{gov['anm_ids'].get('text_errors', '')}")
+            if any(platform in result.get("draft", []) for platform in ("MinerU 识别", "Reducto 识别")):
+                page.append("以上为保留的人工核对记录；未据此改写平台正文。记录中的“已恢复”“现按原图”等表述指人工整理稿，不能理解为平台正文已校正。")
         if result.get("unclear"):
             # Say what is unclear, so a reader knows which products the code may not cover.
             detail = f"{result['pairing']}。" if result.get("pairing") else ""
@@ -552,7 +561,7 @@ def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, li
         if result.get("structured"):
             # The page's own words in the page's own order: a table as a table, a flow in its steps.
             order = {"流程图": "按图上箭头的顺序", "时间轴": "按时间先后"}.get(result["structure"], "按图上的排法")
-            page.append(f"⚠ 看图整理（{result['structure']}，{order}；AI 整理，只用了图上的字，待核对）：\n\n{result['structured']}")
+            page.append(f"⚠ 看图整理（{result['structure']}，{order}；AI 整理，只用了图上的字，待核对；与平台正文分开，未替换平台结果）：\n\n{result['structured']}")
     return notes
 
 
@@ -925,6 +934,7 @@ def main() -> int:
     for item_key, record_id in gov["cus_items"].items():
         if record_id not in issues[item_key.split(":")[0]]:
             issues[item_key.split(":")[0]].append(record_id)
+    ensure_dimension_previews(build, routes, status_info)
     checks = page_check_notes(build, gov)
     published, statuses = {}, {}
     # A page picture shows the whole page, so only pages nothing was removed from or held on get one.

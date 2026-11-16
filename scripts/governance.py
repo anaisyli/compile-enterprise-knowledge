@@ -363,12 +363,25 @@ def build(
     from source_fidelity import reviewed_units
 
     reviewed_locators: set[tuple[str, str]] = set()
+    withheld: list[str] = []
     for item_id, doc in by_item.items():
         path = build_dir / "mineru-units" / f"{item_id}.json"
         units = load_json(path).get("units", []) if path.is_file() else []
         if doc.get("source_sha256"):
             units = reviewed_units(build_dir, item_id, doc["source_sha256"], units)
-        reviewed_locators.update((item_id, unit["locator"]) for unit in units if unit.get("engine") == "reviewed")
+        reviewed_locators.update((item_id, unit["locator"]) for unit in units
+                                 if unit.get("engine") == "reviewed" and not unit.get("review_withheld"))
+        for unit in units:
+            if unit.get("review_withheld"):
+                unit_kind, number = unit["locator"].split(" ")[:2]
+                withheld.append(link(doc, heading({"unit": unit_kind, "page": number})))
+    mat("drawing_review_withheld", "尺寸图页的旧人工整页稿没有进正文", sorted(withheld), "页", "待知识库专员判断",
+        "这些页后来确认是尺寸图，正文只显示“型号 的图名，尺寸见原图”和原图；改尺寸图之前做的整页人工稿保留在构建状态"
+        "（reviewed-pages.json）供追溯，不进正文、整理页和检索。只有尺寸标注的不用处理；同页还有参数表或正文的，"
+        "重新看图核对，把非图纸部分单独写成 part 为 non_drawing 的核对稿，用 source_fidelity.py collect --replace-reviewed 收回",
+        "重新核对拆分后")
+    checks = checks + [r["non_drawing_review"] for r in checks
+                       if r.get("dimension_drawing") and r.get("non_drawing_review")]
     broken = [f"{link(by_item[r['item_id']], heading(r))}：{r['text_errors']}" for r in checks
               if r.get("text_errors") and r["item_id"] in by_item
               and (r["item_id"], f"{r['unit']} {r['page']}") not in reviewed_locators
@@ -382,7 +395,8 @@ def build(
                                       "- 现在怎么处理：原文照留，页面上标 ⚠“以原图为准”；整理页引用时必须带 ⚠。",
                                       "- 怎么关闭：对照原页人工确认后，写进 reviewed 转写；或用 MinerU / Reducto 重新识别这些页后重跑，提示会消失。", ""]
                                      + [f"- {b}" for b in sorted(broken)])
-    unclear = [r for r in checks if r.get("unclear") and r["item_id"] in by_item]
+    unclear = list({(r["item_id"], r["unit"], r["page"]): r for r in checks
+                    if r.get("unclear") and r["item_id"] in by_item}.values())
     cus_ids: dict[str, str] = {}
     if unclear:
         feature_attribution = all("共用 FEATURES" in r.get("pairing", "") for r in unclear)

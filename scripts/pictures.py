@@ -8,6 +8,7 @@ name; such a picture keeps a plain numbered name until a person or an AI look gi
 
 export   lists the pictures that still have only a numbered name, for an AI to look at.
 collect  reads the AI's answers; they are used on the next build, marked 待核对.
+restore-names restores selected published automatic names after checking image hashes.
 
 A name, once given, stays: links in the vault and on the website must not break.
 """
@@ -23,7 +24,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
+from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, safe_name, sha256_file,
+                       short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from products import material_folders
 
@@ -115,6 +117,39 @@ def page_group(info: dict[str, Any], page: str) -> str:
     return f"第 {page} 张幻灯片" if info.get("page_unit") == "slide" else f"第 {page} 页"
 
 
+def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: dict[str, Any]) -> None:
+    """Render reviewed drawing pages that long-PDF thumbnail limits omitted, without OCR."""
+    checks = load_json(build / "page-check/results.json") if (build / "page-check/results.json").is_file() else {}
+    assets = build / "assets"
+    for result in checks.values():
+        if not result.get("dimension_drawing") or result.get("unit") not in {"page", "slide"}:
+            continue
+        item, page = result["item_id"], str(result["page"])
+        route = routes.get(item, {})
+        if route.get("route") != "kb":
+            continue
+        info = status_info.setdefault(item, {})
+        images = info.setdefault("page_images", {})
+        if images.get(page) and (assets / images[page]).is_file():
+            continue
+        name = "img-" + short_hash(f"{route['source_hash']}|drawing {page}", 16) + ".png"
+        if not (assets / name).is_file():
+            import pymupdf
+            from ai_read import pdf_of
+            source = Path(route["package"]) / route["path"]
+            if sha256_file(source) != route["source_hash"]:
+                raise ValueError(f"Drawing source changed: {item}")
+            pdf = pdf_of(source, build, route["source_hash"][:16])
+            if pdf is None:
+                raise ValueError(f"Cannot render dimension drawing: {item} {page}")
+            with pymupdf.open(long_path(pdf)) as document:
+                original = document[int(page) - 1]
+                scale = min(150 / 72, 3000 / max(original.rect.width, original.rect.height))
+                assets.mkdir(parents=True, exist_ok=True)
+                original.get_pixmap(matrix=pymupdf.Matrix(scale, scale)).save(str(assets / name))
+        images[page] = name
+
+
 def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]], order: list[str],
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
                max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -172,7 +207,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 if drawing:
                     folder, model = drawing_folder(drawing)
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
-                        alt="尺寸见原图", use=CHECK, english_source="", location=group)
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True)
                 else:
                     add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
                         alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
@@ -185,11 +220,16 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
             drawing = dimension_result(page)
             if drawing:
                 folder, model = drawing_folder(drawing)
+                drawing_names = drawing.get("drawing_picture_ids", names)
                 for name in names:
+                    if name not in drawing_names:
+                        continue
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
-                        alt="尺寸见原图", use=CHECK, english_source="", location=group)
-                continue
-            on_page = [b for b in blocks if b["group"] == group]
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True)
+                names = [name for name in names if name not in drawing_names]
+                if not names:
+                    continue
+            on_page = [b for b in blocks if b["group"] == group and not b.get("dimension_drawing")]
             text = "\n".join(b["text"] for b in on_page)
             clean = [b for b in on_page if not b.get("flags")]
             heading = namer.label(first_line(clean))
@@ -200,7 +240,9 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
             for name in names:
                 if len(pages_of[name]) <= REPEATED:
                     add(name, doc_id, group, folder=folder, prefix=line or folder.split("/")[-1], label=label, line=line,
-                        alt=" ".join(p for p in (line, label) if p), use=use, english_source=heading, location=group)
+                        alt=" ".join(p for p in (line, label) if p), use=use, english_source=heading, location=group,
+                        excluded_drawing_caption=drawing.get("drawing_caption", "") if drawing else "",
+                        excluded_drawing_name=drawing.get("drawing_name", "") if drawing else "")
         if website.get(doc["item_id"]):
             category = doc.get("folder", "").split("/", 1)[-1]
             title = namer.label(doc["title"].split("-", 1)[-1])
@@ -272,10 +314,25 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
             item["use"] = CHECK if item["use"] == PUBLIC else item["use"]
         stem = safe_name("-".join(p for p in (item["prefix"], label) if p) or "图片")
         file = f"{item['folder']}/{stem}-{short}{suffix}"
+        proposed_file = file
         old = saved.get(item["id"])
         # A name stays once given; only a plain numbered name gives way to a better one.
         if old and old.get("file") and not (old.get("named_by") == NUMBERED and named_by != NUMBERED):
             file, named_by = old["file"], old.get("named_by", named_by)
+            if item.get("dimension_drawing"):
+                # An explicit visual classification changes the asset's category;
+                # keep its stable basename and let official publish move it.
+                file = f"{item['folder']}/{Path(file).name}"
+            caption = item.get("excluded_drawing_caption")
+            if caption and old.get("named_by") == FROM_SOURCE:
+                bad_labels = {namer.label(caption), namer.label(item.get("excluded_drawing_name", ""))}
+                bad_labels.update(label.removeprefix("的").strip() for label in list(bad_labels))
+                bad_names = {safe_name("-".join(p for p in (item["prefix"], label) if p)) + f"-{short}{suffix}"
+                             for label in bad_labels if label}
+                if Path(file).name in bad_names:
+                    # Repair auto-names previously taken from the drawing caption
+                    # beside a photograph; never replace an AI/human-given name.
+                    file, named_by = proposed_file, FROM_SOURCE if label else NUMBERED
             # Repair the former 大尺寸 -> 尺寸图 mistake without changing the given basename.
             if ("大尺寸" in item.get("source_relpath", "") and Path(file).parent.name == "尺寸图"
                     and Path(item["folder"]).name in {"详情图", "效果图"}):
@@ -490,13 +547,53 @@ def collect(out: Path) -> dict[str, Any]:
     return {"collected": taken, "not_in_todo": skipped[:10]}
 
 
+def restore_names(out: Path, vault: Path, picture_ids: list[str]) -> dict[str, Any]:
+    """Restore selected automatic names in build state only; publishing moves assets later.
+
+    Validate the entire request before writing, and never replace an AI/human name.
+    """
+    from kb_state import STATE as VAULT_STATE
+
+    build = out / BUILD_DIRECTORY
+    saved = load_json(build / STATE)
+    published = load_json(vault / VAULT_STATE / STATE)
+    assets = (vault / ASSETS).resolve()
+    restored = {}
+    for picture_id in dict.fromkeys(picture_ids):
+        if Path(picture_id).name != picture_id:
+            raise ValueError(f"Invalid picture id: {picture_id}")
+        old, current = published.get(picture_id, {}), saved.get(picture_id, {})
+        if not old.get("file") or not current.get("file"):
+            raise ValueError(f"Missing picture name: {picture_id}")
+        if any(entry.get("named_by") not in {NUMBERED, FROM_SOURCE} for entry in (old, current)):
+            raise ValueError(f"Protected picture name: {picture_id}")
+        original = (assets / old["file"]).resolve()
+        if not original.is_relative_to(assets):
+            raise ValueError(f"Picture path outside assets: {picture_id}")
+        cached = build / "assets" / picture_id
+        if not original.is_file() or not cached.is_file() or sha256_file(original) != sha256_file(cached):
+            raise ValueError(f"Picture hash mismatch: {picture_id}")
+        restored[picture_id] = {**current, "file": old["file"], "named_by": old["named_by"]}
+    if restored:
+        write_json(build / STATE, {**saved, **restored})
+    return {"restored": len(restored), "ids": list(restored), "published_vault_modified": False}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Let an AI name the pictures that have no words beside them.")
-    parser.add_argument("command", choices=["export", "collect"])
+    parser.add_argument("command", choices=["export", "collect", "restore-names"])
     parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--vault", help="Published vault to read when restoring names")
+    parser.add_argument("--id", action="append", dest="picture_ids", default=[], help="Picture id to restore (repeatable)")
     args = parser.parse_args()
     out = Path(args.out).resolve()
-    print(json.dumps(export(out) if args.command == "export" else collect(out), ensure_ascii=False, indent=2))
+    if args.command == "restore-names":
+        if not args.vault or not args.picture_ids:
+            parser.error("restore-names requires --vault and at least one --id")
+        result = restore_names(out, Path(args.vault).resolve(), args.picture_ids)
+    else:
+        result = export(out) if args.command == "export" else collect(out)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
