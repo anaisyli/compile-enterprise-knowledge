@@ -5,9 +5,13 @@ A text layer can miss what is printed in pictures (style codes, product names), 
 garbled when a font is broken, or leave a catalog page unclear about which code belongs
 to which product. Nothing checks that against the page unless something looks at it.
 
-plan     picks the pages worth looking at (pictures with little text, more product photos
-         than codes, odd characters, pictures inside Word files, and a sample of the rest),
-         draws them, and writes the extracted text beside each. Run by the pipeline.
+plan     picks the pages worth looking at, draws them, and writes the extracted text beside each.
+         Run by the pipeline. For files read by the text layer: pictures with little text, more
+         product photos than codes, odd characters, pictures inside Word files, and a 30% sample of
+         the rest. For files read by MinerU or Reducto (their text is used, the text layer only checks
+         it): pages where the text layer has a code or number the platform lost (grade D), two or more
+         product photos, pictures with little read, line drawings, broken output, and a 30% sample of
+         the remaining ordinary pages.
 collect  reads the model's answers. Words seen on the page but missing from the text go in
          beside MinerU's results, marked as the model's reading; broken text and unclear
          code pairings are recorded for the page and the ledgers.
@@ -32,8 +36,9 @@ from guard_blocks import HARD_PATTERNS
 from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
                        remaining_ocr_pages, run_lock, sha256_file, suppress_drawing_dimensions, write_json, write_text)
 from office import convert_office
-from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of
-from samples import (GRADES, IMAGE_KIND, METHODS, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
+from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of, text_layer_missed
+from reducto_ocr import mineru_pages as mineru_page_texts
+from samples import (GRADES, IMAGE_KIND, METHODS, OCR_FIRST, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
                      image_method, is_confirmed, load_decisions,
                      method_and_source, unreadable, unreadable_method)
 
@@ -47,8 +52,10 @@ WORD = {".docx", ".doc"}
 # A picture taking this share of the page is content, not a logo.
 PICTURE_SHARE = 0.04
 FEW_WORDS = 400
-SAMPLE_SHARE = 0.1
+SAMPLE_SHARE = 0.3
 MIN_PICTURE_BYTES = 15_000
+# Vector paths on a page without photos above which it is likely a technical drawing (dimension sheet).
+DRAWING_PATHS = 150
 GENERIC_CODE = re.compile(r"\b[A-Z]{2,5}[\s-]?[A-Z]?-?\d{2,5}\b")
 STRUCTURES = {"表格", "流程图", "时间轴", "地图", "图表"}
 LIST_MARK = re.compile(r"^\s*(?:\d+[.、)）]|[-*•])\s*")
@@ -135,6 +142,38 @@ def reasons_for(page: Any, text: str, codes: re.Pattern[str]) -> list[str]:
     if ODD.search(text):
         reasons.append("文字里有乱码")
     return reasons
+
+
+def native_text(units: list[dict[str, str]], unit: str, number: int) -> str:
+    """The page's own text layer only, without what any platform or the model read."""
+    native = re.compile(rf"^{unit} {number}(?: col \d+| table \d+)?$")
+    return "\n".join(u["text"] for u in units if native.match(u["locator"]))
+
+
+def ocr_first_reasons(page: Any, read: str) -> list[str]:
+    """Why a page whose text came from MinerU or Reducto must be looked at against its picture.
+
+    Only what a platform's text cannot show: which code goes with which of several products, words
+    printed in pictures it left out, a drawing whose callouts must not be copied, broken output.
+    Remaining ordinary pages go to the 30% random sample."""
+    pictures = content_pictures(page)
+    reasons = []
+    if len(pictures) >= 2:
+        reasons.append(f"同页 {len(pictures)} 张图，核对款号和产品的对应")
+    if pictures and len(read) < FEW_WORDS:
+        reasons.append("有图、读出的字少")
+    if not pictures and len(read) < FEW_WORDS * 2 and drawing_paths(page) >= DRAWING_PATHS:
+        reasons.append("线条图多，可能是尺寸图")
+    if ODD.search(read):
+        reasons.append("识别结果有乱码")
+    return reasons
+
+
+def drawing_paths(page: Any) -> int:
+    try:
+        return len(page.get_drawings())
+    except Exception:  # A page whose vector content cannot be listed is just not counted as a drawing.
+        return 0
 
 
 def word_pictures(path: Path) -> list[tuple[str, bytes]]:
@@ -239,11 +278,13 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         reducto = compare(build, item_id)
         reducto_record = record_of(build, item_id)
         reducto_read = set(reducto_record.get("pages_read", [])) if reducto_record.get("source_hash") == asset.get("source_hash") else set()
+        reducto_primary = bool(reducto_record.get("primary"))
+        mineru_texts = mineru_page_texts(build, item_id)
         read_path = build / "mineru-units" / f"{item_id}.json"
         name = route.get("display_name") or asset["file"].name
         hold = ""
         if method == "mineru" and not (read_path.is_file() and load_json(read_path).get("source") == "mineru"):
-            hold = f"{name}：按“MinerU 初稿 + AI 复核”处理，等 MinerU 初稿出来再对照"
+            hold = f"{name}：按“{METHODS['mineru']}”处理，等 MinerU 初稿出来再对照"
         if suffix in WORD:
             try:
                 source = asset["file"] if suffix == ".docx" else convert_office(asset["file"], "docx", build / "converted", asset["source_hash"][:16], 600)
@@ -294,14 +335,24 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     grades[str(number)] = {"grade": "C", "reasons": ["没有文字层，还没人读过"]}
                     continue
                 text = page_text(units, unit, number)
+                native = native_text(units, unit, number)
                 seen = reducto.get(number)
                 found = reasons_for(page, text, codes)
                 disagree = []
                 dimension_drawing = done.get(f"{item_id}|{unit} {number}", {}).get("dimension_drawing", False)
                 if seen is not None and not dimension_drawing:
-                    disagree = check_reasons(seen, text)
+                    disagree = check_reasons(seen, native)
                     if seen.get("only_mineru") or seen.get("only_reducto"):
-                        text += f"\n\n【Reducto 识别（与 MinerU 不一致，以原图为准）】\n{seen['text']}"
+                        # The reviewer sees both readings: the one not published is added under its own label.
+                        other, label = ((mineru_texts.get(number, ""), "MinerU 识别（与 Reducto 不一致，以原图为准）")
+                                        if reducto_primary else (seen["text"], "Reducto 识别（与 MinerU 不一致，以原图为准）"))
+                        text += f"\n\n【{label}】\n{other}"
+                elif number in mineru_pages and not dimension_drawing:
+                    # MinerU's text replaces the text layer on this page: a code or number the text layer has
+                    # and MinerU lost is a misreading nobody would see in MinerU's text alone.
+                    missed = text_layer_missed(native, mineru_texts.get(number, ""))
+                    if missed:
+                        disagree = [f"文字层有 {'、'.join(missed[:4])}，MinerU 没读出"]
                 grade = "D" if disagrees(disagree) else "C" if number in no_text else "B" if found else "A"
                 why = [r for r in disagree if r.startswith(DISAGREE)] if grade == "D" else found or (
                     ["没有文字层，已读出"] if grade == "C" else [])
@@ -309,12 +360,15 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 if hold:
                     continue
                 # What each grade gets depends on how the file is read.
-                if (method == "reducto" and seen is None and grade in {"B", "C"} and number not in reducto_read
-                        and number not in mineru_pages):
-                    waiting_reducto += 1  # Reducto reads it first; then it is compared and sampled.
+                if method == "reducto" and seen is None and number not in reducto_read:
+                    waiting_reducto += 1  # Reducto reads the whole file first; then its text is checked.
                     continue
-                if method == "reducto" and seen is not None:
-                    reasons = disagree + (["文字里有乱码"] if ODD.search(text) else [])
+                read = ""
+                if method in OCR_FIRST:
+                    # The platform's text is the page's text; look at the picture only where it cannot be trusted alone.
+                    read = (seen["text"] if method == "reducto" and seen is not None
+                            else mineru_texts.get(number, "") or (seen or {}).get("text", ""))
+                    reasons = disagree + [r for r in ocr_first_reasons(page, read) if r not in disagree]
                 else:
                     reasons = disagree + [r for r in found if r not in disagree]
                 if f"{item_id}|{unit} {number}" in requested:
@@ -322,9 +376,9 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                         raise ValueError(f"Explicit page source changed: {item_id}")
                     included.add(f"{item_id}|{unit} {number}")
                     reasons = reasons or ["主动补充看图核对"]
-                if method in {"mineru", "ai"} and not reasons and has_pictures(page):
+                if method == "ai" and not reasons and has_pictures(page):
                     reasons = [f"按“{METHODS[method]}”处理，有图片的页都对照"]
-                if seen is not None and not reasons and not seen["mineru"] and seen["terms"]:
+                if method not in OCR_FIRST and seen is not None and not reasons and not seen["mineru"] and seen["terms"]:
                     pool.add(number)
                 chosen.append((number, text, reasons))
             rest = [c for c in chosen if not c[2] and c[0] not in pool]
@@ -356,7 +410,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         if hold:
             skipped.append(hold)
         if waiting_reducto:
-            skipped.append(f"{name}：按“{METHODS['reducto']}”处理，{waiting_reducto} 页 B、C 级页等 Reducto 结果再对照")
+            skipped.append(f"{name}：按“{METHODS['reducto']}”处理，{waiting_reducto} 页等 Reducto 结果再对照")
         counts = {g: sum(1 for p in grades.values() if p["grade"] == g) for g in GRADES}
         triage[item_id] = {"name": name, "kind": kind, "method": method, "method_from": method_from, "unit": unit,
                            "counts": counts, "pages": grades}

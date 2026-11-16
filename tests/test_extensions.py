@@ -400,6 +400,10 @@ class Site(BaseHTTPRequestHandler):
     }
 
     def do_GET(self):  # noqa: N802
+        if self.path == "/robots.txt" and "Python-urllib" in (self.headers.get("User-Agent") or ""):
+            self.send_response(403)
+            self.end_headers()
+            return
         body = self.pages.get(self.path)
         if body is None:
             self.send_response(404)

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from extract_blocks import configured_route, format_pairs, is_catalog
 from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, load_config, load_json, run_lock
-from samples import TYPES, gate, kind_of, load_decisions, save_gate
+from samples import TYPES, gate, kind_of, load_decisions, save_gate, sync_reducto_primary
 
 
 def entries_of(packages: list[Path], config: dict) -> list[dict]:
@@ -50,8 +50,12 @@ def main() -> int:
     config.setdefault("client_answers", {})
     build = Path(args.out).resolve() / BUILD_DIRECTORY
     build.mkdir(parents=True, exist_ok=True)
-    result = gate(entries_of([Path(p).resolve() for p in args.package], config), config, load_decisions(build))
+    entries = entries_of([Path(p).resolve() for p in args.package], config)
+    decisions = load_decisions(build)
+    result = gate(entries, config, decisions)
     save_gate(build, result)
+    # Before anything is extracted: where Reducto was chosen, its reading is the one every step uses.
+    sync_reducto_primary(build, {e["item_id"]: e["kind"] for e in entries}, decisions)
     waiting = {TYPES[k][0]: v["waiting"] for k, v in result.get("kinds", {}).items() if v["waiting"]}
     print(json.dumps({"sample_review": bool(result), "read_now": len(result.get("allowed", [])),
                       "waiting_for_confirmation": waiting}, ensure_ascii=False))

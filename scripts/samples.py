@@ -43,17 +43,20 @@ LEGACY = {"spreadsheet": ("quotation", "product_table")}
 # How a kind of paged file is read, chosen by a person after seeing its sample.
 METHODS = {
     "text": "文字层",
-    "mineru": "MinerU 初稿 + AI 复核",
-    "reducto": "Reducto 难页 + AI 抽查",
+    "mineru": "MinerU 整份 + AI 核对",
+    "reducto": "Reducto 整份 + AI 核对",
     "ai": "AI 看图复核",
 }
 METHOD_HELP = {
-    "text": "读文件里的文字层；C 级页交给 MinerU（要批准上传，不能上传时 AI 读图），B、D 级页对照原图看，A 级页抽查一成",
-    "mineru": "整份上传 MinerU 识别出初稿（要批准上传），再把每页有图片的原页和初稿一起交给 AI 对照：补漏字、标错字、写款号对应",
-    "reducto": "只把 B、C 级页上传 Reducto 按页解析（要批准上传，按页计费）；D 级页和 Reducto 只在图片说明里提到的款号对照原图看，"
-               "其余 Reducto 读过、有款号或数字的页抽查三成",
-    "ai": "不上传；C 级页 AI 读图，每页有图片的原页都交给 AI 对照文字层：补漏字、标错字、写款号对应",
+    "text": "读文件里的文字层；C 级页交给 MinerU（要批准上传，不能上传时 AI 读图），B、D 级页对照原图看，其余普通页抽查三成",
+    "mineru": "整份上传 MinerU（要批准上传），正文和表格用 MinerU 的结果；文字层只用来核对：文字层有、MinerU 没读出的款号或数字，"
+              "这页对照原图看。另外同页有两张以上产品图、有图但读出的字少、线条图多（可能是尺寸图）、读出乱码的页必看，其余普通页随机抽查三成",
+    "reducto": "整份上传 Reducto（要批准上传，按页计费），正文和表格用 Reducto 的结果（同页 MinerU 也读过时仍以 Reducto 为准）；"
+               "核对规则和 MinerU 一样（其余普通页同样随机抽查三成），另外 Reducto 只在图片说明里提到的款号也对照原图看",
+    "ai": "不上传；C 级页 AI 读图，每页有图片的原页都交给 AI 对照文字层：补漏字、标错字、写款号对应，其余无图页抽查三成",
 }
+# Methods whose page text comes from the platform: the text layer only checks it.
+OCR_FIRST = {"mineru", "reducto"}
 # Every page of a PDF or PPT gets one grade; the method of its file decides what each grade gets.
 GRADES = {
     "A": ("文字页", "文字层完整，没有要对照的图"),
@@ -199,6 +202,29 @@ def image_method(decisions: dict[str, dict[str, Any]], item_id: str) -> tuple[st
     """How a single picture is read: Reducto when chosen for it, else the model."""
     method, source = method_and_source("", decisions, item_id, default=IMAGE_DEFAULT)
     return (method, source) if method in IMAGE_METHODS else (IMAGE_DEFAULT, "默认")
+
+
+def sync_reducto_primary(build: Path, kinds: dict[str, str], decisions: dict[str, dict[str, Any]]) -> list[str]:
+    """Mark Reducto's reading of a file as the one used when a person chose Reducto for it (or its kind).
+
+    By default MinerU's reading wins where both read a page. A file read "Reducto" was chosen for
+    Reducto, usually because MinerU read it badly on the sample: there Reducto's page wins. The flag
+    lives in the file's reducto-units record, so every step that loads page text sees the same choice.
+    Returns the item ids whose flag changed."""
+    folder = build / "reducto-units"
+    changed = []
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        record = load_json(path)
+        item_id = record.get("item_id") or path.stem
+        kind = kinds.get(item_id)
+        if kind not in PAGED_KINDS:
+            continue  # Not in this build, or not a paged file: MinerU never reads pictures.
+        primary = method_and_source(kind, decisions, item_id)[0] == "reducto"
+        if bool(record.get("primary")) != primary:
+            record["primary"] = primary
+            write_json(path, record)
+            changed.append(item_id)
+    return changed
 
 
 def load_triage(build: Path) -> dict[str, Any]:

@@ -33,7 +33,7 @@ CACHE_DIRECTORY = "mineru-cache"
 
 
 def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool = False, missing: bool = False) -> list[dict[str, Any]]:
-    """Files MinerU would read: whole kinds a person chose “MinerU 初稿 + AI 复核” for after seeing their
+    """Files MinerU would read: whole kinds a person chose “MinerU 整份 + AI 核对” for after seeing their
     sample, pages with no text layer, and files nothing could be read from. With samples_only, the
     sample of each kind still waiting for a decision, so MinerU's result can be seen before deciding.
     With missing, also every PDF/PPT in the knowledge base MinerU has not read yet."""

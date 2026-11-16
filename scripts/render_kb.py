@@ -715,15 +715,20 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
     if reducto.get("pages_read"):
         conflicts = graded["counts"]["D"] if graded else 0
         parts.append(f"Reducto 试读：读了 {len(reducto['pages_read'])} 页" + (f"，{conflicts} 页和其他来源对不上（D 级）" if conflicts else ""))
-    hard = graded["counts"]["B"] + graded["counts"]["C"] if graded else 0
-    if not looked and not unread:
-        advice = ""
-    elif graded and pages and hard * 2 < pages and (unread or added + wrong):
-        advice = "建议：Reducto 难页 + AI 抽查（难页只占少数，按页送更省；也可 MinerU 初稿 + AI 复核，不想上传就选 AI 看图复核）"
-    elif unread or (looked and (added + wrong) * 5 >= len(looked)):
-        advice = "建议：MinerU 初稿 + AI 复核（难页只占少数时也可 Reducto 难页 + AI 抽查；不想上传就选 AI 看图复核）"
+    tried_mineru = read_path.is_file() and load_json(read_path).get("source") == "mineru"
+    tried_reducto = bool(reducto.get("pages_read"))
+    # The page text comes from the platform the person picks on this sample; the text layer only checks it.
+    if tried_mineru and tried_reducto:
+        advice = (f"建议：对照两边的净化原文选一个：{METHODS['mineru']}（免费额度），或 {METHODS['reducto']}"
+                  "（按页计费，复杂表格、扫描件通常更好）")
+    elif tried_mineru:
+        advice = (f"建议：{METHODS['mineru']}；MinerU 读得不好（表格乱、漏字多）再试读 Reducto"
+                  "（reducto_ocr.py plan --samples）")
+    elif tried_reducto:
+        advice = f"建议：{METHODS['reducto']}；想省钱可以再试读 MinerU（mineru_ocr.py plan --samples）对比"
     else:
-        advice = "建议：文字层够用"
+        advice = ("建议：先试读 MinerU（mineru_ocr.py plan --samples），读得不好再试读 Reducto；"
+                  "不想上传就选 AI 看图复核")
     return "；".join(p for p in parts if p) + (f"。{advice}" if advice else "")
 
 

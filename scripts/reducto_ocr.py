@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Send only the hard pages to Reducto, keep its reading apart, and compare it with MinerU.
+"""Send whole files to Reducto, keep its reading apart, and compare it with MinerU and the text layer.
 
-Every page of a PDF or PPT has a grade (page-triage.json, written by page_check.py plan): A text,
-B pictures with text, C no text layer, D two readings disagree. Files a person chose to read
-“Reducto 难页 + AI 抽查” (for their kind, or for the file itself) send their B and C pages here.
-Reducto's text is a candidate: published with ⚠, and where MinerU read the same page, MinerU's text
-is used and Reducto's is only compared against it. Pages where Reducto disagrees with MinerU or the
-text layer on codes or numbers become grade D and go to the AI page check.
+Files a person chose to read “Reducto 整份 + AI 核对” (for their kind, or for the file itself) are sent
+whole: every page not read by Reducto yet for the same file hash. For those files Reducto's page text is
+the one used, also where MinerU read the same page (the record is marked "primary"); elsewhere MinerU's
+text wins and Reducto's is only compared against it. Pages where Reducto disagrees with MinerU, or lost
+a code or number the text layer has, become grade D and go to the AI page check. The page grades
+(page-triage.json, written by page_check.py plan) are shown in the plan but no longer choose pages.
 
 Nothing is uploaded until kb-config.json records who approved it. Pages already read for the same
 file hash are never sent again.
@@ -99,6 +99,18 @@ def compare(build: Path, item_id: str) -> dict[int, dict[str, Any]]:
 
 
 DISAGREE = ("MinerU 与 Reducto 不一致", "文字层有")
+# A text layer with broken fonts says nothing about what a page reads; it is not compared.
+GARBLED = re.compile("[\ufffd\ue000-\uf8ff]|[À-ÿ]{3,}")
+
+
+def text_layer_missed(native: str, read: str, also: set[str] | None = None) -> list[str]:
+    """Codes and 3+ digit numbers the text layer has and a platform reading lost.
+
+    One way only: what the platform read beyond the text layer is usually printed in pictures,
+    not a disagreement. A garbled text layer is not compared at all."""
+    if not native.strip() or GARBLED.search(native):
+        return []
+    return sorted(t for t in key_terms(native) - key_terms(read) - (also or set()) if not t.isdigit() or len(t) >= 3)
 
 
 def check_reasons(entry: dict[str, Any], native: str) -> list[str]:
@@ -110,8 +122,7 @@ def check_reasons(entry: dict[str, Any], native: str) -> list[str]:
         reasons.append("MinerU 与 Reducto 不一致（" + "；".join(d for d in diff if d) + "）")
     elif not entry.get("mineru"):
         # Without MinerU the text layer is the other reading: a code or 3+ digit number it has and Reducto lost.
-        missed = sorted(t for t in key_terms(native) - set(entry.get("terms", [])) - set(entry.get("figure_terms", []))
-                        if not t.isdigit() or len(t) >= 3)
+        missed = text_layer_missed(native, "", set(entry.get("terms", [])) | set(entry.get("figure_terms", [])))
         if missed:
             reasons.append(f"文字层有 {'、'.join(missed[:4])}，Reducto 没读出")
     figure_only = sorted(set(entry.get("figure_only", [])) - key_terms(native))
@@ -126,11 +137,12 @@ def disagrees(reasons: list[str]) -> bool:
 
 def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool = False,
                full_document_item_ids: list[str] | None = None) -> list[dict[str, Any]]:
-    """Per file read “Reducto 难页 + AI 抽查”, its grade B and C pages (page-triage.json) nobody read yet.
+    """Per file read “Reducto 整份 + AI 核对”, every page (page-triage.json) Reducto has not read yet.
 
-    With samples_only, the same pages of each paged kind's sample still waiting for a decision, so
-    Reducto's result can be seen before choosing. Pages MinerU read, or Reducto read for the same
-    file hash, are never sent."""
+    With samples_only, every page of each paged kind's sample still waiting for a decision, so
+    Reducto's result can be set beside MinerU's on the same pages before choosing. Pages Reducto
+    read for the same file hash are never sent again.
+    """
     routes = load_json(build / "routes.json")
     triage = load_triage(build).get("files", {})
     gate_path = build / "sample-gate.json"
@@ -166,16 +178,20 @@ def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool
         full_document = item_id in full_documents
         if full_document:
             why = "用户指定整份使用 Reducto 解析，供平台效果对比"
+        # A file read by Reducto (or its sample on trial) is read whole: its text replaces the text layer
+        # on every page, so no page is left to the text layer. Pages MinerU read are read too: when Reducto
+        # is chosen it is because MinerU read the file badly, and a trial compares both on the same pages.
+        chosen_reducto = info.get("method") == "reducto" and not samples_only
         record = record_of(build, item_id)
         done = set(record.get("pages_read", [])) if record.get("source_hash") == asset.get("source_hash") else set()
-        done |= set(mineru_pages(build, item_id))
         pages = {int(number): [why, f"{page['grade']} 级{GRADES[page['grade']][0]}", *page.get("reasons", [])]
                  for number, page in info.get("pages", {}).items()
-                 if (full_document or page["grade"] in {"B", "C"}) and int(number) not in done}
+                 if int(number) not in done}
         if pages:
             chosen.append({"item_id": item_id, "display_name": route.get("display_name") or asset["file"].name,
                            "path": str(asset["file"]), "source_hash": asset.get("source_hash", ""),
                            "unit": "slide" if suffix in SLIDES else "page", "image": image, "full_document": full_document,
+                           **({"primary": True} if chosen_reducto else {}),
                            "pages": sorted(pages), "reasons": {str(k): v for k, v in sorted(pages.items())}})
     return chosen
 
@@ -195,11 +211,12 @@ def write_plan(build: Path, chosen: list[dict[str, Any]], state: dict[str, Any])
     total = sum(len(entry["pages"]) for entry in chosen)
     lines = ["# Reducto 解析计划", "",
              f"共 {len(chosen)} 个文件、{total} 页。只上传这些页所在的文件，并只解析列出的页；按页计费。", "",
-             "- 选哪些页：处理方式是“Reducto 难页 + AI 抽查”的文件（按类型选，或单个文件指定），里面 B 级（图文页）和 C 级（难页）"
-             "还没人读过的页；MinerU 读过的页不再送。单张图片原样上传，算 1 页。",
-             "- 用户明确指定整份对比的文件：解析全部页，包含文字页；文件清单见配置 reducto.full_document_item_ids。批准范围和已解析页缓存仍生效。",
+             "- 选哪些页：处理方式是“Reducto 整份 + AI 核对”的文件（按类型选，或单个文件指定）的全部页，减去同一文件版本 Reducto 已经读过的页；"
+             "MinerU 读过的页也送：选 Reducto 就是因为 MinerU 读得不好。样例试读（--samples）同样整份读，好和 MinerU 逐页对比。单张图片原样上传，算 1 页。",
+             "- 配置 reducto.full_document_item_ids 里的文件也整份读（旧版用来做对比，现在和上面一样）。批准范围和已解析页缓存仍生效。",
              f"- 模型：{MODEL}。价格和套餐看 {PRICING_PAGE} ，余额在 {KEY_PAGE} 查看（新账号送 15,000 credits）。",
-             "- Reducto 的结果是候选：入库标 ⚠；同一页有 MinerU 的以 MinerU 为准，两者不一致的页交给 AI 看图核对。",
+             "- 选了 Reducto 的文件，正文用 Reducto 的结果（同一页 MinerU 也读过时仍以 Reducto 为准），入库标 ⚠；文字层只用来核对，"
+             "文字层有、Reducto 没读出的款号或数字，以及和 MinerU 不一致的页，交给 AI 看图核对。",
              "- 免费和标准套餐不能主动删除上传的文件，由 Reducto 按其保留期清除；要求零保留需 Growth / Enterprise 套餐。", "",
              "| 文件 | 页数 | 页码 | 原因 |", "| --- | --- | --- | --- |"]
     for entry in chosen:
@@ -258,6 +275,7 @@ def store(build: Path, entry: dict[str, Any], result: dict[str, Any]) -> dict[st
         elif not read.get("figures"):
             units[locator] = {"locator": locator, "text": "", "empty": True, "engine": "reducto"}
     record = {"item_id": entry["item_id"], "source": "reducto", "model": MODEL, "source_hash": entry["source_hash"],
+              "primary": bool(entry.get("primary", record.get("primary", False))),
               "extracted_at": date.today().isoformat(),
               "pages_read": sorted(set(record.get("pages_read", [])) | set(entry["pages"])),
               "job_ids": record.get("job_ids", []) + [result["job_id"]],

@@ -143,16 +143,44 @@ def page_label(group: str) -> str:
 
 
 def page_group(info: dict[str, Any], page: str) -> str:
-    """The heading a page or slide has in the source layer."""
+    """The heading a page, slide or embedded Word picture has in the source layer."""
+    if str(page).startswith("image "):
+        return f"图片 {str(page).split()[-1]}"
     return f"第 {page} 张幻灯片" if info.get("page_unit") == "slide" else f"第 {page} 页"
 
 
+def drawing_entries(build: Path) -> dict[str, dict[str, Any]]:
+    """Every page, slide or Word picture confirmed as a dimension drawing."""
+    entries: dict[str, dict[str, Any]] = {}
+    if (build / "page-check/results.json").is_file():
+        for key, result in load_json(build / "page-check/results.json").items():
+            if result.get("dimension_drawing"):
+                entries[key] = result
+    folder = build / "mineru-units"
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        record = load_json(path)
+        item_id = record.get("item_id") or path.stem
+        for unit in record.get("units", []):
+            match = re.fullmatch(r"(page|slide|image) (\d+) drawing", unit.get("locator", ""))
+            if not unit.get("dimension_drawing") or not match:
+                continue
+            key = f"{item_id}|{match.group(1)} {match.group(2)}"
+            if key not in entries:
+                model = (unit.get("text") or "").split(" 的", 1)[0].strip() or "型号待确认"
+                entries[key] = {"item_id": item_id, "unit": match.group(1), "page": int(match.group(2)),
+                                "dimension_drawing": True, "drawing_model": model,
+                                "drawing_model_confirmed": bool(unit.get("drawing_model_confirmed"))}
+    return entries
+
+
 def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: dict[str, Any]) -> None:
-    """Render reviewed drawing pages that long-PDF thumbnail limits omitted, without OCR."""
-    checks = load_json(build / "page-check/results.json") if (build / "page-check/results.json").is_file() else {}
+    """Render reviewed drawing pages and unpack reviewed Word drawing pictures, without OCR."""
+    checks = drawing_entries(build)
     assets = build / "assets"
+    word_cache: dict[str, list[tuple[str, bytes]]] = {}
     for result in checks.values():
-        if not result.get("dimension_drawing") or result.get("unit") not in {"page", "slide"}:
+        unit = result.get("unit")
+        if not result.get("dimension_drawing") or unit not in {"page", "slide", "image"}:
             continue
         item, page = result["item_id"], str(result["page"])
         route = routes.get(item, {})
@@ -160,7 +188,29 @@ def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: 
             continue
         info = status_info.setdefault(item, {})
         images = info.setdefault("page_images", {})
-        if images.get(page) and (assets / images[page]).is_file():
+        key = f"image {page}" if unit == "image" else page
+        if images.get(key) and (assets / images[key]).is_file():
+            continue
+        if unit == "image":
+            source = Path(route["package"]) / route["path"]
+            if sha256_file(source) != route["source_hash"]:
+                raise ValueError(f"Drawing source changed: {item}")
+            if item not in word_cache:
+                from office import convert_office
+                from page_check import word_pictures
+                docx = source if source.suffix.casefold() == ".docx" else convert_office(
+                    source, "docx", build / "converted", route["source_hash"][:16], 600)
+                word_cache[item] = word_pictures(docx)
+            index = int(page) - 1
+            if index < 0 or index >= len(word_cache[item]):
+                raise ValueError(f"Cannot render dimension drawing: {item} image {page}")
+            member, data = word_cache[item][index]
+            suffix = Path(member).suffix.casefold().replace(".jpeg", ".jpg") or ".png"
+            name = "img-" + short_hash(f"{route['source_hash']}|drawing image {page}", 16) + suffix
+            if not (assets / name).is_file():
+                assets.mkdir(parents=True, exist_ok=True)
+                (assets / name).write_bytes(data)
+            images[key] = name
             continue
         name = "img-" + short_hash(f"{route['source_hash']}|drawing {page}", 16) + ".png"
         if not (assets / name).is_file():
@@ -195,7 +245,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         return tuple(place) if place and place[1] else None
     assets = build / "assets"
     website = load_json(build / WEBSITE_PICTURES) if (build / WEBSITE_PICTURES).is_file() else {}
-    page_checks = load_json(build / "page-check" / "results.json") if (build / "page-check" / "results.json").is_file() else {}
+    page_checks = drawing_entries(build)
     pages_of: dict[str, set[str]] = defaultdict(set)
     for doc_id in order:
         for page, names in status_info.get(docs[doc_id]["item_id"], {}).get("page_pictures", {}).items():
@@ -230,7 +280,8 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         placed = product_folders((places or {}).get(doc["item_id"]), namer.forbidden)
 
         def dimension_result(page: str) -> dict[str, Any]:
-            result = page_checks.get(f"{doc['item_id']}|{page_unit} {page}", {})
+            key = page if str(page).startswith("image ") else f"{page_unit} {page}"
+            result = page_checks.get(f"{doc['item_id']}|{key}", {})
             return result if result.get("dimension_drawing") else {}
 
         for page, name in info.get("page_images", {}).items():

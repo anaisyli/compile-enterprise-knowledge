@@ -259,9 +259,13 @@ class PageCheckTests(Base):
         (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": units}), encoding="utf-8")
         self.assertEqual(self.pipeline().returncode, 0)
         picked = self.todo()
-        self.assertEqual(len(picked), 1)
+        self.assertEqual(len(picked), 3)
         folder = self.build / "page-check"
-        (folder / "answer-001.jsonl").write_text(json.dumps({"key": picked[0]["key"], "missing": "", "text_errors": "", "pairing": "", "unclear": False}) + "\n", encoding="utf-8")
+        (folder / "answer-001.jsonl").write_text(
+            "".join(json.dumps({"key": entry["key"], "missing": "", "text_errors": "", "pairing": "", "unclear": False}) + "\n"
+                    for entry in picked),
+            encoding="utf-8",
+        )
         self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual(self.todo(), [])
@@ -320,7 +324,15 @@ class PageCheckTests(Base):
         self.assertTrue(any("等 MinerU 初稿" in s for s in plan["skipped"]))
         result = run("mineru_ocr.py", "plan", "--out", str(self.out), "--package", str(self.package), "--config", str(self.config))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("MinerU 初稿 + AI 复核", (self.build / "mineru-plan.md").read_text(encoding="utf-8"))
+        self.assertIn("MinerU 整份 + AI 核对", (self.build / "mineru-plan.md").read_text(encoding="utf-8"))
+        # Once MinerU's draft arrives: if native text had a code MinerU missed, the page becomes grade D and is checked.
+        (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": [{"locator": "page 1", "text": "NTX S-555 SHERPA JACKET"}]}),
+                                           encoding="utf-8")
+        self.write_reading("mineru-units", "SHERPA JACKET")
+        self.pipeline()
+        picked = self.todo()
+        self.assertEqual(picked[0]["grade"], "D")
+        self.assertIn("文字层有 S555，MinerU 没读出", picked[0]["reasons"])
 
     def write_reading(self, folder: str, text: str, **extra) -> None:
         engine = {"engine": "reducto"} if folder == "reducto-units" else {}

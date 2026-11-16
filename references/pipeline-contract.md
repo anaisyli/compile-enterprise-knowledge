@@ -229,11 +229,11 @@
 - **一键打开原件：**每份入库资料在初筛包的 `审计记录/按知识库名字/` 下有一个用知识库名字命名的硬链接，比如 `报价单-0a663a2b.xls`：同一个文件，不复制、不占空间。来源卡片、资料台账、处理计划页的“打开原件”链接到它，在 Obsidian 里点一下就用原来的软件打开原件；链接里只有知识库名字，没有原文件名。做不了硬链接时（初筛包在别的盘、U 盘或网络盘），这一份没有链接，按对照表查。
 - **处理计划与样例：**`02_源资料/处理计划与样例.md`，每次构建更新。
   - 按文件类型分行：产品画册 PDF、其他 PDF、PPT、Word 文档、Excel / CSV 表格、文本、单张图片、邮件知识点、官网页面。每行写份数（包括还没提取的）、在初筛包哪个文件夹（只到文件夹）、怎么提取（读完以后发现的报价单、产品表、参考整理稿也写在这里，比如“其中 79 份是报价单”）、样例、样例情况、要做的事（确认后提取其余几份、看图核对几页、几页要读图）、处理方式和确认状态。
-  - **样例情况**（PDF、PPT）：样例共几页、几页没有文字层、对照原图看了几页其中几页图里有字文字层没有、几页文字层有错、几页看不出款号对应；试读过 MinerU 的，写 MinerU 多读出了几页。据此给建议：有无文字页，或者看过的页里两成以上有漏字或错字，建议“MinerU 初稿 + AI 复核（不想上传就选 AI 看图复核）”；否则“文字层够用”。还没对照原图看的，提示先做看图核对。
-  - **处理方式**（PDF、PPT）：文字层（默认）、MinerU 初稿 + AI 复核、Reducto 难页 + AI 抽查、AI 看图复核。人在这一列写选择，和确认状态一起在发布时读回，存进 `sample-decisions.json` 的 `method`；写着“（默认）”的不算选择。旧版按“报价单”“产品清单表格”确认过的，算 Excel / CSV 已确认。
+  - **样例情况**（PDF、PPT）：样例共几页、几页没有文字层、对照原图看了几页其中几页图里有字文字层没有、几页文字层有错、几页看不出款号对应；试读过 MinerU 或 Reducto 的，写试读页数与差异。据此给建议：默认建议先试读 MinerU（`mineru_ocr.py plan --samples`），读得不好再试读 Reducto（`reducto_ocr.py plan --samples`），不想上传就选 AI 看图复核。
+  - **处理方式**（PDF、PPT）：文字层（默认）、MinerU 整份 + AI 核对、Reducto 整份 + AI 核对、AI 看图复核。人在这一列写选择，和确认状态一起在发布时读回，存进 `sample-decisions.json` 的 `method`；写着“（默认）”的不算选择。旧版按“报价单”“产品清单表格”确认过的，算 Excel / CSV 已确认。
   - **按文件指定处理方式**（页面最后一节）：已提取的每份 PDF、PPT 一行：文件、编号、类型、A/B/C/D 各几页、处理方式，按 B+C 页多少排。写着“（随类型）”的跟着类型走；人改成别的方式，发布时按编号读回，存成 `"文件:<item_id>": {"method": …}`，优先于类型；写“随类型”清掉单独的选择。
-  - **整份读不出内容的 PDF、PPT**（扫描件、全是图的 PPT；`routes.json` 里 `hold / no_extractable_content`）也在这一节，类型写“读不出内容”，每页都是 C 级。没指定时写“MinerU 初稿 + AI 复核（默认）”：有 MinerU Token 就整份送 MinerU（免费额度），没有时 PDF 由 `ai_read.py` 导出给 AI 看图。改成“Reducto 难页 + AI 抽查”的，整份每页送 Reducto（按页计费），不再送 MinerU，也不导出给 AI 看图；读完重跑后文件照常入库，文字标 ⚠ 登记 ANM，再按 Reducto 的规则抽查。“（默认）”原样不改的行不读回。
-  - **还没识别的单张图片**（`hold / image_needs_review`）也在这一节，类型写“单张图片”，算 1 页 C 级。没指定时写“AI 看图（默认）”，由 `ai_read.py` 导出给 AI 看图。改成“Reducto 难页 + AI 抽查”的，原图直接上传 Reducto（不转 PDF，按 1 页计费），不再导出给 AI；结果存 `reducto-units/<item_id>.json` 的 `page 1 ocr`，重跑后图片以 `image_read` 入库，文字标 ⚠。MinerU 不接单张图片，写 MinerU 按默认处理。
+  - **整份读不出内容的 PDF、PPT**（扫描件、全是图的 PPT；`routes.json` 里 `hold / no_extractable_content`）也在这一节，类型写“读不出内容”，每页都是 C 级。没指定时写“MinerU 整份 + AI 核对（默认）”：有 MinerU Token 就整份送 MinerU（免费额度），没有时 PDF 由 `ai_read.py` 导出给 AI 看图。改成“Reducto 整份 + AI 核对”的，整份每页送 Reducto（按页计费），不再送 MinerU，也不导出给 AI 看图；读完重跑后文件照常入库，文字标 ⚠ 登记 ANM，再按 OCR 核对规则看图核对。“（默认）”原样不改的行不读回。
+  - **还没识别的单张图片**（`hold / image_needs_review`）也在这一节，类型写“单张图片”，算 1 页 C 级。没指定时写“AI 看图（默认）”，由 `ai_read.py` 导出给 AI 看图。改成“Reducto 整份 + AI 核对”的，原图直接上传 Reducto（不转 PDF，按 1 页计费），不再导出给 AI；结果存 `reducto-units/<item_id>.json` 的 `page 1 ocr`，重跑后图片以 `image_read` 入库，文字标 ⚠。MinerU 不接单张图片，写 MinerU 按默认处理。
   - **先提取样例，确认后再批量提取：**`run_pipeline.py` 开头运行 `sample_gate.py`，只看初筛包清单、不读文件，按扩展名（PDF 再按是不是画册）分类，每类挑一份大小居中的做样例（配置里 `samples` 可以按类型指定资料编号），写 `04_知识库构建/sample-gate.json`。没确认的类型只提取样例：`extract_package_text.py` 不读其余文件，`extract_blocks.py` 把它们记为“等样例确认后提取”（不算读不到文字），`ai_read.py`、`page_check.py`、`mineru_ocr.py` 也只处理样例。确认后重跑，这类全部提取。网页和邮件知识点不在这一步。
   - 看图核对认出的结构另列一张表，每种结构一行，样例链接到那一页。
   - 最后列不处理的资料：初筛类别、原因、份数。
@@ -383,22 +383,22 @@
 - 转好的文件按哈希存在 `04_知识库构建/converted/`，抽图片时直接用，转换失败过的文件抽图片时不再重转。
 
 **看图核对（有文字的页也要对照原图看）：**文字层可能漏了图片里的款号和产品名，字体坏了会读出乱码，一页多款时也看不出款号对应哪款。`page_check.py` 把这些页挑出来，让 AI 对照原图看。
-- 挑哪些页：T1/T2 的 PDF、PPT 里，有成块图片且文字少于 400 字的页；图片张数多于找到的款号数的页；文字里有乱码的页；Word（.docx/.doc）里大于 15 KB 的图片；其余页随机抽一成，每份至少一页。完全没字、还没人读过的页不在这里，归“待识别页”。
+- 挑哪些页：T1/T2 的 PDF、PPT 里，按处理方式挑出必看页（见下表），Word（.docx/.doc）里大于 15 KB 的图片，以及其余普通页随机抽三成（30%），每份至少一页。完全没字、还没人读过的页不在这里，归“待识别页”。
 - **页面分级：**`plan` 给每份 PDF、PPT 的每页定一级，写进 `04_知识库构建/page-triage.json`（`{grades, files: {item_id: {name, kind, method, method_from, counts, pages: {"N": {grade, reasons}}}}}`），计划页按它显示页数：
   - **A 文字页**：文字层完整，没有要对照的图。
   - **B 图文页**：上面挑页规则选中的页（成块图片且字少、图比款号多、乱码）。
   - **C 难页**：没有文字层（少于 20 个字）。
-  - **D 冲突页**：两个来源读出的款号或数字对不上：MinerU 与 Reducto，或没有 MinerU 时 Reducto 漏了文字层里的款号、三位以上数字。
+  - **D 冲突页**：两个来源读出的款号或数字对不上：MinerU 与 Reducto 不一致，或者文字层有而平台（MinerU / Reducto）漏读了的款号、三位以上数字（文字层有乱码时不比对）。
 - **按处理方式（`samples.method_and_source`：单个文件的选择 > 类型的选择 > 文字层）：**
 
-  | 处理方式 | C 难页 | B 图文页 | D 冲突页 | A 文字页 |
-  | --- | --- | --- | --- | --- |
-  | 文字层 | MinerU（要批准）或 AI 读图 | 对照原图看 | 对照原图看 | 抽一成 |
-  | MinerU 初稿 + AI 复核 | 整份 MinerU，初稿出来前不列 | 有图就看 | 看 | 有图就看，否则抽一成 |
-  | Reducto 难页 + AI 抽查 | 送 Reducto，读完前不列 | 送 Reducto，读完前不列；之后只看只在图片说明里的款号，含款号的页抽三成 | 看 | 抽一成 |
-  | AI 看图复核 | AI 读图，不上传 | 有图就看 | 看 | 有图就看，否则抽一成 |
+  | 处理方式 | 正文来源 | 哪些页进 AI 看图核对 |
+  | --- | --- | --- |
+  | 文字层 | 本地文字层（C 级页走 MinerU 或 AI 读图） | B 图文页、D 冲突页必看，其余普通页抽三成 |
+  | MinerU 整份 + AI 核对 | 整份 MinerU，初稿出来前不列 | D 冲突页、同页 ≥2 张产品图、有图但读出字少、线条图多（可能是尺寸图）、乱码必看；其余普通页随机抽三成 |
+  | Reducto 整份 + AI 核对 | 整份 Reducto（同页 MinerU 读过也以 Reducto 为准），读完前不列 | 同 MinerU，另加只在图片说明里出现的款号必看；其余普通页随机抽三成 |
+  | AI 看图复核 | 本地文字层 + C 级页 AI 读图（不上传） | 有图片的页都看，其余无图页抽三成 |
 
-  选了 MinerU 的，等这份的 MinerU 初稿出来才列（`plan.json` 的 `skipped` 写“等 MinerU 初稿”）；选了 Reducto 的，B、C 页等 Reducto 读完才列（写“等 Reducto 结果”）。选了 AI 或 Reducto 的文件，C 页不进 MinerU 计划。
+  选了 MinerU 的，等这份的 MinerU 初稿出来才列（`plan.json` 的 `skipped` 写“等 MinerU 初稿”）；选了 Reducto 的，整份所有页等 Reducto 读完才列（写“等 Reducto 结果”）。选了 AI 或 Reducto 的文件，C 页不进 MinerU 计划。
 - `plan` 由流水线自动运行：把挑出的页画成图（100 dpi），和这一页**现在的初稿**一起写进 `04_知识库构建/page-check/todo.jsonl`，附规则 `README.md`。初稿是文字层，加上 MinerU 识别、AI 读图读出的内容，各段标【MinerU 识别】【AI 读图】；`draft` 记初稿来自哪里。已经核对过的页不再列出；核对时还没有 MinerU 初稿、后来有了的页，再列一次。没装 PyMuPDF 时不做，校验给提醒。
 - AI 每页回答四项：`missing`（图上有、文字里没有的内容，逐字照抄）、`text_errors`（文字哪里和图上不一样）、`pairing`（一页多款时每款对应哪个款号）、`unclear`（原件本身看不出对应）。尺寸图另可选 `structure: 尺寸图`，只填 `drawing_model` 和 `structured` 图名；尺寸以原图为准，不抄尺寸、规格、孔位或角度，不配款号，`text_errors` 整项忽略（不标“以原图为准”、不登记 ANM），尺寸标注也不算作 `missing`。同页其他正文的漏字仍写 `missing`。
 - `collect` 之后：
@@ -487,25 +487,25 @@
 - `mineru_ocr.py plan` 列计划；`run` 只在有批准记录时上传，结果按文件哈希缓存，按页存成 `page N ocr`。
 - `--missing` 另加上已入库（`route: kb`）、还没有 MinerU 结果（`mineru-units/<item_id>.json` 的 `source` 不是 `mineru`）的 PDF/PPT，用于整批补跑；只有 AI 读图或看图核对的也算没走过。和 `--samples` 不能同用。批准范围照旧：配置有 `approved_item_ids` 时，超出的文件不上传。
 - `kb_status.py` 在覆盖与缺口页列“PDF 和 PPT 怎么读的”：按 PDF、PPT 分行，写入库份数、走过 MinerU、有 AI 读图、看图核对过、只用文字层各几份。
-- **计划里有什么：**用户看样例后给这类选了“MinerU 初稿 + AI 复核”的全部文件；还有没人读过的无文字页的文件；整份读不出文字的文件（单独指定了 Reducto 或 AI 看图的除外）。画册不再因为是画册就自动上传。
+- **计划里有什么：**用户看样例后给这类选了“MinerU 整份 + AI 核对”的全部文件；还有没人读过的无文字页的文件；整份读不出文字的文件（单独指定了 Reducto 或 AI 看图的除外）。画册不再因为是画册就自动上传。
 - **样例试读：**`plan --samples` / `run --samples` 只列、只传各类还没定处理方式的样例，给用户看 MinerU 的效果再选；《处理计划与样例》的“样例情况”会写 MinerU 比文字层多读出了几页。同样要批准上传。
 - 识别结果长期存进 `05_数据与审核/70_构建状态/mineru-units/`（旧库里的 `02_源资料/20_MinerU按需提取/` 会在下次保存或恢复时自动搬过来）：
   - 每份文件一个 `<item_id>.json`，里面是按页的文字，给脚本用；不再生成给人看的 md，要看识别结果去净化原文或 `mineru-units/`。
 - 重跑时先读这里；有结果就不再上传。
-- 某页有非空的 MinerU 或 Reducto 整页识别结果时，来源层正文完整使用该结果，不再并入同页原生文字层（包括分栏和表格）；没有整页结果、结果为空或无法对应页码时维持原有处理。识别结果中的标题、正文、表格、列表、页眉和页脚均保留，不执行重复页眉页脚清理；价格、客户信息等既有敏感内容清理照常执行并留记录。AI 看图补充仍并排保留；已有人工整页校对稿单列“人工校对记录”，不覆盖或混入平台正文，英文词照样检查是否核实过。这里只选择正文来源，不改写或删除文字层与识别平台的原始 JSON 缓存；两平台同页的优先级不变（MinerU 优先）。
+- 某页有非空的 MinerU 或 Reducto 整页识别结果时，来源层正文完整使用该结果，不再并入同页原生文字层（包括分栏和表格）；没有整页结果、结果为空或无法对应页码时维持原有处理。识别结果中的标题、正文、表格、列表、页眉和页脚均保留，不执行重复页眉页脚清理；价格、客户信息等既有敏感内容清理照常执行并留记录。AI 看图补充仍并排保留；已有人工整页校对稿单列“人工校对记录”，不覆盖或混入平台正文，英文词照样检查是否核实过。这里只选择正文来源，不改写或删除文字层与识别平台的原始 JSON 缓存；两平台同页时默认 MinerU 优先，但该文件（或所在类型）选了 Reducto 时，`sample_gate.py` 会把 `reducto-units/<item_id>.json` 的 `primary` 设为 `true`，以 Reducto 为准。
 
 ## Reducto
 
-- 用户明确要求整份文件进行平台对比时，可在 `reducto.full_document_item_ids` 列出对应编号；这些文件仍须选择 `reducto` 处理方式和获准上传，计划包含全部未解析页。默认仍仅解析难页，已解析缓存、样例门禁和批准范围照常生效。
+- 用户明确要求整份文件进行平台对比时，可在 `reducto.full_document_item_ids` 列出对应编号；选了 `reducto` 处理方式的文件现在默认就是整份解析，缓存、样例门禁和批准范围照常生效。
 - 指定 `pdf_comparison`（`mineru_product_ids`、`reducto_product_ids`、`mineru_training_ids`）时，`render_kb.py` 在运行目录的 `平台提取对比/` 输出带平台标识的逐页原始提取稿和来源哈希清单；不混入原生文字层、不作为已核实知识发布。净化原文来源卡片及 OCR 内容同时标明平台。
 - 人工已核对同名但内容不同的 Word/PDF，可以将 PDF 编号放入 `separate_format_items`，避免按另存格式去重；此选项不跳过来源哈希或其他校验。
 
 - 首次设置：每台电脑运行一次 `scripts/setup_reducto.cmd`，Key 存在 Windows 用户环境变量 `REDUCTO_API_KEY`。`reducto_client.py probe` 只看本机；`health-check` 在线验证 Key 不扣额度，加 `--parse` 解析一页测试 PDF。
-- `reducto_ocr.py plan` 按 `page-triage.json` 列候选页：处理方式是“Reducto 难页 + AI 抽查”的文件（按类型或单个文件）里的 B、C 级页，减去 MinerU 读过的页和同一文件哈希下已经解析过的页。整份读不出内容、单独指定了 Reducto 的文件，所有页都列上（都是 C 级）；单独指定了 Reducto 的单张图片列 1 页，原图上传（上传时带扩展名，Reducto 按扩展名识别类型）。还没有分级时提示先跑流水线。`--samples` 只列还没定处理方式的各类样例的 B、C 页，给用户试读。PPT 先转成 PDF，页码和流水线一致。
-- `run` 只在 `kb-config.json` 有 `"reducto": {approved, approved_by, approved_at, scope}` 时上传，可选 `approved_item_ids`、`max_pages`；只解析列出的页（`page_range`），按原文件页码（`original_page`）存成 `page N ocr`、`engine: reducto` 到 `reducto-units/<item_id>.json`，含 `source_hash`、`pages_read`、`job_ids`。文件变了整份重读。
+- `reducto_ocr.py plan` 按 `page-triage.json` 列候选页：处理方式是“Reducto 整份 + AI 核对”的文件（按类型或单个文件）的全部页，减去同一文件哈希下 Reducto 已经解析过的页（MinerU 读过的页也送，因为选 Reducto 就是为了替换 MinerU）。单独指定了 Reducto 的单张图片列 1 页，原图上传（上传时带扩展名，Reducto 按扩展名识别类型）。还没有分级时提示先跑流水线。`--samples` 列还没定处理方式的各类样例的全部页，给用户试读对比。PPT 先转成 PDF，页码和流水线一致。
+- `run` 只在 `kb-config.json` 有 `"reducto": {approved, approved_by, approved_at, scope}` 时上传，可选 `approved_item_ids`、`max_pages`；只解析列出的页（`page_range`），按原文件页码（`original_page`）存成 `page N ocr`、`engine: reducto` 到 `reducto-units/<item_id>.json`，含 `source_hash`、`pages_read`、`job_ids`、`primary`。文件变了整份重读。
 - Figure 块是模型对图片、图表的描述，原始结果仍单独存在 `figures`。来源页按原页码在独立的“⚠ Reducto 图表描述（待核对）”小节里展示，注明不是已核实原文、不是 OCR 转写，并标出 JSON 缓存和 `figures` 数组位置；同页完全相同的描述只显示一次。描述经过与正文相同的价格、客户信息等清理，始终保留待核对标记，不进公开导出，也不替换或混入 MinerU、Reducto OCR 或文字层正文。只有 Figure 的页仍不算读过，继续归 AI 读图。
-- 同一页有 MinerU 或 AI 的结果时以它们为准；Reducto 的文字入库标 ⚠“Reducto 识别，待对照原图核对”，算 `ai_read`。
-- 对照只看款号和数字（`120mm` 与 `120 mm`、`F-00053` 与 `F00053` 视为相同）。和 MinerU 不一致的页、没有 MinerU 时漏了文字层款号或数字的页升为 D 级，Reducto 只在图片描述里提到的款号也会进看图核对，附两边原文；只有 Reducto 读过、含款号或数字的页按 `reducto.check_share`（默认 0.3）抽查。差异写进 `reducto-diff.md`。
+- 选了 Reducto 的文件（`primary: true`）以 Reducto 结果为准，其余文件同一页有 MinerU 或 AI 的结果时以它们为准；Reducto 的文字入库标 ⚠“Reducto 识别，待对照原图核对”，算 `ai_read`。
+- 对照只看款号和数字（`120mm` 与 `120 mm`、`F-00053` 与 `F00053` 视为相同）。和 MinerU 不一致的页、没有 MinerU 时漏了文字层款号或数字的页升为 D 级，Reducto 只在图片描述里提到的款号也会进看图核对，附两边原文。差异写进 `reducto-diff.md`。
 - 结果长期存进 `05_数据与审核/70_构建状态/reducto-units/`，重跑时先读这里。
 - 免费和标准套餐删除上传文件会返回 422，记为 `plan`，不算失败。
 

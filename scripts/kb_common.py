@@ -314,14 +314,22 @@ def clean_text(text: str) -> str:
 def load_units(text_dirs: list[Path], item_id: str) -> list[dict[str, str]]:
     """Read extracted text, later directories replacing earlier ones per locator.
 
-    OCR output uses the same file format, so it fills pages the text layer missed.
+    OCR output uses the same file format, so it fills pages the text layer missed. A Reducto record
+    marked "primary" (Reducto was chosen for this file) goes on top of everything else: its nonempty
+    pages replace MinerU's, which otherwise come later and win.
     """
     merged: dict[str, dict[str, str]] = {}
+    on_top: list[dict[str, Any]] = []
     for directory in text_dirs:
         path = directory / f"{item_id}.json"
         if path.is_file():
-            for unit in load_json(path).get("units", []):
+            record = load_json(path)
+            if directory.name == "reducto-units" and record.get("primary"):
+                on_top = [u for u in record.get("units", []) if (u.get("text") or "").strip()]
+            for unit in record.get("units", []):
                 merged[unit["locator"]] = {**unit, "text": clean_text(unit["text"])}
+    for unit in on_top:
+        merged[unit["locator"]] = {**unit, "text": clean_text(unit["text"])}
     return list(merged.values())
 
 

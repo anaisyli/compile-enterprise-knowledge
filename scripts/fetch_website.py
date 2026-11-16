@@ -31,7 +31,9 @@ from kb_state import restore
 USER_AGENT = f"compile-enterprise-knowledge/{SKILL_VERSION} (+client website reader)"
 SKIP_EXTENSIONS = re.compile(r"(?i)\.(?:jpe?g|png|gif|webp|svg|ico|pdf|zip|rar|mp4|mov|mp3|css|js|xml|json|docx?|xlsx?|pptx?)$")
 SKIP_TAGS = {"script", "style", "noscript", "nav", "footer", "header", "form", "svg", "iframe", "select", "button"}
-BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "dt", "dd", "blockquote"}
+BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "dt", "dd", "blockquote", "summary"}
+# Standalone <strong>/<b> outside a paragraph or heading (common for FAQ questions in accordion divs).
+INLINE_BLOCK_TAGS = {"strong", "b"}
 HEADINGS = {"h1", "h2", "h3", "h4"}
 # Customer stories need the client's consent, like cases in documents.
 # Whole words only: "pillowcase" is a product, not a case study.
@@ -85,13 +87,15 @@ class PageParser(HTMLParser):
         if tag in BLOCK_TAGS and not self.skip:
             self.flush()
             self.current, self.tag = [], tag
+        elif tag in INLINE_BLOCK_TAGS and self.current is None and not self.skip:
+            self.current, self.tag = [], tag
 
     def handle_endtag(self, tag: str) -> None:
         if tag in SKIP_TAGS and self.skip:
             self.skip -= 1
         if tag == "title":
             self.in_title = False
-        if tag in BLOCK_TAGS:
+        if tag in BLOCK_TAGS or (tag in INLINE_BLOCK_TAGS and self.tag == tag):
             self.flush()
 
     def handle_data(self, data: str) -> None:
@@ -231,6 +235,31 @@ def record_page(store: Path, pages: dict[str, dict[str, Any]], url: str, title: 
     return page
 
 
+def read_robots(base: str) -> RobotFileParser | None:
+    """Read robots.txt with the same User-Agent as the crawl.
+
+    RobotFileParser.read() sends Python-urllib's default header and turns any 401/403 from a WAF
+    into disallow_all = True, falsely blocking the whole site.
+    """
+    url = urljoin(base, "/robots.txt")
+    try:
+        raw, kind = fetch(url)
+    except (HTTPError, URLError, OSError, TimeoutError):
+        return None
+    if "html" in kind.casefold():
+        return None
+    robots = RobotFileParser(url)
+    robots.parse(raw.decode("utf-8", errors="replace").splitlines())
+    return robots
+
+
+def normalize_crawl_url(raw: str, base: str) -> str:
+    """Strip fragments while keeping a path's trailing slash (stripping it breaks some servers/TLS redirects)."""
+    url = urldefrag(raw)[0] or base
+    parsed = urlparse(url)
+    return url if parsed.path else url + "/"
+
+
 def crawl(config: dict[str, Any], store: Path, pages: dict[str, dict[str, Any]], max_pages: int, delay: float,
           pictures: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     hosts = allowed_hosts(config)
@@ -238,19 +267,16 @@ def crawl(config: dict[str, Any], store: Path, pages: dict[str, dict[str, Any]],
     budget = {"left": MAX_PICTURES}
     for site in config.get("websites", []):
         base = site["url"]
-        robots = RobotFileParser(urljoin(base, "/robots.txt"))
-        try:
-            robots.read()
-        except (URLError, OSError):
-            robots = None  # type: ignore[assignment]
+        robots = read_robots(base)
         queue = [base] + (sitemap_urls(base, robots) if robots else [])
         seen: set[str] = set()
         while queue and report["fetched"] < max_pages:
-            url = urldefrag(queue.pop(0))[0].rstrip("/") or base
+            url = normalize_crawl_url(queue.pop(0), base)
+            key = url.rstrip("/")
             host = (urlparse(url).hostname or "").casefold()
-            if url in seen or host not in hosts or SKIP_EXTENSIONS.search(urlparse(url).path) or NOISE_PATH.search(url):
+            if key in seen or host not in hosts or SKIP_EXTENSIONS.search(urlparse(url).path) or NOISE_PATH.search(url):
                 continue
-            seen.add(url)
+            seen.add(key)
             if robots and not robots.can_fetch(USER_AGENT, url):
                 report["blocked_by_robots"] += 1
                 continue

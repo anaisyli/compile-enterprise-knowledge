@@ -61,16 +61,20 @@ class PlanTests(unittest.TestCase):
 
     def test_only_files_read_by_reducto_send_their_b_and_c_pages_and_never_twice(self) -> None:
         [entry] = candidates(self.build, self.files)
-        self.assertEqual(entry["pages"], [2, 3, 7])  # A pages are text, D pages go to the AI page check.
+        self.assertEqual(entry["pages"], [1, 2, 3, 7, 8])  # Chosen for Reducto: the whole file is sent.
+        self.assertTrue(entry.get("primary"))
         self.assertIn("B 级图文页", entry["reasons"]["7"])
-        result = {"job_id": "j1", "pages": {2: {"text": ["NTX S-100 120mm"], "figures": []},
-                                            3: {"text": [], "figures": ["A photo, label S-777"]}}}
+        result = {"job_id": "j1", "pages": {1: {"text": ["cover"], "figures": []},
+                                            2: {"text": ["NTX S-100 120mm"], "figures": []},
+                                            3: {"text": [], "figures": ["A photo, label S-777"]},
+                                            7: {"text": ["spec"], "figures": []},
+                                            8: {"text": ["note"], "figures": []}}}
         store(self.build, entry, result)
         # Page 3 had only a figure description: it is not taken as read, MinerU or the model still read it.
         self.assertEqual(remaining_ocr_pages(self.build, "a1", [2, 3]), [3])
         self.assertEqual(candidates(self.build, self.files), [])  # Paid pages are not planned again.
         self.files["a1"]["source_hash"] = "h2"
-        self.assertEqual(candidates(self.build, self.files)[0]["pages"], [2, 3, 7])  # A changed file is read again.
+        self.assertEqual(candidates(self.build, self.files)[0]["pages"], [1, 2, 3, 7, 8])  # A changed file is read again.
         self.triage("mineru")
         self.assertEqual(candidates(self.build, self.files), [])  # Read some other way: nothing goes to Reducto.
 
@@ -137,12 +141,15 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(candidates(self.build, self.files), [])  # Read once, not paid for again.
 
     def test_mineru_and_reducto_are_compared_on_codes_and_numbers_only(self) -> None:
+        from reducto_ocr import text_layer_missed
         self.assertEqual(key_terms("NTX S-100, 120mm, 第 1 页"), key_terms("NTX S100 120 MM 第1页"))
+        self.assertEqual(text_layer_missed("NTX S-100 350mm", "NTX S-108 120mm"), ["350", "S100"])
+        self.assertEqual(text_layer_missed("NTX S-100 \ufffd\ufffd", "NTX S-108"), [])  # Garbled text layer is not compared.
         (self.build / "mineru-units").mkdir()
         (self.build / "mineru-units" / "a1.json").write_text(json.dumps({"source": "mineru", "units": [
             {"locator": "page 2 ocr", "text": "NTX S-100 SHERPA 120 mm F00053"}]}), encoding="utf-8")
         [entry] = candidates(self.build, self.files)
-        self.assertEqual(entry["pages"], [3, 7])  # MinerU read page 2: not paid for again.
+        self.assertEqual(entry["pages"], [1, 2, 3, 7, 8])  # Chosen for Reducto: reads page 2 too to replace MinerU.
         store(self.build, {**entry, "pages": [2]}, {"job_id": "j1", "pages": {2: {"text": ["NTX S-108 sherpa 120mm"], "figures": ["label F-00053"]}}})
         page = compare(self.build, "a1")[2]
         self.assertEqual(page["only_mineru"], ["S100"])  # F00053 is in Reducto's figure description: not a disagreement.

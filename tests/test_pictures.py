@@ -299,6 +299,35 @@ class PictureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Drawing source changed"):
             pictures.ensure_dimension_previews(self.build, routes, info)
 
+    def test_word_embedded_dimension_drawing_gets_preview_and_renders_on_source_page(self) -> None:
+        import zipfile
+        from kb_common import sha256_file
+        from render_kb import render_doc
+        docx = self.build / "spec.docx"
+        with zipfile.ZipFile(docx, "w") as archive:
+            archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>')
+            archive.writestr("word/media/image1.png", b"\x89PNG\r\n\x1a\n" + b"0" * 20_000)
+        (self.build / "page-check").mkdir(parents=True, exist_ok=True)
+        (self.build / "page-check/results.json").write_text(json.dumps({"c|image 1": {
+            "item_id": "c", "unit": "image", "page": 1, "dimension_drawing": True,
+            "drawing_model": "YFD71XA", "drawing_model_confirmed": True}}), encoding="utf-8")
+        routes = {"c": {"route": "kb", "source_hash": sha256_file(docx), "package": str(self.build), "path": docx.name}}
+        self.status_info["c"]["page_images"] = {}
+        pictures.ensure_dimension_previews(self.build, routes, self.status_info)
+        pic_id = self.status_info["c"]["page_images"]["image 1"]
+        self.assertTrue((self.build / "assets" / pic_id).is_file())
+        named = self.name_all()
+        self.assertIn("/尺寸图/", named[pic_id]["file"])
+        self.assertEqual(pictures.page_group(self.status_info["c"], "image 1"), "图片 1")
+        page_md = render_doc(
+            {**self.docs["C"], "tier": "T2", "module": "20_产品与规格", "source_sha256": "h"},
+            [{"kind": "text", "status": "kept", "doc_id": "C", "group": "图片 1", "locator": "image 1 drawing",
+              "text": "YFD71XA 的外形尺寸图", "dimension_drawing": True, "drawing_model_confirmed": True}],
+            "有效", [], {}, {}, {"图片 1": named[pic_id]["file"]},
+        )
+        self.assertIn(f"## 图片 1\n\n![[{named[pic_id]['file']}|360]]", page_md)
+        self.assertIn("YFD71XA 的外形尺寸图，尺寸见原图", page_md)
+
     def test_buyers_numbers_and_customer_names_stay_out_of_names(self) -> None:
         namer = Namer(CONFIG, re.compile("Acme"))
         self.assertEqual(namer.label("DG-7959 HOOD"), "HOOD")
@@ -397,15 +426,20 @@ class PictureTests(unittest.TestCase):
 
 class WebsitePictureTests(unittest.TestCase):
     def test_pictures_keep_their_alt_and_section(self) -> None:
-        from fetch_website import PageParser, picture_host, sections
+        from fetch_website import PageParser, normalize_crawl_url, picture_host, sections
 
         parser = PageParser()
         parser.feed("<h1>Wall Tapestry</h1><p>Woven.</p><img src='/a.jpg' alt='Elephant tapestry'>"
-                    "<h2>Factory</h2><p>Looms.</p><img data-src='/b.jpg' src='data:,'><nav><img src='/logo.png'></nav>")
+                    "<h2>Factory</h2><p>Looms.</p><img data-src='/b.jpg' src='data:,'><nav><img src='/logo.png'></nav>"
+                    "<div class='faq-item'><strong>Q: What is your MOQ?</strong><p>A: 100 pcs per style.</p></div>")
         parser.flush()
         owners: list = []
         units = sections(parser.blocks, owners)
         self.assertEqual(len(units), 2)
+        self.assertIn("Q: What is your MOQ?", units[1]["text"])
+        self.assertIn("A: 100 pcs per style.", units[1]["text"])
+        self.assertEqual(normalize_crawl_url("https://example.com/faq/#top", "https://example.com/"), "https://example.com/faq/")
+        self.assertEqual(normalize_crawl_url("https://example.com", "https://example.com/"), "https://example.com/")
         self.assertEqual([(src, alt) for _, src, alt in parser.images], [("/a.jpg", "Elephant tapestry"), ("/b.jpg", "")])
         self.assertEqual([owners[min(max(p, 0), len(owners) - 1)] for p, _, _ in parser.images], [1, 2])
         self.assertTrue(picture_host("img.example.com", {"www.example.com", "example.com"}))
