@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_read import package_files, pdf_of
-from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, normalize_space, run_lock, write_json, write_text
+from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, mineru_page_units, normalize_space, run_lock, write_json, write_text
 from mineru_ocr import html_table
 from reducto_client import KEY_PAGE, MODEL, PRICING_PAGE, ReductoError, client_from_env, failure_report, parse_pages, probe
 from samples import GRADES, METHODS, PAGED_KINDS, PICTURES, choose_samples, held_image, load_gate, load_triage, unreadable
@@ -66,10 +66,7 @@ def page_of(locator: str) -> int | None:
 
 
 def mineru_pages(build: Path, item_id: str) -> dict[int, str]:
-    path = build / "mineru-units" / f"{item_id}.json"
-    units = load_json(path).get("units", []) if path.is_file() else []
-    return {number: unit["text"] for unit in units
-            if unit.get("engine") != "ai" and unit.get("text", "").strip() and (number := page_of(unit["locator"])) is not None}
+    return mineru_page_units(build, item_id)
 
 
 def compare(build: Path, item_id: str) -> dict[int, dict[str, Any]]:

@@ -28,6 +28,7 @@ from typing import Any, Callable
 from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, run_lock, safe_name, sha256_file,
                        short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
+from legacy_migrations import repair_legacy_picture_name
 from products import clean_levels, parts_of, product_folders
 
 
@@ -515,20 +516,9 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
                 # An explicit visual classification changes the asset's category;
                 # keep its stable basename and let official publish move it.
                 file = f"{item['folder']}/{Path(file).name}"
-            caption = item.get("excluded_drawing_caption")
-            if caption and old.get("named_by") == FROM_SOURCE:
-                bad_labels = {namer.label(caption), namer.label(item.get("excluded_drawing_name", ""))}
-                bad_labels.update(label.removeprefix("的").strip() for label in list(bad_labels))
-                bad_names = {safe_name("-".join(p for p in (item["prefix"], label) if p)) + f"-{short}{suffix}"
-                             for label in bad_labels if label}
-                if Path(file).name in bad_names:
-                    # Repair auto-names previously taken from the drawing caption
-                    # beside a photograph; never replace an AI/human-given name.
-                    file, named_by = proposed_file, FROM_SOURCE if label else NUMBERED
-            # Repair the former 大尺寸 -> 尺寸图 mistake without changing the given basename.
-            if ("大尺寸" in item.get("source_relpath", "") and Path(file).parent.name == "尺寸图"
-                    and Path(item["folder"]).name in {"详情图", "效果图"}):
-                file = f"{item['folder']}/{Path(file).name}"
+            file, named_by = repair_legacy_picture_name(
+                file, named_by, item, old, namer, proposed_file, short, suffix, FROM_SOURCE, NUMBERED
+            )
         entries[item["id"]] = {**item, "file": file, "named_by": named_by, "alt": alt or label, "more": 0,
                                "english": english_name({**item, "alt": alt or label}, namer, suffix)}
     taken: dict[str, str] = {}

@@ -280,6 +280,60 @@ def file_extension(name: str) -> str:
     return path.suffix.casefold()
 
 
+def normalize_file_decisions(config: dict[str, Any]) -> dict[str, Any]:
+    """Fold unified `file_decisions` entries into the per-purpose config fields.
+
+    Supports writing file-level decisions in one place (`file_decisions: {item_id: ...}`) while
+    keeping existing fields (`d_keep`, `d_drop`, `excluded_items`, `ask_client`, `drawing_items`,
+    `not_drawing_items`) working for active projects like P-010.
+    """
+    unified = config.get("file_decisions")
+    if not isinstance(unified, dict) or not unified:
+        return config
+    d_keep = list(config.get("d_keep") or [])
+    d_drop = list(config.get("d_drop") or [])
+    excluded = dict(config.get("excluded_items") or {}) if isinstance(config.get("excluded_items"), dict) else {
+        i: "excluded" for i in (config.get("excluded_items") or [])}
+    ask_client = dict(config.get("ask_client") or {})
+    drawing = list(config.get("drawing_items") or [])
+    not_drawing = list(config.get("not_drawing_items") or [])
+    for item_id, spec in unified.items():
+        decision = spec.get("decision", "") if isinstance(spec, dict) else str(spec).strip()
+        reason = spec.get("reason", "file_decisions") if isinstance(spec, dict) else "file_decisions"
+        if decision.startswith("ask_client:"):
+            reason = decision.split(":", 1)[1].strip() or reason
+            decision = "ask_client"
+        if decision == "keep":
+            if item_id not in d_keep:
+                d_keep.append(item_id)
+        elif decision == "drop":
+            if item_id not in d_drop:
+                d_drop.append(item_id)
+        elif decision == "exclude":
+            excluded[item_id] = reason
+        elif decision == "ask_client":
+            ask_client[item_id] = reason
+        elif decision == "drawing":
+            if item_id not in drawing:
+                drawing.append(item_id)
+        elif decision == "not_drawing":
+            if item_id not in not_drawing:
+                not_drawing.append(item_id)
+    if d_keep:
+        config["d_keep"] = d_keep
+    if d_drop:
+        config["d_drop"] = d_drop
+    if excluded:
+        config["excluded_items"] = excluded
+    if ask_client:
+        config["ask_client"] = ask_client
+    if drawing:
+        config["drawing_items"] = drawing
+    if not_drawing:
+        config["not_drawing_items"] = not_drawing
+    return config
+
+
 def load_config(path: Path | None) -> dict[str, Any]:
     config = load_json(path) if path else {}
     if not isinstance(config, dict):
@@ -290,7 +344,7 @@ def load_config(path: Path | None) -> dict[str, Any]:
     config.setdefault("vocabularies", [])
     config.setdefault("client_answers", {})
     config.setdefault("company", "")
-    return config
+    return normalize_file_decisions(config)
 
 
 def unapproved_d(routes: dict[str, Any], decisions: dict[str, Any]) -> list[str]:
@@ -333,18 +387,44 @@ def load_units(text_dirs: list[Path], item_id: str) -> list[dict[str, str]]:
     return list(merged.values())
 
 
+def unit_dirs(build: Path, text_dirs: Iterable[Path] = (), ocr_dir: Path | None = None) -> list[Path]:
+    """Canonical directory order for loading page/document units across all pipeline scripts."""
+    dirs = [Path(d) for d in text_dirs]
+    reducto = build / "reducto-units"
+    mineru = Path(ocr_dir) if ocr_dir else (build / "mineru-units")
+    for folder in (reducto, mineru):
+        if folder not in dirs:
+            dirs.append(folder)
+    return dirs
+
+
+def is_platform_page_unit(unit: dict[str, Any]) -> bool:
+    """True when a unit is a non-empty full-page OCR reading from MinerU or Reducto (not AI)."""
+    return (
+        bool(re.fullmatch(r"(?:page|slide) \d+ ocr", unit.get("locator", "")))
+        and unit.get("engine") in {None, "", "mineru", "reducto"}
+        and bool((unit.get("text") or "").strip())
+    )
+
+
+def mineru_page_units(build: Path, item_id: str) -> dict[int, str]:
+    """Page number -> MinerU's own full-page OCR text for an item (excluding AI-read or check units)."""
+    path = build / "mineru-units" / f"{item_id}.json"
+    units = load_json(path).get("units", []) if path.is_file() else []
+    result: dict[int, str] = {}
+    for unit in units:
+        match = re.fullmatch(r"(?:page|slide) (\d+) ocr", unit.get("locator", ""))
+        if match and unit.get("engine") not in {"ai"} and not unit.get("checked") and (unit.get("text") or "").strip():
+            result[int(match.group(1))] = unit["text"]
+    return result
+
+
 def preferred_page_units(units: list[dict[str, str]]) -> list[dict[str, str]]:
     """Use nonempty platform page readings instead of the same page's native text."""
-    # MinerU's cached page records from older runs used ``engine: null``.  The
-    # locator is still the platform's full-page OCR unit (``page N ocr``), so
-    # treat a missing/empty engine as MinerU for page replacement.  AI page
-    # readings remain excluded because their engine is explicitly ``ai``.
     pages = {
         unit["locator"].removesuffix(" ocr")
         for unit in units
-        if re.fullmatch(r"(?:page|slide) \d+ ocr", unit["locator"])
-        and unit.get("engine") in {None, "", "mineru", "reducto"}
-        and unit["text"].strip()
+        if is_platform_page_unit(unit)
     }
     return [unit for unit in units
             if re.sub(r" (?:col|table) \d+$", "", unit["locator"]) not in pages]

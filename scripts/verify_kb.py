@@ -25,6 +25,7 @@ from kb_common import (
     unapproved_d,
     BUILD_DIRECTORY,
     CLEAN_DIRECTORY,
+    is_platform_page_unit,
     load_config,
     load_json,
     load_jsonl,
@@ -36,6 +37,7 @@ from kb_common import (
     run_lock,
     suppress_drawing_dimensions,
     sha256_file,
+    unit_dirs,
     write_json,
     write_text,
 )
@@ -265,13 +267,9 @@ def main() -> int:
     blocks = load_jsonl(build / "blocks.jsonl")
     published: dict[str, str] = load_json(build / "published.json")
     terms = load_json(build / "guard-terms.json")
-    text_dirs = [Path(raw).resolve() for raw in args.text_dir]
-    # Reducto before MinerU: where both read a page, MinerU's reading is the one used.
-    if (build / "reducto-units").is_dir():
-        text_dirs.append(build / "reducto-units")
     ocr_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else build / "mineru-units"
-    if ocr_dir.is_dir():
-        text_dirs.append(ocr_dir)
+    text_dirs = [d for d in unit_dirs(build, [Path(raw).resolve() for raw in args.text_dir], ocr_dir)
+                 if d.is_dir() or d in [Path(raw).resolve() for raw in args.text_dir]]
     website = build / "website"
     pages = {page["page_id"]: page for page in load_json(website / "pages.json")} if (website / "pages.json").is_file() else {}
     own_domains = {domain.casefold() for domain in config["own_domains"]}
@@ -382,7 +380,7 @@ def main() -> int:
         units = preferred_page_units(units)
         units = suppress_drawing_dimensions(units)
         for unit in units:
-            platform_page = bool(re.fullmatch(r"(?:page|slide) \d+ ocr", unit["locator"])) and unit.get("engine") in {None, "", "mineru", "reducto"}
+            platform_page = is_platform_page_unit(unit)
             sheet = SHEET_LOCATOR.match(unit["locator"])
             if sheet and sheet.group(1) != "visible":
                 continue  # Hidden sheets never enter.

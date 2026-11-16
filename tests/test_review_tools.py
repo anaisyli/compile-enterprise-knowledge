@@ -41,11 +41,22 @@ class ReviewToolTests(Base):
 
     def test_current_explicit_client_confirmation_overrides_an_old_operations_label(self) -> None:
         from extract_blocks import configured_route
+        from legacy_migrations import status_report
         item = {"item_id": "xmy", "decision": "D", "resource_type": "seo_ops", "display_name": "XMY.pptx"}
         config = {"client_answers": {"xmy": "keep"}}
         self.assertEqual(configured_route(item, config)["reason"], "writing_operations_material")
         config["client_answer_confirmations"] = {"xmy": {"decision": "keep", "cus_id": "P-010-CUS-009.1"}}
         self.assertEqual(configured_route(item, config)["reason"], "resolved_by_answer")
+        # Stale awaiting_client in route_overrides yields when client_answers has an answer.
+        doc = {"item_id": "d1", "decision": "D", "resource_type": "product_spec", "display_name": "Spec.pdf"}
+        self.assertEqual(configured_route(doc, {"route_overrides": {"d1": {"route": "hold", "reason": "awaiting_client"}},
+                                                "client_answers": {"d1": "keep"}})["route"], "kb")
+        # Unified file_decisions supports keep / drop / exclude / ask_client in one dictionary.
+        self.assertEqual(configured_route(doc, {"file_decisions": {"d1": "keep"}})["route"], "kb")
+        self.assertEqual(configured_route(doc, {"file_decisions": {"d1": "drop"}})["route"], "skip")
+        self.assertEqual(configured_route(doc, {"file_decisions": {"d1": "ask_client: 请确认是否自研"}})["reason"], "awaiting_client")
+        self.build.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(status_report(self.out, None)["reviewed_pages_total"], 0)
 
     def test_answer_can_be_reapplied_after_its_registered_cus_is_resolved(self) -> None:
         self.build.mkdir(parents=True, exist_ok=True)

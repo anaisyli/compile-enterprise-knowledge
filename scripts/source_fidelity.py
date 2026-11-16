@@ -9,7 +9,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from kb_common import BUILD_DIRECTORY, load_json, run_lock, sha256_file, write_json
+from kb_common import BUILD_DIRECTORY, is_platform_page_unit, load_json, run_lock, sha256_file, write_json
 
 
 EXCLUDE_KINDS = {'no_source_text', 'product_label', 'demonstration_content'}
@@ -67,9 +67,7 @@ def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict
                           'review_withheld': True, 'review_resolved': record.get('split') == 'drawing_only',
                           'reviewed_by': record['reviewed_by'], 'review_note': record.get('note', '')})
             continue
-        platform_page = any(u['locator'] == locator + ' ocr'
-                            and u.get('engine') in {None, '', 'mineru', 'reducto'}
-                            and u['text'].strip() for u in units)
+        platform_page = any(u['locator'] == locator + ' ocr' and is_platform_page_unit(u) for u in units)
         if platform_page and not record.get('exclude_kind'):
             # A previous full-page human transcript is evidence to retain, not
             # permission to replace the platform page selected for this build.

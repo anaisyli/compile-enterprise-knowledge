@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from kb_common import BUILD_DIRECTORY, load_json, write_text
+from legacy_migrations import move_legacy_vault_dirs
 
 
 STATE = "05_数据与审核/70_构建状态"
@@ -222,21 +223,7 @@ def copy_newer(source: Path, target: Path, kept: list[str],
 
 
 def migrate_legacy(vault: Path) -> None:
-    for old, new in LEGACY.items():
-        source = vault / old
-        if not source.is_dir():
-            continue
-        for item in source.glob("*.json"):
-            target = vault / new / item.name
-            if not target.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(item), target)
-        for item in source.glob("*.md"):
-            item.unlink()
-        try:
-            source.rmdir()
-        except OSError:
-            pass
+    move_legacy_vault_dirs(vault, LEGACY)
 
 
 def save(run: Path, vault: Path) -> dict[str, Any]:

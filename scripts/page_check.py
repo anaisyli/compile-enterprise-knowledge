@@ -34,10 +34,11 @@ import split_reviews
 from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
-                       remaining_ocr_pages, run_lock, sha256_file, suppress_drawing_dimensions, write_json, write_text)
+                       mineru_page_units, remaining_ocr_pages, run_lock, sha256_file, suppress_drawing_dimensions,
+                       unit_dirs, write_json, write_text)
+from legacy_migrations import has_legacy_reviewed_pages
 from office import convert_office
 from reducto_ocr import CHECK_SHARE, DISAGREE, check_reasons, compare, disagrees, record_of, text_layer_missed
-from reducto_ocr import mineru_pages as mineru_page_texts
 from samples import (GRADES, IMAGE_KIND, METHODS, OCR_FIRST, PICTURES, TRIAGE, UNREADABLE_KIND, choose_samples, doc_type, held_image,
                      image_method, is_confirmed, load_decisions,
                      method_and_source, unreadable, unreadable_method)
@@ -268,7 +269,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         method, method_from = method_and_source(kind, decisions, item_id) if doc else ("text", "默认")
         suffix = asset["file"].suffix.casefold()
         # The reviewer sees what the build will publish: text layer plus what MinerU or the model read.
-        units = load_units([*text_dirs, build / "reducto-units", build / "mineru-units"], item_id)
+        units = load_units(unit_dirs(build, text_dirs), item_id)
         drawing_pages = {f"{entry.get('unit', 'page')} {entry.get('page')}"
                          for key, entry in done.items() if entry.get("dimension_drawing") and entry.get("item_id") == item_id}
         units = suppress_drawing_dimensions(
@@ -279,7 +280,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         reducto_record = record_of(build, item_id)
         reducto_read = set(reducto_record.get("pages_read", [])) if reducto_record.get("source_hash") == asset.get("source_hash") else set()
         reducto_primary = bool(reducto_record.get("primary"))
-        mineru_texts = mineru_page_texts(build, item_id)
+        mineru_texts = mineru_page_units(build, item_id)
         read_path = build / "mineru-units" / f"{item_id}.json"
         name = route.get("display_name") or asset["file"].name
         hold = ""
@@ -312,8 +313,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         # A page already checked against its picture is done, unless MinerU's draft came after that look.
         looked_at: set[int] = set()
         read_units = load_json(read_path).get("units", []) if read_path.is_file() else []
-        mineru_pages = {int(m.group(1)) for u in read_units if u.get("engine") not in {"ai"} and u.get("text", "").strip()
-                        and (m := re.match(r"(?:page|slide) (\d+) ocr$", u.get("locator", ""))) and not u.get("checked")}
+        mineru_pages = set(mineru_texts)
         for u in read_units:
             match = re.match(r"(?:page|slide) (\d+)", u.get("locator", ""))
             if u.get("checked") and match:
@@ -476,7 +476,7 @@ def checked_entry(build: Path, key: str, previous: dict[str, Any], text_dirs: li
         checked_sources[item_id] = bool(expected and source.is_file() and sha256_file(source) == expected)
     if not checked_sources[item_id]:
         return None
-    units = load_units([*text_dirs, build / "reducto-units", build / "mineru-units"], item_id)
+    units = load_units(unit_dirs(build, text_dirs), item_id)
     # A superseded visual addition cannot serve as evidence for its own replacement.
     text = page_text([u for u in units if not u.get("checked")], unit, number)
     return {**previous, "key": key, "text": text}
@@ -580,16 +580,19 @@ def main() -> int:
         dirs = [Path(d).resolve() for d in args.text_dir] or [build / "package-text"]
         report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs, args.include_page)
         # Old full-page transcripts on drawing pages, to split by choosing lines (split_reviews.py).
-        report["to_split"] = split_reviews.plan(build)
+        report["to_split"] = split_reviews.plan(build) if has_legacy_reviewed_pages(build) else 0
     else:
         report = collect(build, revise_checked=args.revise_checked,
                          answer_files=[Path(p).resolve() for p in args.answer_file] if args.answer_file else None,
                          text_dirs=[Path(d).resolve() for d in args.text_dir] if args.text_dir else None)
-        try:
-            report["split"] = split_reviews.collect(build)
-        except ValueError as problem:
-            report["split"] = {"rejected": str(problem).splitlines()[1:]}
-            report.setdefault("rejected", []).extend(report["split"]["rejected"])
+        if has_legacy_reviewed_pages(build):
+            try:
+                report["split"] = split_reviews.collect(build)
+            except ValueError as problem:
+                report["split"] = {"rejected": str(problem).splitlines()[1:]}
+                report.setdefault("rejected", []).extend(report["split"]["rejected"])
+        else:
+            report["split"] = {"split": 0, "drawing_only": 0, "unsplittable": 0, "rejected": []}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if args.command == "plan":
         return 0  # Without PyMuPDF the pipeline goes on; verify says the check was not possible.

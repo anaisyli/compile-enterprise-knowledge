@@ -43,6 +43,8 @@ from kb_common import (
     load_jsonl,
     load_units,
     long_path,
+    normalize_file_decisions,
+    unit_dirs,
     sha256_file,
     normalize_space,
     preferred_page_units,
@@ -230,6 +232,7 @@ def ask_client_route(asset: dict[str, Any], why: Any) -> dict[str, Any]:
 
 def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Apply explicit user exclusions before cached extraction can route an item back in."""
+    normalize_file_decisions(config)
     item_id = asset["item_id"]
     if item_id in config.get("excluded_items", {}):
         return {"route": "skip", "reason": "user_excluded"}
@@ -238,14 +241,16 @@ def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str,
         # We put this one to the client ourselves. It waits in CUS whatever was answered before;
         # apply_answers takes it off this list when the client answers the build's question.
         return ask_client_route(asset, asked[item_id])
+    answers = config.get("client_answers", {})
     # Keep exceptional, separately reviewed routing decisions in the build
     # configuration.  The immutable preparation package is never edited.
+    # An old awaiting-client override yields once the client has answered in client_answers.
     override = (config.get("route_overrides") or {}).get(item_id)
-    if isinstance(override, dict) and override.get("route"):
+    if (isinstance(override, dict) and override.get("route")
+            and not (override.get("reason") in {"awaiting_client", "media_awaiting_client"} and item_id in answers)):
         result = {k: v for k, v in override.items() if k != "asset"}
         result.setdefault("reason", "explicit_build_override")
         return result
-    answers = config.get("client_answers", {})
     if asset.get("decision") == "D" and item_id not in answers:
         # Not asked, or not answered yet: we may decide ourselves; the client's answer wins.
         if item_id in set(config.get("d_drop", [])):
@@ -1170,13 +1175,9 @@ def main() -> int:
         triage.update({item["item_id"]: item for item in load_json(package / TRIAGE_NAME)["items"]})
         point_files.append(package / POINTS_NAME)
     status = merge_extract_status(build, [Path(raw).resolve() for raw in args.extract_status])
-    text_dirs = [Path(raw).resolve() for raw in args.text_dir]
-    # Reducto before MinerU: where both read a page, MinerU's reading is the one used.
-    if (build / "reducto-units").is_dir():
-        text_dirs.append(build / "reducto-units")
     ocr_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else build / "mineru-units"
-    if ocr_dir.is_dir():
-        text_dirs.append(ocr_dir)
+    text_dirs = [d for d in unit_dirs(build, [Path(raw).resolve() for raw in args.text_dir], ocr_dir)
+                 if d.is_dir() or d in [Path(raw).resolve() for raw in args.text_dir]]
 
     routes = {
         asset["item_id"]: {**configured_route(asset, config), "asset": asset}
