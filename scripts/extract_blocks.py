@@ -43,6 +43,7 @@ from kb_common import (
     load_jsonl,
     load_units,
     long_path,
+    sha256_file,
     normalize_space,
     preferred_page_units,
     reducto_figure_units,
@@ -1107,6 +1108,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+EXTRACT_STATUS = "extract-status.json"
+
+
+def merge_extract_status(build: Path, paths: list[Path]) -> dict[str, Any]:
+    """One extraction record for the whole build, whichever text folders the text came from.
+
+    With --text-dir the text was read elsewhere (a screening work folder), so its record and
+    its page pictures live beside that folder. Later steps read only 04_知识库构建/extract-status.json,
+    and the pictures it names are copied into this build's assets, checked byte for byte."""
+    status: dict[str, Any] = {}
+    origin: dict[str, Path] = {}
+    for path in paths:
+        if not path.is_file():
+            continue
+        for item_id, record in load_json(path).get("items", {}).items():
+            status[item_id] = record
+            origin[item_id] = path.parent.parent / "assets"
+    target = build / "assets"
+    missing: list[str] = []
+    for item_id, record in status.items():
+        names = set(record.get("page_images", {}).values())
+        names.update(n for found in record.get("page_pictures", {}).values() for n in found)
+        source_dir = origin[item_id]
+        for name in sorted(names):
+            source, copy = source_dir / name, target / name
+            if source.resolve() == copy.resolve() and copy.is_file():
+                continue
+            if not source.is_file():
+                if not copy.is_file():
+                    missing.append(name)
+                continue
+            if not copy.is_file() or sha256_file(copy) != sha256_file(source):
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(long_path(source), long_path(copy))
+                if sha256_file(copy) != sha256_file(source):
+                    raise SystemExit(f"原页图复制后内容不一致：{source} → {copy}")
+    write_json(build / EXTRACT_STATUS, {"items": status, "missing_page_images": sorted(missing)})
+    return status
+
+
 def main() -> int:
     args = parse_args()
     if not run_lock(Path(args.out).resolve(), "extract_blocks.py"):
@@ -1128,9 +1169,7 @@ def main() -> int:
             package_of[asset["item_id"]] = package
         triage.update({item["item_id"]: item for item in load_json(package / TRIAGE_NAME)["items"]})
         point_files.append(package / POINTS_NAME)
-    status = {}
-    for raw in args.extract_status:
-        status.update(load_json(Path(raw))["items"])
+    status = merge_extract_status(build, [Path(raw).resolve() for raw in args.extract_status])
     text_dirs = [Path(raw).resolve() for raw in args.text_dir]
     # Reducto before MinerU: where both read a page, MinerU's reading is the one used.
     if (build / "reducto-units").is_dir():

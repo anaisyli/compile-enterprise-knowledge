@@ -917,7 +917,8 @@ def main() -> int:
         doc["unpublished"] = "" if doc_id in published_ids else (
             "和另一份内容相同，只发布了一份" if doc["item_id"] in same_content else "全部内容按规则删除，没有入库")
     styles = product_master([b for b in visible if b["status"] != "pending_client"], docs)
-    status_path = build / "package-text" / "extract-status.json"
+    # The record extract_blocks merged from every --extract-status, whichever folder the text came from.
+    status_path = build / "extract-status.json"
     status_info = load_json(status_path)["items"] if status_path.is_file() else {}
     # Ledgers name a file by its knowledge-base name, or by its number when it has none;
     # the original name, often a customer's, stays in the package's name map.
