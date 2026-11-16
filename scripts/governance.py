@@ -551,10 +551,22 @@ def parse_ledger(text: str) -> tuple[list[str], dict[str, list[str]], dict[str, 
     return header, rows, notes
 
 
+def finding_count(row: list[str], header: list[str]) -> int | None:
+    if "涉及" not in header:
+        return None
+    idx = header.index("涉及")
+    if idx >= len(row):
+        return None
+    match = re.search(r"(\d+)", row[idx])
+    return int(match.group(1)) if match else None
+
+
 def merge_ledger(old_text: str, new_text: str) -> str:
     """Keep what people wrote: their stage, owner, and notes win over the machine's defaults.
 
     Entries the machine no longer sees stay listed, marked as solved for a person to confirm.
+    If a closed entry's finding count grows (e.g. 4 unverified terms -> 929 terms), reopen it
+    automatically so the table does not keep showing 已完成 while new risks are flagged.
     """
     old_header, old_rows, old_notes = parse_ledger(old_text)
     new_header, new_rows, _ = parse_ledger(new_text)
@@ -573,13 +585,21 @@ def merge_ledger(old_text: str, new_text: str) -> str:
         record_id = line.strip().strip("|").split("|")[0].strip() if line.strip().startswith("|") else ""
         if record_id in new_rows and record_id in old_rows:
             cells = list(new_rows[record_id])
-            for column in HUMAN_COLUMNS:
-                if column in new_header and column in old_header:
-                    value = old_rows[record_id][old_header.index(column)]
-                    # This is an automatic historical state. A fresh machine finding reopens it;
-                    # explicit human closed states and all human notes still win.
-                    if column != "当前阶段" or value != SOLVED_STAGE:
-                        cells[new_header.index(column)] = value
+            old_stage = old_rows[record_id][old_header.index("当前阶段")] if "当前阶段" in old_header else ""
+            old_count = finding_count(old_rows[record_id], old_header)
+            new_count = finding_count(new_rows[record_id], new_header)
+            reopened = old_stage in CLOSED_STAGES and old_count is not None and new_count is not None and new_count > old_count
+            if reopened and "当前阶段" in new_header:
+                stage_idx = new_header.index("当前阶段")
+                cells[stage_idx] = f"{cells[stage_idx]}（有新增）"
+            else:
+                for column in HUMAN_COLUMNS:
+                    if column in new_header and column in old_header:
+                        value = old_rows[record_id][old_header.index(column)]
+                        # This is an automatic historical state. A fresh machine finding reopens it;
+                        # explicit human closed states and all human notes still win.
+                        if column != "当前阶段" or value != SOLVED_STAGE:
+                            cells[new_header.index(column)] = value
             line = row_line(cells)
         # An empty machine table still needs an insertion point for resolved history.
         if not (old_rows and not new_rows and line.strip().startswith("| 无 |")):

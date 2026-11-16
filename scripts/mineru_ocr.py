@@ -103,6 +103,21 @@ def html_table(body: str) -> str:
     return markdown_table(rows)
 
 
+def separate_markdown_tables(text: str) -> str:
+    """Ensure Markdown tables have blank lines before and after so Obsidian renders them as tables."""
+    out: list[str] = []
+    in_table = False
+    for line in text.splitlines():
+        is_row = line.lstrip().startswith("|") and "|" in line.lstrip()[1:]
+        if is_row and not in_table and out and out[-1].strip():
+            out.append("")
+        elif not is_row and in_table and line.strip() and out and out[-1].strip():
+            out.append("")
+        out.append(line)
+        in_table = is_row
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
 def page_units(result: Path) -> list[dict[str, str]]:
     """Turn MinerU's content list into one unit per page; fall back to the whole Markdown."""
     lists = sorted(result.rglob("*content_list*.json"))
@@ -110,7 +125,8 @@ def page_units(result: Path) -> list[dict[str, str]]:
         pages: dict[int, list[str]] = {}
         for entry in load_json(lists[0]):
             text = entry.get("text") or ""
-            if entry.get("type") == "table":
+            is_table = entry.get("type") == "table"
+            if is_table:
                 text = html_table(entry.get("table_body") or "")
             elif entry.get("type") == "image":
                 # MinerU's current schema puts style labels in image_footnote.
@@ -122,13 +138,20 @@ def page_units(result: Path) -> list[dict[str, str]]:
                 text = "\n".join(dict.fromkeys(parts))
             text = "\n".join(normalize_space(line) for line in text.splitlines() if line.strip())
             if text:
-                pages.setdefault(int(entry.get("page_idx", 0)) + 1, []).append(text)
+                bucket = pages.setdefault(int(entry.get("page_idx", 0)) + 1, [])
+                if is_table or (bucket and bucket[-1].lstrip().startswith("|")):
+                    bucket.append(f"\n{text}\n" if is_table else f"\n{text}")
+                else:
+                    bucket.append(text)
         # Keep a separate locator for provenance; the source-page builder chooses the reading.
-        return [{"locator": f"page {page} ocr", "text": "\n".join(lines)} for page, lines in sorted(pages.items())]
+        return [{"locator": f"page {page} ocr",
+                 "text": separate_markdown_tables("\n".join(lines).strip())}
+                for page, lines in sorted(pages.items())]
     markdowns = sorted(result.rglob("*.md"), key=lambda path: path.stat().st_size, reverse=True)
     if markdowns:
         text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", markdowns[0].read_text(encoding="utf-8", errors="replace"))
-        return [{"locator": "mineru ocr", "text": text}]
+        text = re.sub(r"(?is)<table\b[^>]*>.*?</table>", lambda m: f"\n\n{html_table(m.group(0))}\n\n", text)
+        return [{"locator": "mineru ocr", "text": separate_markdown_tables(text)}]
     return []
 
 

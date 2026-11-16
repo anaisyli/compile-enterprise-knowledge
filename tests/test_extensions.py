@@ -185,14 +185,26 @@ class MinerUTests(Base):
         self.assertEqual((reading["mineru"], reading["text"]), (1, reading["files"] - 1))
 
     def test_content_list_becomes_separate_ocr_page_units(self) -> None:
+        from governance import merge_ledger
         result = self.root / "result"
         result.mkdir()
         content = [{"type": "text", "text": "TAPESTRY SHIRT NTXT-003", "page_idx": 1},
-                   {"type": "table", "table_body": "<table><tr><td>100% COTTON</td></tr></table>", "page_idx": 1}]
+                   {"type": "table", "table_body": "<table><tr><td>100% COTTON</td></tr></table>", "page_idx": 1},
+                   {"type": "text", "text": "After table", "page_idx": 1}]
         (result / "x_content_list.json").write_text(json.dumps(content), encoding="utf-8")
         units = page_units(result)
         self.assertEqual(units[0]["locator"], "page 2 ocr")
-        self.assertIn("100% COTTON", units[0]["text"])
+        self.assertIn("TAPESTRY SHIRT NTXT-003\n\n| 100% COTTON |\n| --- |\n\nAfter table", units[0]["text"])
+        # A closed ledger entry reopens automatically when its finding count grows.
+        old = ("| ANM ID | 发生了什么 | 涉及 | 当前阶段 | 下一责任人 | 最近更新 |\n"
+               "| --- | --- | --- | --- | --- | --- |\n"
+               "| P-010-ANM-002 | 4 个没核实过的词 | 4 个词 | 已完成 | — | 2026-11-13 |\n")
+        new_same = ("| ANM ID | 发生了什么 | 涉及 | 当前阶段 | 下一责任人 | 最近更新 |\n"
+                    "| --- | --- | --- | --- | --- | --- |\n"
+                    "| P-010-ANM-002 | 4 个没核实过的词 | 4 个词 | 待判断 | 知识库专员 | 2026-11-16 |\n")
+        new_grown = new_same.replace("4 个", "929 个")
+        self.assertIn("| 已完成 |", merge_ledger(old, new_same))
+        self.assertIn("| 待判断（有新增） | 知识库专员 |", merge_ledger(old, new_grown))
 
     def test_full_page_ocr_is_published_without_native_text_and_caches_stay_intact(self) -> None:
         self.clear_catalog_pending()

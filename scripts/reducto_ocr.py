@@ -25,7 +25,7 @@ from typing import Any
 
 from ai_read import package_files, pdf_of
 from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, mineru_page_units, normalize_space, run_lock, write_json, write_text
-from mineru_ocr import html_table
+from mineru_ocr import html_table, separate_markdown_tables
 from reducto_client import KEY_PAGE, MODEL, PRICING_PAGE, ReductoError, client_from_env, failure_report, parse_pages, probe
 from samples import GRADES, METHODS, PAGED_KINDS, PICTURES, choose_samples, held_image, load_gate, load_triage, unreadable
 
@@ -246,11 +246,14 @@ def one_page(pages: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
 
 
 def page_text(entry: dict[str, Any]) -> str:
-    lines = []
+    blocks = []
     for content in entry.get("text", []):
-        content = html_table(content) if re.search(r"(?i)<t[rdh][\s>]", content) else content
-        lines.extend(normalize_space(line) for line in content.splitlines() if line.strip())
-    return "\n".join(line for line in lines if line)
+        is_html_table = bool(re.search(r"(?i)<t[rdh][\s>]", content))
+        rendered = html_table(content) if is_html_table else content
+        cleaned = "\n".join(normalize_space(line) for line in rendered.splitlines() if line.strip())
+        if cleaned:
+            blocks.append(cleaned)
+    return separate_markdown_tables("\n\n".join(blocks))
 
 
 def store(build: Path, entry: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
