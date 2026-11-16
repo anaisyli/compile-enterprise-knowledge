@@ -62,9 +62,10 @@ def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict
         validate_review(build, item_id, source_hash, record)
         locator = record['locator']
         if locator in drawing_pages and not record.get('exclude_kind') and record.get('part') != 'non_drawing':
+            # "split": "drawing_only" means someone looked and found only callouts: nothing to recover.
             units.append({'locator': locator + ' review-withheld', 'text': '', 'engine': 'reviewed',
-                          'review_withheld': True, 'reviewed_by': record['reviewed_by'],
-                          'review_note': record.get('note', '')})
+                          'review_withheld': True, 'review_resolved': record.get('split') == 'drawing_only',
+                          'reviewed_by': record['reviewed_by'], 'review_note': record.get('note', '')})
             continue
         platform_page = any(u['locator'] == locator + ' ocr'
                             and u.get('engine') in {None, '', 'mineru', 'reducto'}
@@ -120,8 +121,8 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
                 if not image.is_relative_to(out):
                     raise ValueError(f'Review image must be inside run directory: {item_id}')
                 normalized = {k: record[k] for k in ('locator', 'text', 'reviewed_by', 'note',
-                              'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part')
-                              if k in record}
+                              'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part',
+                              'split', 'withheld_original') if k in record}
                 normalized['image_file'] = (Path('reviewed-page-images') / item_id /
                     (record['image_sha256'] + image.suffix.lower())).as_posix()
                 key = (item_id, record['locator'])
@@ -145,6 +146,9 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
                 raise ValueError(f'Already reviewed page differs; inspect then use --replace-reviewed: {item_id}|{locator}')
             else:
                 replaced += 1
+                if record.get('part') == 'non_drawing' and not prior[0].get('part') and 'withheld_original' not in record:
+                    # A split replaces a full-page transcript: the full one travels inside it, into the vault.
+                    record['withheld_original'] = prior[0]
             records[:] = [r for r in records if r['locator'] != locator]
         else:
             added += 1

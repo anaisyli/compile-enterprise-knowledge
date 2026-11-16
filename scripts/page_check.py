@@ -26,6 +26,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import split_reviews
 from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
@@ -524,10 +525,17 @@ def main() -> int:
             parser.error("plan 要指定 --package")
         dirs = [Path(d).resolve() for d in args.text_dir] or [build / "package-text"]
         report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs, args.include_page)
+        # Old full-page transcripts on drawing pages, to split by choosing lines (split_reviews.py).
+        report["to_split"] = split_reviews.plan(build)
     else:
         report = collect(build, revise_checked=args.revise_checked,
                          answer_files=[Path(p).resolve() for p in args.answer_file] if args.answer_file else None,
                          text_dirs=[Path(d).resolve() for d in args.text_dir] if args.text_dir else None)
+        try:
+            report["split"] = split_reviews.collect(build)
+        except ValueError as problem:
+            report["split"] = {"rejected": str(problem).splitlines()[1:]}
+            report.setdefault("rejected", []).extend(report["split"]["rejected"])
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if args.command == "plan":
         return 0  # Without PyMuPDF the pipeline goes on; verify says the check was not possible.

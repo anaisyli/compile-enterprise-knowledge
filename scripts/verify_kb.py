@@ -17,6 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 from source_fidelity import reviewed_units
+from split_reviews import split_errors
 from sheet_layout import excel_date
 
 from guard_blocks import EMAIL, FURNITURE, HARD_PATTERNS, LABELLED_PHONE, MOBILE_CN, ROW_PATTERNS, compile_terms
@@ -427,6 +428,8 @@ def main() -> int:
             if "⚠" not in page.read_text(encoding="utf-8"):
                 errors.append(f"标了风险的内容没有 ⚠：{docs[block['doc_id']]['title']} {block['locator']}")
     errors.extend(drawing_page_errors(build, docs, blocks, published))
+    if (build / "reviewed-pages.json").is_file():
+        errors.extend(split_errors(load_json(build / "reviewed-pages.json")))
     picture_warnings: list[str] = []
     errors.extend(page_picture_errors(build, clean, docs, published, blocks, routes, picture_warnings))
     curation = build / "curation-report.json"
