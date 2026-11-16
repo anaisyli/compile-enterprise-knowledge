@@ -458,6 +458,7 @@ def main() -> int:
     update_project_info(vault, run_info.get("packages", []))
     state = save_state(run, vault)
     warnings += kept_warnings(state["kept_newer_in_vault"])
+    warnings += state["removed"]
     write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
                               "hash_mode": HASH_MODE, "files": written})
     index = build_index(vault)

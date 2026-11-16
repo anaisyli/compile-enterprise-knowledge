@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from kb_common import BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, safe_name, write_json, write_jsonl, write_text
 from guard_blocks import HARD_PATTERNS
+from kb_state import STATE, config_base, json_object, merge_settings
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
 from pictures import CONFIRMED_MEDIA, retained_record
 
@@ -497,6 +498,31 @@ def collect_home(out: Path) -> dict[str, Any]:
     return {"candidates": taken}
 
 
+def update_config(out: Path, vault: Path) -> dict[str, Any]:
+    """The config the site view is rebuilt with.
+
+    The run side is the newer of the run folder's two copies — the build snapshot and the
+    config at the run root — taken as a whole file, then three-way merged with the vault copy
+    against the vault-base record, so a key deleted in the run is not brought back."""
+    from kb_common import load_config
+
+    build = out / BUILD_DIRECTORY
+    run_copies = [p for p in (out / "kb-config.json", build / "kb-config.json") if p.is_file()]
+    run_path = max(run_copies, key=lambda p: p.stat().st_mtime) if run_copies else None
+    vault_path = vault / STATE / "kb-config.json"
+    run_side = load_json(run_path) if run_path is not None else None
+    vault_side = load_json(vault_path) if vault_path.is_file() else None
+    merged: dict[str, Any] = {}
+    if run_path is not None and isinstance(run_side, dict) and isinstance(vault_side, dict):
+        merged = merge_settings(run_side, vault_side, json_object(config_base(build)),
+                                run_path.stat().st_mtime >= vault_path.stat().st_mtime)[0]
+    elif isinstance(run_side, dict):
+        merged = run_side
+    elif isinstance(vault_side, dict):
+        merged = vault_side
+    return {**load_config(None), **merged}
+
+
 def update(out: Path, vault: Path) -> dict[str, Any]:
     """Write only the site view into a published vault, from what the last build already made.
 
@@ -504,7 +530,6 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
     The pages go into the publish receipt, so the next full publish keeps treating them as its own."""
     from datetime import datetime
     from guard_blocks import compile_terms
-    from kb_common import load_config
     from publish_vault import ARCHIVE, RECEIPT, archive, normalized_hash
     from render_kb import ALIAS_FOLDER, escape_cell
 
@@ -515,13 +540,7 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
     receipt_path = vault / RECEIPT
     if not receipt_path.is_file():
         raise SystemExit("知识库里没有发布记录，先正常发布一次。")
-    # Merge the build snapshot, the vault copy, and the run's current config entry by entry.
-    copies = [p for p in (build / "kb-config.json", vault / "05_数据与审核/70_构建状态/kb-config.json",
-                          out / "kb-config.json") if p.is_file()]
-    config: dict[str, Any] = {}
-    for path in sorted(copies, key=lambda p: p.stat().st_mtime):
-        config.update(load_json(path))
-    config = {**load_config(None), **config}
+    config = update_config(out, vault)
     for name in ("site-home.json",):
         kept = vault / "05_数据与审核/70_构建状态" / name
         if kept.is_file() and not (build / name).is_file():

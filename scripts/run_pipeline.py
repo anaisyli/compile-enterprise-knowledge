@@ -16,8 +16,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from kb_common import load_json, write_json
-from kb_state import STATE, restore
+from kb_common import BUILD_DIRECTORY, load_json, write_json
+from kb_state import STATE, config_base, json_object, record_adopted, restore
 
 
 HERE = Path(__file__).resolve().parent
@@ -42,28 +42,62 @@ def report_kept(kept: list[str], limit: int = 5) -> None:
         print(f"   …另有 {len(kept) - limit} 个文件同样处理（多是 MinerU 识别稿）")
 
 
-def merge_vault_config(config_path: Path, vault: Path) -> None:
+def merge_vault_config(config_path: Path, vault: Path, base: dict | None = None,
+                       record: Path | None = None) -> None:
     """Settings that only the vault's copy has (a product list written after publishing, say) go into
     the --config file before anything runs, so every step and the next publish see one config.
 
-    Where both copies have a setting, --config wins: it is the file the person is editing now. To
-    remove a setting, give it an empty value; a deleted one comes back from the vault."""
+    Where both copies have a setting, --config wins: it is the file the person is editing now.
+    A setting only the vault has is added unless it still equals the agreed value in the
+    vault-base record (`base`, or the record next to --config for two-argument callers): then
+    the run deleted it on purpose and it is not added back. Added settings are noted in the
+    record (`record`) so deleting them later sticks. With no record — a deleted or different
+    run folder — every vault-only setting is added, so to remove one then, write an empty value."""
     vault_config = vault / STATE / "kb-config.json"
     if not vault_config.is_file() or not config_path.is_file():
         return
     mine, kept = load_json(config_path), load_json(vault_config)
     if not isinstance(mine, dict) or not isinstance(kept, dict):
         return
-    added = sorted(k for k in kept if k not in mine)
+    if base is None and record is None:
+        candidate = config_base(config_path.parent)
+        if candidate.is_file():
+            record = candidate
+    if base is None and record is not None:
+        base = json_object(record)
+    added, deleted = [], []
+    for key in sorted(k for k in kept if k not in mine):
+        if base is not None and key in base and base[key] == kept[key]:
+            deleted.append(key)
+        else:
+            added.append(key)
     differ = sorted(k for k in kept if k in mine and kept[k] != mine[k])
     if differ:
         print(f"   运行目录的配置和知识库里的不一样，用运行目录的：{'、'.join(differ[:8])}{' 等' if len(differ) > 8 else ''}")
+    if deleted:
+        print(f"   运行目录的配置删掉了：{'、'.join(deleted)}（不从知识库补回，下次发布时知识库那份也删掉）")
     if not added:
         return
     backup = config_path.with_name(f"{config_path.stem}.{datetime.now():%Y%m%d-%H%M%S}.bak.json")
     shutil.copy2(config_path, backup)
-    write_json(config_path, {**mine, **{k: kept[k] for k in added}})
+    merged_config = {**mine, **{k: kept[k] for k in added}}
+    write_json(config_path, merged_config)
     print(f"   知识库的配置里有、运行目录的配置里没有，已补进 {config_path.name}：{'、'.join(added)}（原文件备份为 {backup.name}）")
+    if record is not None:
+        record_adopted(record, mine, kept, merged_config)
+
+
+def sync_config(out: Path, vault: Path, config_path: Path | None = None) -> dict:
+    """Restore the run folder's state from the vault, then merge vault-only settings into --config.
+
+    The base record is read before restore notes the vault values the run adopts, so
+    merge_vault_config still sees them as vault-side additions, not run-side deletions."""
+    build = out / BUILD_DIRECTORY
+    base_before = json_object(config_base(build))
+    restored = restore(out, vault)
+    if config_path is not None:
+        merge_vault_config(config_path, vault, base_before, config_base(build))
+    return restored
 
 
 LOCK_NAME = ".run_pipeline.lock"
@@ -126,14 +160,15 @@ def main() -> int:
         return 3
     if args.vault:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
-        restored = restore(Path(args.out).resolve(), Path(args.vault).resolve())
+        out, vault = Path(args.out).resolve(), Path(args.vault).resolve()
+        build = out / BUILD_DIRECTORY
+        restored = sync_config(out, vault, Path(args.config).resolve() if args.config else None)
         print(f"== 从知识库恢复构建状态：{restored['restored']} 个文件", flush=True)
         report_kept(restored["kept_newer_in_run"])
-        build = Path(args.out).resolve() / "04_知识库构建"
+        for line in restored["removed"]:
+            print(f"   {line}")
         if not args.config and (build / "kb-config.json").is_file():
             args.config = str(build / "kb-config.json")
-        elif args.config:
-            merge_vault_config(Path(args.config).resolve(), Path(args.vault).resolve())
         if not args.package and (build / "run-info.json").is_file():
             args.package = load_json(build / "run-info.json")["packages"]
             missing = [p for p in args.package if not Path(p).is_dir()]
