@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from governance import merge_ledger
-from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SKILL_VERSION, frontmatter, load_json, parse_frontmatter, run_lock, write_json, write_text
+from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, SKILL_VERSION, frontmatter, load_json,
+                       parse_frontmatter, run_lock, site_view_enabled, site_view_unset, write_json, write_text)
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
 from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
@@ -335,6 +336,15 @@ def main() -> int:
     from refresh_navigation import STATUS_PAGES, normalize_build
     normalize_build(run, vault)
     planned = planned_files(run)
+    # The site view is made only when switched on. Pages published before and not made now leave
+    # for the archive, said out loud; with no setting at all, nothing is decided for the person.
+    build_config = load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}
+    site_leaving = sorted(k for k in previous if k.startswith(SITE_VIEW_ROOT + "/") and k not in planned)
+    if site_leaving and site_view_unset(build_config):
+        raise SystemExit(f"知识库里有 {SITE_VIEW_ROOT}（{len(site_leaving)} 个页面），这次构建的配置没写 site_view，所以没生成它。"
+                         "带 --vault 重跑一次 run_pipeline.py 会自动保持打开；确定不要了，在 kb-config.json 写 "
+                         '"site_view": {"enabled": false} 再发布，旧页面会移进归档。')
+    site_closing = site_leaving if not site_view_enabled(build_config) else []
     # A document whose path changed is the same document, not a withdrawn one.
     new_paths = {parse_frontmatter(path.read_text(encoding="utf-8")).get("doc_id"): key
                  for key, path in planned.items() if key.startswith(SOURCE.as_posix()) and path.suffix == ".md"}
@@ -361,7 +371,8 @@ def main() -> int:
         raise SystemExit(f"这次发布会让 {len(leaving)} / {live} 份资料变成已失效（{'、'.join(f'{f} {n}' for f, n in folders.most_common())}）。"
                          "通常是官网没读到或少给了初筛包。查清后重跑；确实要撤下，加 --allow-withdraw")
     if args.dry_run:
-        print(json.dumps(dry_run_report(vault, planned, previous, new_paths, material, leaving, live, args.allow_withdraw),
+        print(json.dumps({**dry_run_report(vault, planned, previous, new_paths, material, leaving, live, args.allow_withdraw),
+                          "site_view_archived": len(site_closing), "site_view_files": site_closing},
                          ensure_ascii=False, indent=2))
         return 0
     written: dict[str, str] = {}
@@ -450,8 +461,14 @@ def main() -> int:
         # Pages earlier versions of this skill wrote, now replaced by the overview and the register.
         if path.is_file() and (MARKER in path.read_text(encoding="utf-8") or path.read_text(encoding="utf-8").startswith("# 知识库资料台账")):
             archive(vault, old_page.as_posix(), stamp, archived, move=True)
+    if site_closing:
+        warnings.append(f"建站资料视图已关闭（kb-config.json 的 site_view.enabled 不是 true）：{SITE_VIEW_ROOT} 的 "
+                        f"{len(site_closing)} 个页面移进了归档 {ARCHIVE.as_posix()}/{stamp}；要恢复就运行 site_view.py update")
     if archived:
         lines = [f"# 版本说明 {stamp}", "", f"由 compile-enterprise-knowledge {SKILL_VERSION} 发布时归档，共 {len(set(archived))} 个文件。", ""]
+        if site_closing:
+            lines.extend(["## 建站资料视图已关闭", "", f"配置里 site_view.enabled 不是 true，{SITE_VIEW_ROOT} 的 {len(site_closing)} 个页面"
+                          "随本次发布移进归档。要恢复，运行 site_view.py update。", ""])
         if renamed:
             lines.extend(["## 改名（同一份资料或图片换了名字或目录）", "", *(f"- {entry}" for entry in renamed), "", "## 归档的旧版", ""])
         lines.extend(f"- {key}" for key in sorted(set(archived)))

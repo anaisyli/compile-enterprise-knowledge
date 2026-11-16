@@ -27,6 +27,7 @@ from site_view import write_site
 from guard_blocks import HARD_PATTERNS, compile_terms
 from kb_common import (
     unapproved_d,
+    site_view_enabled,
     BUILD_DIRECTORY,
     CLEAN_DIRECTORY,
     ROLE_LABELS,
@@ -1007,8 +1008,12 @@ def main() -> int:
 
     write_table_summary(clean, visible, docs, statuses)
     write_platform_comparison(run, build, docs, config, originals)
-    # The site view also helps while only part is extracted: it shows what is there and what still waits.
-    write_site(build, config, routes, docs, order, statuses, originals, media, pictures_named, forbidden, escape_cell)
+    # Only when asked for ("site_view": {"enabled": true}). It also helps while only part is
+    # extracted: it shows what is there and what still waits.
+    if site_view_enabled(config):
+        write_site(build, config, routes, docs, order, statuses, originals, media, pictures_named, forbidden, escape_cell)
+    else:
+        (build / "site-view.json").unlink(missing_ok=True)
     counts = {"kept": Counter(b["doc_id"] for b in visible), "removed": Counter(b["doc_id"] for b in blocks if b["status"] == "removed")}
     write_register(build, routes, docs, published, statuses, status_info, issues, counts, originals)
     if not package_read_only:

@@ -15,7 +15,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from kb_common import BUILD_DIRECTORY, LOCK_HOLDER, load_json, run_lock, sha256_file, write_json
+from kb_common import (BUILD_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, load_json, run_lock, sha256_file,
+                       site_view_unset, write_json)
 from kb_state import STATE, config_base, json_object, record_adopted, restore
 
 
@@ -101,6 +102,20 @@ def sync_config(out: Path, vault: Path, config_path: Path | None = None) -> dict
     return restored
 
 
+def keep_site_view_open(config_path: Path, vault: Path) -> None:
+    """A project already using 80_建站资料 keeps it: the view is off by default only for projects
+    that never had one. Written into --config once, so later runs and the vault agree."""
+    if not config_path.is_file() or not (vault / SITE_VIEW_ROOT).is_dir():
+        return
+    config = load_json(config_path)
+    if not isinstance(config, dict) or not site_view_unset(config):
+        return
+    config["site_view"] = {**(config.get("site_view") or {}), "enabled": True}
+    write_json(config_path, config)
+    print(f"   知识库里已有 80_建站资料，配置里没写 site_view：保持打开，已在 {config_path.name} 写入 "
+          '"site_view": {"enabled": true}；不要了就改成 false，下次发布时旧页面移进归档')
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a knowledge base from one or more preparation packages.")
     parser.add_argument("--package", action="append", default=[], help="Verified preparation package; repeat. With --vault, defaults to the packages last used")
@@ -133,6 +148,8 @@ def main() -> int:
             print(f"   {line}")
         if not args.config and (build / "kb-config.json").is_file():
             args.config = str(build / "kb-config.json")
+        if args.config:
+            keep_site_view_open(Path(args.config).resolve(), vault)
         if not args.package and (build / "run-info.json").is_file():
             args.package = load_json(build / "run-info.json")["packages"]
             missing = [p for p in args.package if not Path(p).is_dir()]

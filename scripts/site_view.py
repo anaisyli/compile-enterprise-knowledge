@@ -28,7 +28,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, run_lock, safe_name, write_json, write_jsonl, write_text
+from kb_common import (BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, run_lock,
+                       safe_name, site_view_enabled, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from kb_state import STATE, config_base, json_object, merge_settings
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
@@ -475,6 +476,10 @@ HOME_README = """# 首页候选图
 
 def export_home(out: Path) -> dict[str, Any]:
     build = out / BUILD_DIRECTORY
+    copies = [p for p in (out / "kb-config.json", build / "kb-config.json") if p.is_file()]
+    if not any(site_view_enabled(load_json(p)) for p in copies):
+        raise SystemExit("建站资料视图没有打开，首页候选用不上。要用的话先运行 "
+                         "site_view.py update --out <运行目录> --vault <知识库> 打开它，再挑首页候选。")
     pictures = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
     wanted = re.compile(r"白底|主图|效果|渲染|white|main|render", re.I)
     todo = [{"id": i, "path": str(build / "assets" / i), "file": e["file"]} for i, e in sorted(pictures.items())
@@ -496,6 +501,25 @@ def collect_home(out: Path) -> dict[str, Any]:
             taken += 1
     write_json(build / HOME_STATE, state)
     return {"candidates": taken}
+
+
+def switch_on(out: Path, vault: Path) -> list[str]:
+    """Asking for the site view turns it on in every copy of the config, the vault's included:
+    written the same everywhere, no merge can turn it back off on the next build."""
+    switched = []
+    for path in (out / "kb-config.json", out / BUILD_DIRECTORY / "kb-config.json", vault / STATE / "kb-config.json"):
+        config = load_json(path) if path.is_file() else None
+        if not isinstance(config, dict):
+            continue
+        setting = config.get("site_view") if isinstance(config.get("site_view"), dict) else {}
+        if setting.get("enabled") is True:
+            continue
+        config["site_view"] = {**setting, "enabled": True}
+        write_json(path, config)
+        switched.append(str(path))
+    if switched:
+        print('建站资料视图已打开："site_view": {"enabled": true} 写进了 ' + "、".join(switched), file=sys.stderr)
+    return switched
 
 
 def update_config(out: Path, vault: Path) -> dict[str, Any]:
@@ -541,6 +565,8 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
     if not receipt_path.is_file():
         raise SystemExit("知识库里没有发布记录，先正常发布一次。")
     config = update_config(out, vault)
+    switched = switch_on(out, vault)
+    config["site_view"] = {**(config.get("site_view") or {}), "enabled": True}
     for name in ("site-home.json",):
         kept = vault / "05_数据与审核/70_构建状态" / name
         if kept.is_file() and not (build / name).is_file():
@@ -601,7 +627,7 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
                    + "\n".join(f"- {k}" for k in sorted(set(archived))) + "\n")
     view = load_json(build / "site-view.json")
     return {"pages": len(planned), "archived": len(set(archived)), "questions": view.get("questions", {}),
-            "folder": str(vault / ROOT)}
+            "folder": str(vault / ROOT), "site_view_enabled_in": switched}
 
 
 def main() -> int:
