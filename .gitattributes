@@ -1,0 +1,16 @@
+# Text files are stored and checked out with LF; the scripts write LF themselves.
+* text=auto eol=lf
+# Windows command files keep CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.zip binary
