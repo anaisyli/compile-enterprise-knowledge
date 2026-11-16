@@ -958,7 +958,7 @@ def main() -> int:
     match_product = Matcher(products)
     places = place_media(media, match_product)
     pictures_named = build_pictures(build, config, docs, by_doc, order, picture_status, unsafe, status_info, forbidden,
-                                    MAX_STYLE_IMAGES, held, places, match=match_product)
+                                    MAX_STYLE_IMAGES, held, places, match=match_product, products=products)
     PICTURE_FILES.clear()
     PICTURE_FILES.update({picture_id: Path(entry["file"]).name for picture_id, entry in pictures_named.items()})
     for entry in load_media(build):

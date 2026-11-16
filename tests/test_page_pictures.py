@@ -20,36 +20,41 @@ def run(script: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(SCRIPTS / script), *args], capture_output=True, text=True, encoding="utf-8")
 
 
+def make_pdf_package(package: Path, config: Path) -> None:
+    """A package with one real two-page PDF, so pages get real page pictures."""
+    import pymupdf  # type: ignore[import-not-found]
+
+    relative = "A-原文保留/营销宣传/DS50 Specification.pdf"
+    pdf_path = package / relative
+    pdf_path.parent.mkdir(parents=True)
+    (package / "审计记录").mkdir()
+    (package / "C-知识点").mkdir()
+    document = pymupdf.open()
+    for number in (1, 2):
+        page = document.new_page()
+        page.insert_text((72, 72), f"DS50 wall mounted digital signage, page {number}.", fontsize=12)
+        page.insert_text((72, 100), "Brightness 500 nits, resolution 3840 x 2160, tempered glass front.", fontsize=12)
+        page.insert_text((72, 128), "Wall bracket included; operating temperature 0 to 40 degrees.", fontsize=12)
+    document.save(str(pdf_path))
+    document.close()
+    digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    asset = {"item_id": "p1", "display_name": pdf_path.name, "decision": "A", "resource_type": "marketing",
+             "asset_kind": "document", "path": relative, "copy_status": "copied", "source_hash": digest,
+             "usable_as_fact": True, "pending_client_review": False, "pending_units": []}
+    (package / "审计记录/package-manifest.json").write_text(json.dumps({"assets": [asset]}), encoding="utf-8")
+    (package / "审计记录/triage-results.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    (package / "C-知识点/knowledge-points.jsonl").write_text("", encoding="utf-8")
+    config.write_text(json.dumps({"own_terms": ["DS50"], "sample_review": False, "project_id": "P-995"}), encoding="utf-8")
+
+
 @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "PyMuPDF is not installed")
 class PagePictureTests(unittest.TestCase):
     def setUp(self) -> None:
-        import pymupdf  # type: ignore[import-not-found]
-
         self.folder = tempfile.TemporaryDirectory()
         root = Path(self.folder.name)
         self.package, self.work, self.out = root / "02_初筛包", root / "screening-work", root / "run"
-        relative = "A-原文保留/营销宣传/DS50 Specification.pdf"
-        pdf_path = self.package / relative
-        pdf_path.parent.mkdir(parents=True)
-        (self.package / "审计记录").mkdir()
-        (self.package / "C-知识点").mkdir()
-        document = pymupdf.open()
-        for number in (1, 2):
-            page = document.new_page()
-            page.insert_text((72, 72), f"DS50 wall mounted digital signage, page {number}.", fontsize=12)
-            page.insert_text((72, 100), "Brightness 500 nits, resolution 3840 x 2160, tempered glass front.", fontsize=12)
-            page.insert_text((72, 128), "Wall bracket included; operating temperature 0 to 40 degrees.", fontsize=12)
-        document.save(str(pdf_path))
-        document.close()
-        digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
-        asset = {"item_id": "p1", "display_name": pdf_path.name, "decision": "A", "resource_type": "marketing",
-                 "asset_kind": "document", "path": relative, "copy_status": "copied", "source_hash": digest,
-                 "usable_as_fact": True, "pending_client_review": False, "pending_units": []}
-        (self.package / "审计记录/package-manifest.json").write_text(json.dumps({"assets": [asset]}), encoding="utf-8")
-        (self.package / "审计记录/triage-results.json").write_text(json.dumps({"items": []}), encoding="utf-8")
-        (self.package / "C-知识点/knowledge-points.jsonl").write_text("", encoding="utf-8")
         self.config = root / "kb-config.json"
-        self.config.write_text(json.dumps({"own_terms": ["DS50"], "sample_review": False}), encoding="utf-8")
+        make_pdf_package(self.package, self.config)
         # The text is read in another folder first, as a screening work folder would have it.
         read = run("extract_package_text.py", "--package", str(self.package), "--out", str(self.work))
         self.assertEqual(read.returncode, 0, read.stdout + read.stderr)

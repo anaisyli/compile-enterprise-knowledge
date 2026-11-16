@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from products import Matcher, catalog, material_folders, picture_kind, place_media, proposed  # noqa: E402
+from products import Matcher, catalog, picture_kind, place_media, proposed  # noqa: E402
 
 BASE = "知识库（总）/建站资料/建站资料/建站资料/产品"
 
@@ -58,7 +58,7 @@ class ProductTests(unittest.TestCase):
         self.assertEqual(places["m7"]["product"]["name"], "公司介绍")  # Company material has fixed groups.
         self.assertEqual(places["m8"]["product"]["name"], "工厂与生产")
         self.assertIsNone(places["m9"]["product"])  # A website page nobody named yet stays unplaced.
-        self.assertEqual(material_folders(places["m1"], None), ["广告机", "Wall mounted Digital Signage", "白底图"])
+        self.assertEqual(places["m1"]["below"], ["DS20", "白底图"])  # What lies under the product's own folder.
 
     def test_aliases_in_the_config_join_english_and_chinese_names(self) -> None:
         config = {"products": [{"name": "壁挂广告机", "category": "广告机", "aliases": ["Wall mounted Digital Signage", "DS20"]},

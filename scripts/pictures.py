@@ -27,13 +27,20 @@ from typing import Any, Callable
 from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, run_lock, safe_name, sha256_file,
                        short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
-from products import material_folders
+from products import clean_levels, parts_of, product_folders
 
 
 ASSETS = "03_正式知识/90_素材"
 INDEX = f"{ASSETS}/00_素材索引.md"
 LIST_CSV = f"{ASSETS}/00_素材清单.csv"
 STATE = "picture-names.json"
+# Which naming rules the names in STATE follow. Layout 2 files pictures by where they came from
+# (文档提取图/<来源文档>/第N页, 资料包素材/<the package's folders>, ...). relayout switches an existing
+# project over once; the next publish moves the pictures and writes the old-to-new list.
+LAYOUT = "picture-layout.json"
+CURRENT_LAYOUT = 2
+UNSEEN_FOLDER = "旧版未归类"
+RENAME_LIST = f"{ASSETS}/00_旧名新名对照.csv"
 AI_FOLDER = "picture-names"
 AI_ANSWERS = "picture-names/answers.json"
 WEBSITE_PICTURES = "website/pictures.json"
@@ -42,10 +49,15 @@ REPEATED = 3
 LABEL_MAX = 40
 PUBLIC, CHECK, INTERNAL = "可用于官网", "待核对", "内部"
 NUMBERED, FROM_SOURCE, FROM_AI = "编号", "原文", "AI看图"
-CERTIFICATE = re.compile(r"(?i)certif|证书|认证|\bISO\s?\d|\bBSCI\b|OEKO|\bSGS\b|\bGRS\b|test report|检测报告")
-FACTORY = re.compile(r"(?i)factory|workshop|machine|equipment|\bloom|warehouse|工厂|车间|设备|织机|仓库")
+# Read on a document's title or a folder's name only, never on page text: a page that mentions
+# ISO 5211 (a valve flange standard) is not a certificate. ISO counts only as a certification number.
+CERTIFICATE = re.compile(r"(?i)certif|证书|认证|资质|\bISO\s?(?:9001|14001|45001|13485|22000|27001|50001)\b|\bBSCI\b|OEKO|"
+                         r"\bSGS\b|\bGRS\b|test report|检测报告")
+FACTORY = re.compile(r"(?i)factory|workshop|warehouse|production line|工厂|车间|厂房|生产线|仓库")
 MEANINGLESS_ALT = re.compile(r"(?i)^(?:img|image|picture|photo|pic|dsc|banner|logo|icon)?[\s_\-]*\d*$|\.(?:jpe?g|png|webp|gif)$")
-FOLDERS = ("产品", "资料包素材", "工厂与设备", "证书", "公司", "报价单参考图", "产品表图片", "页面图", "其他")
+FOLDERS = ("资料包素材", "产品", "文档提取图", "官网图片", "证书", "工厂与设备", "页面图", "报价单参考图", "产品表图片", "其他",
+           "旧版未归类")
+EXTRACTED, WEBSITE_FOLDER, PAGES = "文档提取图", "官网图片", "页面图"
 # Pictures screening kept by folder sit under their original folders, the last few levels of them:
 # enough to tell one product's 白底图 from another's without paths too long for Windows.
 MEDIA_ROOT = "资料包素材"
@@ -84,6 +96,9 @@ class Namer:
         return label[:LABEL_MAX].rstrip(" -_.") if re.search(r"[A-Za-z一-鿿]{2}", label) else ""
 
 
+CONFIG_FREE_NAMER = Namer({}, None)  # For callers with no project config, such as tests.
+
+
 def english_name(entry: dict[str, Any], namer: Namer, suffix: str) -> str:
     """For the website team only: internal pictures do not go online, so they get none."""
     if entry["use"] == INTERNAL:
@@ -104,12 +119,27 @@ def first_line(blocks: list[dict[str, Any]]) -> str:
     return ""
 
 
-def kind_folder(text: str, fallback: str) -> str:
+def named_kind(*names: str) -> str | None:
+    """证书 or 工厂与设备 when a title or folder name says so plainly; None otherwise."""
+    text = " ".join(n for n in names if n)
     if CERTIFICATE.search(text):
         return "证书"
     if FACTORY.search(text):
         return "工厂与设备"
-    return fallback
+    return None
+
+
+def doc_folder(doc: dict[str, Any], root: str) -> str:
+    """<root>/<来源文档>, or 证书/工厂与设备 when the document's title or its folders say so."""
+    name = doc["title"].split("-", 1)[-1] if "-" in doc["title"] else doc["title"]
+    folders = [p for p in (doc.get("package_path") or "").replace("\\", "/").split("/")[:-1] if p]
+    kind = named_kind(doc["title"], *folders[-3:])
+    return f"{kind or root}/{safe_name(name, '未命名资料')}"
+
+
+def page_label(group: str) -> str:
+    """第 3 页 → 第3页; 第 3 张幻灯片 → 第3张幻灯片."""
+    return group.replace(" ", "")
 
 
 def page_group(info: dict[str, Any], page: str) -> str:
@@ -153,10 +183,16 @@ def ensure_dimension_previews(build: Path, routes: dict[str, Any], status_info: 
 def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]], order: list[str],
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
                max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None,
-               match: Callable[..., dict[str, Any] | None] | None = None) -> list[dict[str, Any]]:
+               match: Callable[..., dict[str, Any] | None] | None = None,
+               doc_places: dict[str, tuple[str, str] | None] | None = None) -> list[dict[str, Any]]:
     """Every picture the vault will show or keep, with the words that can name it. held: (doc, locator)
-    of every passage removed or waiting for the client."""
+    of every passage removed or waiting for the client. doc_places: doc_id -> (大类, 产品) by
+    curate.place_docs, for the index's 按产品 section."""
     found: list[dict[str, Any]] = []
+
+    def doc_product(doc_id: str) -> tuple[str, str] | None:
+        place = (doc_places or {}).get(doc_id)
+        return tuple(place) if place and place[1] else None
     assets = build / "assets"
     website = load_json(build / WEBSITE_PICTURES) if (build / WEBSITE_PICTURES).is_file() else {}
     page_checks = load_json(build / "page-check" / "results.json") if (build / "page-check" / "results.json").is_file() else {}
@@ -191,7 +227,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     english_source=words, location=block["locator"])
         info = status_info.get(doc["item_id"], {})
         page_unit = info.get("page_unit", "page")
-        placed = material_folders((places or {}).get(doc["item_id"]), namer.forbidden)
+        placed = product_folders((places or {}).get(doc["item_id"]), namer.forbidden)
 
         def dimension_result(page: str) -> dict[str, Any]:
             result = page_checks.get(f"{doc['item_id']}|{page_unit} {page}", {})
@@ -205,10 +241,14 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     model = safe_name(drawing.get("drawing_model") or "型号待确认", "型号待确认")
                     folder = drawing_folder(model, placed, match, namer.forbidden)
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
-                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True)
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True,
+                        product=model_product(model, match) or doc_product(doc_id))
                 else:
-                    add(name, doc_id, group, folder="页面图", prefix="页面图", label=f"{doc['title']}-{group.replace(' ', '')}",
-                        alt=f"{doc['title']} {group}原图", use=INTERNAL, location=group)
+                    # 页面图/<来源文档>/第N页: the name is the place, nothing guessed from the page.
+                    folder = doc_folder(doc, PAGES)
+                    add(name, doc_id, group, folder=folder, prefix="", label=page_label(group),
+                        alt=f"{doc['title']} {group}原图", use=INTERNAL if folder.startswith(PAGES) else CHECK,
+                        location=group, product=doc_product(doc_id))
         catalog = doc["catalog"] if "catalog" in doc else doc.get("folder") == "产品画册"
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():
@@ -224,24 +264,26 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                     if name not in drawing_names:
                         continue
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
-                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True)
+                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True,
+                        product=model_product(model, match) or doc_product(doc_id))
                 names = [name for name in names if name not in drawing_names]
                 if not names:
                     continue
             on_page = [b for b in blocks if b["group"] == group and not b.get("dimension_drawing")]
-            text = "\n".join(b["text"] for b in on_page)
             clean = [b for b in on_page if not b.get("flags")]
+            # The page's heading describes the picture (alt, English name); the file name is structural:
+            # 文档提取图/<来源文档>/[公司款号-]第N页, so half a sentence never becomes a file name.
             heading = namer.label(first_line(clean))
             code = namer.code("\n".join(b["text"] for b in clean))
-            label = " ".join(dict.fromkeys(p for p in (code, heading) if p))
-            folder = kind_folder(text, f"产品/{line}" if catalog else "公司")
+            folder = doc_folder(doc, EXTRACTED)
             use = PUBLIC if statuses.get(doc_id) == "有效" and not reference and len(clean) == len(on_page) else CHECK
+            product = (match(code) if code and match else None)
             for name in names:
                 if len(pages_of[name]) <= REPEATED:
-                    add(name, doc_id, group, folder=folder, prefix=line or folder.split("/")[-1], label=label, line=line,
-                        alt=" ".join(p for p in (line, label) if p), use=use, english_source=heading, location=group,
-                        excluded_drawing_caption=drawing.get("drawing_caption", "") if drawing else "",
-                        excluded_drawing_name=drawing.get("drawing_name", "") if drawing else "")
+                    add(name, doc_id, group, folder=folder, prefix=code, label=page_label(group), line=line,
+                        alt=" ".join(p for p in (line, code, heading) if p) or f"{doc['title']} {group}",
+                        use=use, english_source=heading, location=group, bare=not (code or heading),
+                        product=product_key(product) if product else doc_product(doc_id))
         if website.get(doc["item_id"]):
             category = doc.get("folder", "").split("/", 1)[-1]
             title = namer.label(doc["title"].split("-", 1)[-1])
@@ -255,30 +297,38 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 own = [b for b in blocks if b.get("locator") == section]
                 flagged = any(b.get("flags") for b in own)
                 company = category in {"公司与服务", ""}
-                folder = kind_folder(f"{alt} {doc['title']}", "公司") if company else f"产品/{category}"
-                add(picture["id"], doc_id, own[0]["group"] if own else blocks[0]["group"], folder=folder, prefix=folder.split("/")[-1], label=alt or title,
+                # 官网图片/<页面名>; a page plainly titled as certificates or the factory goes there instead.
+                page = safe_name(doc["title"].split("-", 1)[-1], "官网页面")
+                folder = f"{named_kind(doc['title']) or WEBSITE_FOLDER}/{page}"
+                product = None if company else (match(category) if match else None)
+                add(picture["id"], doc_id, own[0]["group"] if own else blocks[0]["group"], folder=folder,
+                    prefix="官网" if company else category, label=alt or title,
                     line="" if company else category, alt=alt or title, use=CHECK if flagged else PUBLIC,
-                    english_source=alt or doc.get("original_name", ""), location=section)
+                    english_source=alt or doc.get("original_name", ""), location=section,
+                    product=product_key(product) if product else doc_product(doc_id))
     media = load_media(build)
     # Pages of one drawing PDF share the hash in their ids; each gets its own code and a page number.
     drawing_pages = Counter(entry["item_id"] for entry in media if entry.get("drawing"))
     for entry in media:
-        # A product's pictures go under 大类/产品/图片类型; what matches no product keeps its own folders.
+        # Filed where the client filed it: 资料包素材/<the package's own folders, tidied>. A folder
+        # plainly named as certificates or the factory goes to 证书/工厂与设备 from that folder down.
+        # Which product it shows is worked out only for the index's 按产品 section.
         place = (places or {}).get(entry["item_id"])
-        placed = material_folders(place, namer.forbidden)
-        folders = placed or media_folders(entry["relpath"], namer)
+        named_from = named_folders(entry["relpath"], namer)
+        kind, folders = named_from if named_from else (None, media_folders(entry["relpath"], namer))
         stem = Path(entry["relpath"]).stem
         label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
-        prefix = (safe_name(place["product"]["name"], "其他") if placed else folders[-1]) if folders else ""
+        prefix = folders[-1] if folders else ""
         use, alt = PUBLIC, ""
-        folder = "/".join([MEDIA_ROOT, *folders])
-        fields: dict[str, Any] = {}
+        folder = "/".join([kind or MEDIA_ROOT, *folders])
+        fields: dict[str, Any] = {"product": product_key(place["product"]) if place and place.get("product") else None}
         if entry.get("status") == "dimension_drawing":
             model = safe_name(entry.get("drawing_model") or "型号待确认", "型号待确认")
-            folder = drawing_folder(model, placed, match, namer.forbidden)
+            folder = drawing_folder(model, product_folders(place, namer.forbidden), match, namer.forbidden)
             prefix, label = model, "尺寸图"
             use, alt = CHECK, "尺寸见原图"
             fields["dimension_drawing"] = True
+            fields["product"] = fields["product"] or model_product(model, match)
         if entry.get("drawing") and drawing_pages[entry["item_id"]] > 1:
             page = entry.get("page") or 1
             label = f"{label}-第{page}页" if label else f"第{page}页"
@@ -299,24 +349,86 @@ def load_media(build: Path) -> list[dict[str, Any]]:
     return load_json(build / MEDIA_LIST) if (build / MEDIA_LIST).is_file() else []
 
 
+PACKAGE_LEVELS = 6
+PACKAGE_PATH_CHARS = 100
+
+
 def media_folders(relpath: str, namer: Namer) -> list[str]:
-    """The last folders above a file, each safe for a path; one naming a customer becomes 其他."""
+    """The folders the file sits in inside the package, as the client filed them: a folder repeated
+    inside itself counted once, number-only folders and serial prefixes dropped (clean_levels), and
+    the top ones dropped only when the path would be too long for Windows. One naming a customer
+    becomes 其他. Nothing here decides which product a picture belongs to."""
+    levels = clean_levels(parts_of(relpath), keep=0)
+    while levels and (len(levels) > PACKAGE_LEVELS or len("/".join(levels)) > PACKAGE_PATH_CHARS):
+        levels = levels[1:]
+    return [("其他" if namer.forbidden and namer.forbidden.search(p) else safe_name(p, "其他")) for p in levels]
+
+
+def named_folders(relpath: str, namer: Namer) -> tuple[str, list[str]] | None:
+    """(证书 or 工厂与设备, the folder that says so and those below it), when a folder plainly says so."""
     parts = [p for p in relpath.replace("\\", "/").split("/")[:-1] if p]
-    return [("其他" if namer.forbidden and namer.forbidden.search(p) else safe_name(p, "其他")) for p in parts[-MEDIA_DEPTH:]]
+    for index in range(len(parts) - 1, -1, -1):
+        kind = named_kind(parts[index])
+        if kind:
+            kept = clean_levels(parts[index:], keep=MEDIA_DEPTH)
+            return kind, [("其他" if namer.forbidden and namer.forbidden.search(p) else safe_name(p, "其他")) for p in kept]
+    return None
 
 
 def drawing_folder(model: str, placed: list[str] | None, match: Callable[..., dict[str, Any] | None] | None,
                    forbidden: re.Pattern[str] | None) -> str:
-    """Where an AI-classified dimension drawing goes: with its product's drawings, else under its model."""
+    """Where an AI-classified dimension drawing goes: with its product's drawings, else under its model.
+    placed is 大类/产品 (product_folders), when the picture's own place already named the product."""
     if not placed and match and model != "型号待确认":
         product = match(model)
         if product and product.get("kind") in {"product", "solution"}:
-            placed = material_folders({"product": product, "kind": "尺寸图"}, forbidden)
-    return "/".join([MEDIA_ROOT, *placed[:-1], "尺寸图"] if placed else ["产品", model, "尺寸图"])
+            placed = product_folders({"product": product}, forbidden)
+    return "/".join([MEDIA_ROOT, *placed, "尺寸图"] if placed else ["产品", model, "尺寸图"])
 
 
-def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str, Any], namer: Namer) -> dict[str, dict[str, Any]]:
-    """id -> the picture's place in 90_素材 and what to say about it. The first use of a picture wins."""
+def product_key(product: dict[str, Any] | None) -> tuple[str, str] | None:
+    """(大类, 产品) for the index's 按产品 section."""
+    if not product or product.get("kind") not in {"product", "solution", None}:
+        return None
+    return (product.get("category") or product["name"], product["name"])
+
+
+def model_product(model: str, match: Callable[..., dict[str, Any] | None] | None) -> tuple[str, str] | None:
+    return product_key(match(model)) if match and model != "型号待确认" else None
+
+
+def layout_of(build: Path, saved: dict[str, Any]) -> dict[str, Any]:
+    """The naming rules in force. A project with no names yet starts on the current layout; one
+    named before keeps its names (layout 1) until relayout switches it over."""
+    path = build / LAYOUT
+    if path.is_file():
+        return load_json(path)
+    if not saved:
+        layout = {"layout": CURRENT_LAYOUT, "applied": "新项目，一开始就用这一版"}
+        write_json(path, layout)
+        return layout
+    return {"layout": 1}
+
+
+def relayout(out: Path) -> dict[str, Any]:
+    """Switch a project to the current layout: names made by the rules are made again on the next
+    build; what a person or the model wrote about a picture (its description) stays."""
+    build = out / BUILD_DIRECTORY
+    saved = load_json(build / STATE) if (build / STATE).is_file() else {}
+    current = layout_of(build, saved)
+    if current.get("layout") == CURRENT_LAYOUT and current.get("applied"):
+        return {"layout": CURRENT_LAYOUT, "changed": False, "next": "已经是这一版的名字，不用迁移"}
+    from datetime import datetime
+    write_json(build / LAYOUT, {"layout": CURRENT_LAYOUT, "requested_at": datetime.now().isoformat(timespec="seconds"),
+                                "applied": None})
+    return {"layout": CURRENT_LAYOUT, "changed": True, "pictures_named_before": len(saved),
+            "next": "重跑 run_pipeline.py 按新规则起名，再用 publish_vault.py --dry-run 看会搬哪些图，然后正式发布"}
+
+
+def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str, Any], namer: Namer,
+           layout: int = 1) -> dict[str, dict[str, Any]]:
+    """id -> the picture's place in 90_素材 and what to say about it. The first use of a picture wins.
+    Names given under an older layout do not hold once the project moved to this one."""
     entries: dict[str, dict[str, Any]] = {}
     for item in found:
         if item["id"] in entries:
@@ -328,14 +440,19 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
         answer = answers.get(item["id"]) or {}
         if answer.get("drop"):
             continue  # The AI saw a person, a customer's mark or a price: not material.
-        if named_by == NUMBERED and answer.get("name"):
-            named_by, label, alt = FROM_AI, namer.label(answer["name"]), answer.get("alt") or answer["name"]
+        if answer.get("name"):
+            # What the model saw describes the picture; the file name stays structural, so it never
+            # changes because a picture was looked at.
+            alt = answer.get("alt") or answer["name"]
             item["english_source"] = answer.get("english") or answer["name"]
             item["use"] = CHECK if item["use"] == PUBLIC else item["use"]
+            item["described_by"] = FROM_AI
         stem = safe_name("-".join(p for p in (item["prefix"], label) if p) or "图片")
         file = f"{item['folder']}/{stem}-{short}{suffix}"
         proposed_file = file
         old = saved.get(item["id"])
+        if old and layout >= CURRENT_LAYOUT and old.get("layout", 1) < CURRENT_LAYOUT:
+            old = None  # Named by the old rules: this project moved to the current layout.
         # A name stays once given; only a plain numbered name gives way to a better one.
         if old and old.get("file") and not (old.get("named_by") == NUMBERED and named_by != NUMBERED):
             file, named_by = old["file"], old.get("named_by", named_by)
@@ -368,6 +485,31 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
     return entries
 
 
+def product_section(entries: dict[str, dict[str, Any]]) -> list[str]:
+    """按产品: every picture under the product it belongs to, however it got there — package folders,
+    the page's only company code or its document's product, a drawing's model, a website category."""
+    by_product: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    unplaced: list[dict[str, Any]] = []
+    for entry in entries.values():
+        product = entry.get("product")
+        (by_product[tuple(product)] if product else unplaced).append(entry)
+    if not by_product and not unplaced:
+        return []
+    lines = ["## 按产品", "", "同一张图只列在一个产品下。对不上任何产品的列在最后的“未对应产品”。", ""]
+    for (category, name), rows in sorted(by_product.items()):
+        title = name if category == name else f"{category} / {name}"
+        lines += [f"### {title}（{len(rows)} 张）", ""]
+        lines += [f"- [[{Path(e['file']).name}]]" for e in sorted(rows, key=lambda e: e["file"])]
+        lines.append("")
+    if unplaced:
+        lines += [f"### 未对应产品（{len(unplaced)} 张）", "",
+                  "按文件夹列出数量；要归到产品，把文件夹名或型号写进 kb-config.json 对应产品的 aliases。", ""]
+        folders = Counter(Path(e["file"]).parent.as_posix() for e in unplaced)
+        lines += [f"- {folder}：{n} 张" for folder, n in sorted(folders.items())]
+        lines.append("")
+    return lines
+
+
 def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str, dict[str, Any]], escape: Callable[[str], str],
                 forbidden: re.Pattern[str] | None = None) -> None:
     """One page for people, one CSV for the website team; no previews, thousands of pictures make Obsidian crawl."""
@@ -375,16 +517,21 @@ def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str,
     for entry in entries.values():
         counts[entry["use"]] += 1
     lines = ["# 素材索引", "",
-             "图片发布后一直保留，不随资料变化删除。名字取自图片旁边的原文：产品名、画册页标题、公司自己的款号、官网图片说明；"
-             "买家款号和客户名不进名字。点文件名看图。", "",
+             "图片发布后一直保留，不随资料变化删除。文件放在哪、叫什么，按图片的来处生成，名字一旦定下不再变；"
+             "图上是什么写在“说明”一列。买家款号和客户名不进名字。点文件名看图。", "",
              f"共 {len(entries)} 张：" + "，".join(f"{use} {counts[use]}" for use in (PUBLIC, CHECK, INTERNAL) if counts[use]) + "。", "",
              f"- **{PUBLIC}**：来自官网或公司画册，原文没有 ⚠，建站可以直接用；“说明”一列可以当 alt 文字。",
-             f"- **{CHECK}**：原文有 ⚠ 或名字是 AI 看图起的，用前看一眼原图和原文。",
-             f"- **{INTERNAL}**：报价单、产品表里的图（多是买家询价时发来的款式）和整页截图，不要上官网。",
-             f"- 名字是“{NUMBERED}”的，旁边没有能用的文字；可以让 AI 看图起名（pictures.py export / collect）。",
-             f"- **{MEDIA_ROOT}**：初筛抽看样本后按文件夹整批保留的图片（比如建站资料里的渲染图、白底图），"
-             "放在原来的文件夹下（保留最后三层），名字取自文件夹和原文件名。视频、音频、较大的图片和设计稿留在初筛包，逐个列在最后一节。",
+             f"- **{CHECK}**：原文有 ⚠ 或说明是 AI 看图写的，用前看一眼原图和原文。",
+             f"- **{INTERNAL}**：报价单、产品表里的图（多是买家询价时发来的款式）和整页原图，不要上官网。",
+             f"- **{MEDIA_ROOT}**：初筛按文件夹整批保留的图片（渲染图、白底图等），照搬初筛包里的目录：重复的层只留一层，"
+             "纯数字的目录层去掉，带序号的只去掉序号，路径太长时只留最深的几层。视频、音频、较大的图片和设计稿留在初筛包，列在最后一节。",
+             f"- **{EXTRACTED}**：资料里印的照片，按来源文档放，名字是“第N页”，页上只有一个公司款号时前面加款号。",
+             f"- **{WEBSITE_FOLDER}**：官网页面上的图，按页面放。**{PAGES}**：资料的整页原图，按来源文档放。",
+             "- **证书**、**工厂与设备**：只看资料标题或文件夹名，写明是证书、工厂的才放这里。",
+             "- 说明还只有“第N页”的，可以让 AI 看图补一句说明（pictures.py export / collect），不改文件名。",
+             "- 按产品查图看下面“按产品”一节。",
              f"- 建站用的清单（含英文文件名）：[[00_素材清单.csv]]。", ""]
+    lines += product_section(entries)
     by_folder: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries.values():
         by_folder[Path(entry["file"]).parent.as_posix()].append(entry)
@@ -507,22 +654,32 @@ def retained_section(records: list[dict[str, Any]], escape: Callable[[str], str]
 def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str, Any]], by_doc: dict[str, list[dict[str, Any]]],
                    order: list[str], statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any],
                    forbidden: re.Pattern[str] | None, max_row_images: int, held: set[tuple[str, str]],
-                   places: dict[str, Any] | None = None, match: Callable[..., dict[str, Any] | None] | None = None) -> dict[str, dict[str, Any]]:
+                   places: dict[str, Any] | None = None, match: Callable[..., dict[str, Any] | None] | None = None,
+                   products: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     namer = Namer(config, forbidden)
-    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places, match)
+    # Which product a document belongs to, by the rule the curated pages use: deepest folder first.
+    from curate import place_docs
+    doc_places = place_docs({d: docs[d] for d in order}, [p for p in products or [] if p.get("kind") in {"product", "solution", None}])
+    found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places, match,
+                       doc_places)
     saved = load_json(build / STATE) if (build / STATE).is_file() else {}
     answers = load_json(build / AI_ANSWERS) if (build / AI_ANSWERS).is_file() else {}
-    entries = assign(found, saved, answers, namer)
+    layout = layout_of(build, saved).get("layout", 1)
+    entries = assign(found, saved, answers, namer, layout)
     # Names given before stay known even when a picture is not shown this time.
-    write_json(build / STATE, {**saved, **{i: {"file": e["file"], "named_by": e["named_by"]} for i, e in entries.items()}})
-    write_json(build / "pictures.json", {i: {k: e[k] for k in ("file", "alt", "use", "named_by", "english", "doc_id", "group")}
+    mark = {"layout": layout} if layout >= CURRENT_LAYOUT else {}
+    write_json(build / STATE, {**saved, **{i: {"file": e["file"], "named_by": e["named_by"], **mark} for i, e in entries.items()}})
+    write_json(build / "pictures.json", {i: {**{k: e[k] for k in ("file", "alt", "use", "named_by", "english", "doc_id", "group")},
+                                             **({"described_by": e["described_by"]} if e.get("described_by") else {}),
+                                             **({"bare": True} if e.get("bare") else {}),
+                                             **({"product": list(e["product"])} if e.get("product") else {})}
                                           for i, e in entries.items()})
     return entries
 
 
-README = """# 看图起名
+README = """# 看图写说明
 
-`todo.jsonl` 每行一张图：`id`、图片路径 `path`、它在哪份资料哪一页 `source`。这些图旁边没有能用来起名的文字。
+`todo.jsonl` 每行一张图：`id`、图片路径 `path`、它在哪份资料哪一页 `source`。这些图旁边没有能用来描述它的文字。
 
 逐张打开图片看，写进同目录的 `answers.jsonl`，每行一个：
 {"id": "img-…", "name": "提花挂毯 大象图案", "alt": "大象图案机织提花挂毯，挂在客厅墙上", "english": "elephant jacquard wall tapestry"}
@@ -531,7 +688,8 @@ README = """# 看图起名
 1. 只写图里看得见的东西：产品是什么、颜色、图案、场景。看不出的不写，不猜面料、克重、款号、品牌。
 2. 图里有人名、客户名、品牌标志、价格的，name 写“不用”，这张图不进素材。
 3. name 不超过 20 个字，alt 一句话。english 是给网站文件名用的英文，几个词。
-写完运行 `pictures.py collect --out <运行目录>`，再重跑构建。AI 起的名字在索引里标“AI看图”“待核对”。
+写的内容只进素材索引的“说明”和英文文件名建议，不改图片文件名：文件名按图片所在位置生成，一直不变。
+写完运行 `pictures.py collect --out <运行目录>`，再重跑构建。AI 写的说明在索引里标“待核对”。
 """
 
 
@@ -539,9 +697,11 @@ def export(out: Path) -> dict[str, Any]:
     build = out / BUILD_DIRECTORY
     pictures = load_json(build / "pictures.json") if (build / "pictures.json").is_file() else {}
     docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")}
+    # Pictures nothing describes yet: a numbered name, or a page with no heading and no company code.
     todo = [{"id": i, "path": str(build / "assets" / i),
              "source": f"{docs[e['doc_id']]['title']} {e['group']}" if e["doc_id"] in docs else "资料包原文件夹"}
-            for i, e in sorted(pictures.items()) if e["named_by"] == NUMBERED and e["use"] != INTERNAL]
+            for i, e in sorted(pictures.items())
+            if e["use"] != INTERNAL and not e.get("described_by") and (e["named_by"] == NUMBERED or e.get("bare"))]
     folder = build / AI_FOLDER
     write_jsonl(folder / "todo.jsonl", todo)
     write_text(folder / "README.md", README)
@@ -601,7 +761,7 @@ def restore_names(out: Path, vault: Path, picture_ids: list[str]) -> dict[str, A
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Let an AI name the pictures that have no words beside them.")
-    parser.add_argument("command", choices=["export", "collect", "restore-names"])
+    parser.add_argument("command", choices=["export", "collect", "restore-names", "relayout"])
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--vault", help="Published vault to read when restoring names")
     parser.add_argument("--id", action="append", dest="picture_ids", default=[], help="Picture id to restore (repeatable)")
@@ -613,6 +773,8 @@ def main() -> int:
         if not args.vault or not args.picture_ids:
             parser.error("restore-names requires --vault and at least one --id")
         result = restore_names(out, Path(args.vault).resolve(), args.picture_ids)
+    elif args.command == "relayout":
+        result = relayout(out)
     else:
         result = export(out) if args.command == "export" else collect(out)
     print(json.dumps(result, ensure_ascii=False, indent=2))

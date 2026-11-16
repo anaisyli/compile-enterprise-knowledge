@@ -83,8 +83,8 @@ class MediaFolderTests(unittest.TestCase):
                          {"r1": "media_kept", "p1": "media_awaiting_client", "v1": "media_kept"})
         files = sorted(entry["file"] for entry in self.pictures().values())
         self.assertEqual(len(files), 2)
-        # Filed by product and kind of picture: 产品\X100\渲染图 is X100's 效果图.
-        self.assertTrue(all(f.startswith("资料包素材/X100/效果图/X100-") for f in files), files)
+        # Filed where the client filed it, as the package has it.
+        self.assertTrue(all(f.startswith("资料包素材/建站资料/产品/X100/渲染图/渲染图-") for f in files), files)
 
         index = (self.build / "vault/03_正式知识/90_素材/00_素材索引.md").read_text(encoding="utf-8")
         self.assertIn("## 留在初筛包里的素材", index)
@@ -102,7 +102,7 @@ class MediaFolderTests(unittest.TestCase):
         self.assertIn("2 个文件", rows[0]["原文件名"])
 
         name_map = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
-        self.assertIn("进素材库：90_素材/资料包素材/X100/效果图/", name_map)
+        self.assertIn("进素材库：90_素材/资料包素材/建站资料/产品/X100/渲染图/", name_map)
         self.assertIn("视频或音频，已确认可用，原件留在初筛包", name_map)
 
         verified = self.run_script("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
@@ -121,7 +121,7 @@ class MediaFolderTests(unittest.TestCase):
         self.pipeline()
         files = sorted(entry["file"] for entry in self.pictures().values())
         self.assertEqual(len(files), 4)
-        self.assertEqual(sum("/实物图/" in f for f in files), 2)  # 实拍图 is filed as X100's 实物图.
+        self.assertEqual(sum("资料包素材/建站资料/产品/X100/实拍图/" in f for f in files), 2)  # The client's own folder name stays.
 
 
 if __name__ == "__main__":
