@@ -240,6 +240,18 @@ class NavigationTests(unittest.TestCase):
         blocks = document_blocks("DOC-4", "item4", units, preserve_grid=True, sheet_images={"T series": {2: ["t1.png"]}})
         self.assertEqual(blocks[0]["images"], ["t1.png"])
 
+    def test_document_blocks_does_not_promote_numbered_sentences_to_headings(self):
+        from extract_blocks import document_blocks
+        units = [
+            {"locator": "para 1", "text": "一、产品特点"},
+            {"locator": "para 2", "text": "1.1 外壳采用1-2.5mm镀锌板，喷户外专用粉末"},
+            {"locator": "para 3", "text": "1.3 整机屏前保护玻璃采用6mm超白钢化玻璃"},
+            {"locator": "para 4", "text": "1.5 整机采用模块化设计，方便安装维护。"},
+            {"locator": "para 5", "text": "二、产品性能描述"},
+        ]
+        blocks = document_blocks("DOC-5", "item5", units)
+        self.assertEqual([b["group"] for b in blocks], ["一、产品特点", "一、产品特点", "一、产品特点", "一、产品特点", "二、产品性能描述"])
+
 
 if __name__ == "__main__":
     unittest.main()

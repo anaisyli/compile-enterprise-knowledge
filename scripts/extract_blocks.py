@@ -115,6 +115,15 @@ LOCATOR = re.compile(
 )
 SHEET_UNIT = re.compile(r"^sheet (?P<name>.+) \((?P<state>[^)]+)\)$")
 HEADING = re.compile(r"^(?:第[一二三四五六七八九十\d]+[章节部分]|[一二三四五六七八九十]+[、.]|\d+(?:\.\d+)*[、.\s])")
+SENTENCE_PUNCT = re.compile(r"[，。！？；]")
+
+
+def is_word_heading(line: str) -> bool:
+    if len(line) > 40 or SENTENCE_PUNCT.search(line) or not HEADING.match(line):
+        return False
+    if re.match(r"^\d+(?:\.\d+)+", line) and len(line) > 18:
+        return False
+    return True
 PAGE_RANGE = re.compile(r"第\s*(\d+)(?:\s*[–\-~至]\s*(\d+))?\s*页")
 
 # Order matters: "面料报价" must count as a price before it can count as fabric.
@@ -611,7 +620,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                            **({"images": sheet_pics} if sheet_pics else {})})
             continue
         first_line = text.splitlines()[0].strip()
-        if unit["locator"].startswith("para ") and len(first_line) <= 40 and HEADING.match(first_line):
+        if unit["locator"].startswith("para ") and is_word_heading(first_line):
             heading = first_line
         blocks.append(
             {
