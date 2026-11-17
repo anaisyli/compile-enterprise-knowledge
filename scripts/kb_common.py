@@ -559,3 +559,12 @@ def infer_model_from_title(title: str) -> str:
     if re.search(r"[A-Za-z0-9]{2,}|\d+\s*寸", stem):
         return stem
     return ""
+
+
+def path_uri(path: Path) -> str:
+    """Build a file URI that Windows Obsidian can open for both local drives and UNC shares."""
+    uri = path.resolve().as_uri()
+    # Python turns \\server\share into file://server/share; Obsidian strips file:// and drops \\ unless file:////.
+    if uri.startswith("file://") and not uri.startswith("file:///"):
+        return "file:////" + uri[len("file://"):]
+    return uri

@@ -25,8 +25,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import (BUILD_DIRECTORY, infer_model_from_title, load_json, load_jsonl, long_path, run_lock, safe_name,
-                       sha256_file, short_hash, write_json, write_jsonl, write_text)
+from kb_common import (BUILD_DIRECTORY, infer_model_from_title, load_json, load_jsonl, long_path, path_uri, run_lock,
+                       safe_name, sha256_file, short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from legacy_migrations import repair_legacy_picture_name
 from products import clean_levels, parts_of, product_folders
@@ -664,8 +664,8 @@ def retained_record(entry: dict[str, Any], forbidden: re.Pattern[str] | None = N
     source = Path(entry["package"]) / entry["package_path"] if entry.get("package") and entry.get("package_path") else None
     return {"name": MASKED_NAME if hidden else Path(relpath).name, "kind": kind, "bytes": entry.get("bytes") or 0,
             "size": file_size(entry.get("bytes") or 0), "folder": MASKED_NAME if hidden else (folder if folder != "." else "根目录"),
-            "status": status, "note": note, "open": "" if hidden or not source else source.resolve().as_uri(),
-            "folder_uri": "" if hidden or not source else source.parent.resolve().as_uri()}
+            "status": status, "note": note, "open": "" if hidden or not source else path_uri(source),
+            "folder_uri": "" if hidden or not source else path_uri(source.parent)}
 
 
 def retained_media(build: Path, entries: dict[str, dict[str, Any]], forbidden: re.Pattern[str] | None = None) -> list[dict[str, Any]]:

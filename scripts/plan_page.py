@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import load_json, load_jsonl, remaining_ocr_pages, safe_name, write_json, write_text
+from kb_common import load_json, load_jsonl, path_uri, remaining_ocr_pages, safe_name, write_json, write_text
 from samples import (
     FILE_METHODS_HEADING,
     GRADES,
@@ -180,7 +180,7 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     for entry in list(todo) + list(done.values()):
         if entry["item_id"] in by_item:
             checks[doc_type(by_item[entry["item_id"]])] += 1
-    maps = sorted({(Path(r["package"]) / NAME_MAP_PAGE).resolve().as_uri() for r in routes.values() if r.get("package")})
+    maps = sorted({path_uri(Path(r["package"]) / NAME_MAP_PAGE) for r in routes.values() if r.get("package")})
     lines = ["# 处理计划与样例", "", MARKER_PLAN,
              "每类文件先只提取一份样例给人看，确认后再批量提取同类。还没确认的类，这次只提取了样例那一份，其余的在“要做的事”里写着“确认后提取”。", "",
              "- 怎么确认：在下表“确认状态”一列写“已确认”，或者写“要改：……”说明怎么改；也可以直接告诉 AI。下次建库会读回来，不会被覆盖。",

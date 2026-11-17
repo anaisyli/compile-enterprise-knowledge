@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from kb_common import MANIFEST_NAME, load_json, write_json
+from kb_common import MANIFEST_NAME, load_json, path_uri, write_json
 from publish_vault import ARCHIVE, PROJECT_INFO, RECEIPT, normalized_hash
 from render_kb import ALIAS_FOLDER, NAME_MAP_CSV
 
 STATE_RUN_INFO = "05_数据与审核/70_构建状态/run-info.json"
-FILE_LINK = re.compile(r"file:///[^)\s\]>|]+")
+FILE_LINK = re.compile(r"file://[^)\s\]>|]+")
 
 
 def plain(path: str) -> str:
@@ -52,9 +52,11 @@ def pair_packages(old: list[str], new: list[Path]) -> dict[str, Path]:
 
 
 def link_path(link: str) -> str:
-    """The local path a file: link points at, the same on every system: file:///C:/a gives C:/a
-    (Windows), file:///Users/a gives /Users/a (Mac, Linux): the leading slash belongs to the path there."""
-    path = unquote(urlparse(link).path)
+    """The local or UNC path a file: link points at."""
+    parsed = urlparse(link)
+    path = unquote(parsed.path)
+    if parsed.netloc:
+        return f"//{parsed.netloc}{path}"
     return path[1:] if re.match(r"^/[A-Za-z]:", path) else path
 
 
@@ -65,7 +67,7 @@ def moved_link(link: str, pairs: dict[str, Path]) -> str | None:
         root = plain(old)
         if plain(local) == root or plain(local).startswith(root + "/"):
             rest = local.replace("\\", "/")[len(root):].lstrip("/")
-            return (new / rest).resolve().as_uri() if rest else new.resolve().as_uri()
+            return path_uri(new / rest) if rest else path_uri(new)
     return None
 
 

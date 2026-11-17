@@ -28,8 +28,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import (BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, run_lock,
-                       safe_name, site_view_enabled, write_json, write_jsonl, write_text)
+from kb_common import (BUILD_DIRECTORY, SKILL_VERSION, file_extension, frontmatter, load_json, load_jsonl, path_uri,
+                       run_lock, safe_name, site_view_enabled, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from kb_state import STATE, config_base, json_object, merge_settings
 from products import NOT_A_NAME, OTHER_PICTURES, PICTURE_KINDS, PRODUCT_ROOT, VIDEO, parts_of, picture_kind, squeeze
@@ -244,7 +244,7 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
                "kind": picture_kind(entry["file"], "image")}, relpath, doc.get("original_name") or doc["title"])
     for entry in media:
         relpath = entry["relpath"]
-        folder_uri = (Path(entry["package"]) / entry["package_path"]).parent.resolve().as_uri()
+        folder_uri = path_uri((Path(entry["package"]) / entry["package_path"]).parent)
         hidden = risky(relpath, forbidden)
         copied = (entry.get("id") or picture_of.get(entry["item_id"])) in pictures
         record = None if copied else retained_record(entry, forbidden)
@@ -259,7 +259,7 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
             picture = pictures[entry.get("id") or picture_of[entry["item_id"]]]
             place({"what": "pictures", "file": picture["file"], "alt": picture["alt"], "use": picture["use"],
                    "kind": entry.get("picture_kind") or picture_kind(relpath, "image"), "folder_uri": "" if hidden else folder_uri,
-                   "drawing_original": (Path(entry["package"]) / entry["package_path"]).resolve().as_uri()
+                   "drawing_original": path_uri(Path(entry["package"]) / entry["package_path"])
                        if entry.get("drawing") and not hidden else "",
                    "original_name": Path(relpath).name if entry.get("drawing") and not hidden else ""}, relpath)
         else:
@@ -274,7 +274,7 @@ def write_site(build: Path, config: dict[str, Any], routes: dict[str, Any], docs
         # A file with no path of its own (say, inside an archive) has no folder to open.
         source = Path(route["package"]) / route["path"] if route.get("package") and route.get("path") else None
         place({"what": "waiting", "name": MASKED if hidden else (route.get("display_name") or Path(relpath).name),
-               "reason": reason, "open": "" if hidden or not source else source.parent.resolve().as_uri()}, relpath)
+               "reason": reason, "open": "" if hidden or not source else path_uri(source.parent)}, relpath)
 
     home = load_json(build / HOME_STATE) if (build / HOME_STATE).is_file() else {}
     root = build / "vault" / ROOT
@@ -587,7 +587,7 @@ def update(out: Path, vault: Path) -> dict[str, Any]:
         if route.get("package") and route.get("path"):
             alias = Path(route["package"]) / ALIAS_FOLDER / f"{Path(docs[doc_id]['file_name']).stem}{Path(route['path']).suffix}"
             if alias.is_file():
-                originals[doc_id] = alias.resolve().as_uri()
+                originals[doc_id] = path_uri(alias)
     site = build / "vault" / ROOT
     if site.exists():
         import shutil

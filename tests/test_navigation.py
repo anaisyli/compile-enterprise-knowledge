@@ -252,6 +252,16 @@ class NavigationTests(unittest.TestCase):
         blocks = document_blocks("DOC-5", "item5", units)
         self.assertEqual([b["group"] for b in blocks], ["一、产品特点", "一、产品特点", "一、产品特点", "一、产品特点", "二、产品性能描述"])
 
+    def test_path_uri_and_relink_handle_unc_shares_for_obsidian(self):
+        from kb_common import path_uri
+        from kb_relink import FILE_LINK, link_path
+        unc = Path("//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
+        uri = path_uri(unc)
+        self.assertTrue(uri.startswith("file:////100.115.130.127/"), uri)
+        self.assertIsNotNone(FILE_LINK.fullmatch(uri))
+        self.assertEqual(link_path(uri), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
+        self.assertEqual(link_path("file://100.115.130.127/onlytest1/SEO-Runs/test.pdf"), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
+
 
 if __name__ == "__main__":
     unittest.main()

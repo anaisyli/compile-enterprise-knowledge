@@ -40,6 +40,7 @@ from kb_common import (
     load_json,
     load_jsonl,
     normalize_space,
+    path_uri,
     remaining_ocr_pages,
     run_lock,
     safe_name,
@@ -643,13 +644,13 @@ def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str
     alias = Path(route["package"]) / ALIAS_FOLDER / f"{stem}{source.suffix}"
     try:
         if read_only:
-            return alias.resolve().as_uri() if alias.exists() and alias.samefile(source) else ""
+            return path_uri(alias) if alias.exists() and alias.samefile(source) else ""
         if alias.exists() and not alias.samefile(source):
             alias.unlink()  # The name now belongs to another file, or the original was replaced.
         if not alias.exists():
             alias.parent.mkdir(parents=True, exist_ok=True)
             os.link(source, alias)
-        return alias.resolve().as_uri()
+        return path_uri(alias)
     except OSError:
         return ""
 
