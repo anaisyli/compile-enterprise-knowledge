@@ -271,6 +271,21 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(link_path(uri), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
         self.assertEqual(link_path("file://100.115.130.127/onlytest1/SEO-Runs/test.pdf"), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
 
+    def test_html_table_expands_colspan_and_rowspan_into_every_covered_cell(self):
+        from mineru_ocr import html_table
+        table_html = (
+            "<table>"
+            "<tr><th rowspan='2'>DN</th><th colspan='2'>ISO5211</th><th colspan='2'>PN10</th></tr>"
+            "<tr><th>Top Flange</th><th>F</th><th>D</th><th>K</th></tr>"
+            "<tr><td>50</td><td>F05</td><td>50</td><td>165</td><td>125</td></tr>"
+            "</table>"
+        )
+        md = html_table(table_html)
+        lines = md.splitlines()
+        self.assertEqual(lines[0], "| DN | ISO5211 | ISO5211 | PN10 | PN10 |")
+        self.assertEqual(lines[2], "| DN | Top Flange | F | D | K |")
+        self.assertEqual(lines[3], "| 50 | F05 | 50 | 165 | 125 |")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import html
 from datetime import date
+from html.parser import HTMLParser
 import json
 import re
 import shutil
@@ -91,13 +92,68 @@ def approved(config: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+class _HtmlTableParser(HTMLParser):
+    """Parse an HTML table into a 2D grid, expanding colspan and rowspan into every covered cell."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.grid: dict[tuple[int, int], str] = {}
+        self.row = -1
+        self.col = 0
+        self.max_col = 0
+        self._in_cell = False
+        self._cell_parts: list[str] = []
+        self._colspan = 1
+        self._rowspan = 1
+
+    def _span(self, value: str | None) -> int:
+        return max(1, int(value)) if value and value.strip().isdigit() else 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.casefold()
+        if name == "tr":
+            self.row += 1
+            self.col = 0
+        elif name in {"td", "th"} and self.row >= 0:
+            while (self.row, self.col) in self.grid:
+                self.col += 1
+            attr_map = {k.casefold(): v for k, v in attrs}
+            self._colspan = self._span(attr_map.get("colspan"))
+            self._rowspan = self._span(attr_map.get("rowspan"))
+            self._cell_parts = []
+            self._in_cell = True
+        elif name == "br" and self._in_cell:
+            self._cell_parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.casefold()
+        if name in {"td", "th"} and self._in_cell:
+            text = " ".join("".join(self._cell_parts).split())
+            for dr in range(self._rowspan):
+                for dc in range(self._colspan):
+                    self.grid[(self.row + dr, self.col + dc)] = text
+            self.col += self._colspan
+            self.max_col = max(self.max_col, self.col)
+            self._in_cell = False
+
+
 def html_table(body: str) -> str:
-    """MinerU returns tables as HTML; keep them as tables, cell by cell, words unchanged."""
+    """MinerU/Reducto return tables as HTML; expand spans into every covered cell so columns align."""
+    parser = _HtmlTableParser()
+    parser.feed(body)
+    parser.close()
+    if parser.row < 0 or parser.max_col == 0:
+        return re.sub(r"<[^>]+>", " ", body)
+    max_row = max(r for r, _ in parser.grid)
     rows = []
-    for row in re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", body):
-        cells = [html.unescape(re.sub(r"<[^>]+>", " ", cell)) for cell in re.findall(r"(?is)<t[dh][^>]*>(.*?)</t[dh]>", row)]
-        if any(cell.strip() for cell in cells):
-            rows.append(cells)
+    for r in range(max_row + 1):
+        row = [parser.grid.get((r, c), "") for c in range(parser.max_col)]
+        if any(cell.strip() for cell in row):
+            rows.append(row)
     if not rows:
         return re.sub(r"<[^>]+>", " ", body)
     return markdown_table(rows)
