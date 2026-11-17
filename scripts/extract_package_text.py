@@ -157,9 +157,22 @@ def slide_order(path: Path) -> list[int]:
         return order
 
 
+def sibling_pdf_for(path: Path) -> Path | None:
+    """A sibling PDF exported from the same deck (same folder or sibling PDF/ folder)."""
+    stem = path.stem.casefold()
+    for folder in (path.parent, path.parent.parent / "PDF", path.parent.parent / "pdf"):
+        if not folder.is_dir():
+            continue
+        for candidate in folder.iterdir():
+            if candidate.is_file() and candidate.suffix.casefold() == ".pdf" and candidate.stem.casefold() == stem:
+                return candidate
+    return None
+
+
 def slide_pictures(path: Path, cache: Path, key: str, timeout: int) -> dict[str, Any]:
     """A picture of every slide, like a PDF page, so the text can be checked against the slide.
-    The deck goes through LibreOffice to a PDF; without it the text is still read in full."""
+    Prefer a sibling exported PDF when its page count matches (avoids LibreOffice font-wrap drift);
+    otherwise convert through LibreOffice."""
     order = slide_order(path)
     if not order:
         return {"page_images_skipped": "读不出幻灯片顺序"}
@@ -169,10 +182,19 @@ def slide_pictures(path: Path, cache: Path, key: str, timeout: int) -> dict[str,
         return {"page_images_skipped": "本机没装 PyMuPDF"}
     if len(order) > MAX_THUMBNAIL_PAGES:
         return {"page_images_skipped": f"超过 {MAX_THUMBNAIL_PAGES} 张幻灯片"}
-    try:
-        pdf = convert_office(path, "pdf", cache, f"{key}-slides", timeout)
-    except (LookupError, ConversionError, OSError) as exc:
-        return {"page_images_skipped": "需要 LibreOffice" if isinstance(exc, LookupError) else f"转 PDF 失败：{str(exc)[:80]}"}
+    pdf = sibling_pdf_for(path)
+    if pdf is not None:
+        try:
+            with pymupdf.open(long_path(pdf)) as sibling_doc:
+                if sibling_doc.page_count != len(order):
+                    pdf = None
+        except Exception:
+            pdf = None
+    if pdf is None:
+        try:
+            pdf = convert_office(path, "pdf", cache, f"{key}-slides", timeout)
+        except (LookupError, ConversionError, OSError) as exc:
+            return {"page_images_skipped": "需要 LibreOffice" if isinstance(exc, LookupError) else f"转 PDF 失败：{str(exc)[:80]}"}
     assets = cache.parent / ASSETS_DIRECTORY
     images: dict[str, str] = {}
     with pymupdf.open(long_path(pdf)) as document:

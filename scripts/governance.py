@@ -11,6 +11,7 @@ reruns, and what a person writes into a ledger survives the next build.
 from __future__ import annotations
 
 import csv
+import hashlib
 import re
 from collections import Counter, defaultdict
 from datetime import date
@@ -519,8 +520,23 @@ def render_ledger(kind: str, title: str, purpose: str, project_id: str, today: s
         lines.append("| 无 |" + " |" * (len(columns) - 1))
     lines.extend(["", "## 事项详情", ""])
     for record in sorted(records, key=lambda r: r["id"]):
-        lines.extend([f"### {record['id']}｜{record['row'][0]}", "", *record["details"], ""])
+        fp = hashlib.sha256("\n".join(record["details"]).encode("utf-8")).hexdigest()[:12]
+        lines.extend([f"### {record['id']}｜{record['row'][0]}", f"<!-- fingerprint: {fp} -->", "", *record["details"], ""])
     return "\n".join(lines) + "\n"
+
+
+def parse_fingerprints(text: str) -> dict[str, str]:
+    """Extract per-entry detail fingerprints from <!-- fingerprint: ... --> comments."""
+    fingerprints: dict[str, str] = {}
+    current = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = re.match(r"^###\s+([A-Z]-\d{3}-[A-Z]{3}-\d{3})｜", stripped)
+        if match:
+            current = match.group(1)
+        elif current and (fp_match := re.fullmatch(r"<!--\s*fingerprint:\s*([a-f0-9]+)\s*-->", stripped)):
+            fingerprints[current] = fp_match.group(1)
+    return fingerprints
 
 
 def parse_ledger(text: str) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
@@ -570,6 +586,7 @@ def merge_ledger(old_text: str, new_text: str) -> str:
     """
     old_header, old_rows, old_notes = parse_ledger(old_text)
     new_header, new_rows, _ = parse_ledger(new_text)
+    old_fps, new_fps = parse_fingerprints(old_text), parse_fingerprints(new_text)
     if not new_header or not old_header:
         return new_text
 
@@ -588,7 +605,12 @@ def merge_ledger(old_text: str, new_text: str) -> str:
             old_stage = old_rows[record_id][old_header.index("当前阶段")] if "当前阶段" in old_header else ""
             old_count = finding_count(old_rows[record_id], old_header)
             new_count = finding_count(new_rows[record_id], new_header)
-            reopened = old_stage in CLOSED_STAGES and old_count is not None and new_count is not None and new_count > old_count
+            old_fp, new_fp = old_fps.get(record_id), new_fps.get(record_id)
+            reopened = old_stage in CLOSED_STAGES and (
+                (old_fp and new_fp and old_fp != new_fp)
+                or (old_count is not None and new_count is not None and new_count > old_count)
+                or (not old_fp and bool(new_fp) and "个没核实过的词" in new_rows[record_id][0] and (new_count or 0) > 10)
+            )
             if reopened and "当前阶段" in new_header:
                 stage_idx = new_header.index("当前阶段")
                 cells[stage_idx] = f"{cells[stage_idx]}（有新增）"

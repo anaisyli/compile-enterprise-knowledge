@@ -99,6 +99,12 @@ GENERIC_WORDS = set(
     single format foreign linking updating suppliers clients product products details design designs
     tech pack hoodie shirt fishing page xlsx xls csv pdf docx doc pptx ppt png jpg jpeg zip rar
     mail web http https www phone whatsapp wechat
+    devices device stable capacity including range security terminal assembly compatible release
+    status dissipation distribution environments fully latest may other packaging plate thank will
+    clear maintain provided reference structure analytics button charging designed drawing
+    instructions name plug signal solution tools using working active advertising cases comply
+    data equipped expansion height reliable soft apps catalogue leading brilliant innovative
+    provider zone zoning zoom you're
     """.split()
 )
 SKIP_TERM = re.compile(r"^[\d\s.,:/\-+#()%]+$")

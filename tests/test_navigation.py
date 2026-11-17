@@ -96,6 +96,10 @@ class NavigationTests(unittest.TestCase):
         legacy_closed = current.replace("知识库专员处理中", "已核实，可结案")
         self.assertIn("已核实，可结案", CLOSED_STAGES)
         self.assertIn("已核实，可结案", merge_ledger(legacy_closed, current))
+        # Same count, different detail fingerprint -> reopens automatically.
+        changed = render_ledger("MAT", "台账", "用途", "P-999", "2026-11-12", [
+            {**record, "details": ["- 新出现的异常项"]}])
+        self.assertIn("知识库专员处理中（有新增）", merge_ledger(closed, changed))
 
     def test_obsidian_short_table_alignment_is_only_formatting(self):
         with tempfile.TemporaryDirectory() as folder:
