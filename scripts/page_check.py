@@ -58,6 +58,10 @@ MIN_PICTURE_BYTES = 15_000
 # Vector paths on a page without photos above which it is likely a technical drawing (dimension sheet).
 DRAWING_PATHS = 150
 GENERIC_CODE = re.compile(r"\b[A-Z]{2,5}[\s-]?[A-Z]?-?\d{2,5}\b")
+NON_MODEL_SPEC_CODE = re.compile(
+    r"^(?:IP\d{2,3}|AC\d+|DC\d+|SMD\d+|COB\d+|USB\d+|HDMI\d+|RGB\d*|LED\d*|DDR\d+|RAM\d*|ROM\d*|BT\d+|OS\d*)$",
+    re.I,
+)
 STRUCTURES = {"表格", "流程图", "时间轴", "地图", "图表"}
 LIST_MARK = re.compile(r"^\s*(?:\d+[.、)）]|[-*•])\s*")
 TABLE_RULE = re.compile(r"\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{0,}:?\s*")
@@ -167,7 +171,10 @@ def ocr_first_reasons(page: Any, read: str, codes: re.Pattern[str] | None = None
     if pictures and len(read) < FEW_WORDS:
         reasons.append("有图、读出的字少")
     has_table = "| --- |" in read
-    has_code = bool(codes and codes.search(read))
+    has_code = bool(codes and any(
+        not NON_MODEL_SPEC_CODE.fullmatch(re.sub(r"[\s-]+", "", match.group(0)))
+        for match in codes.finditer(read)
+    ))
     if has_table and not has_code:
         reasons.append("有表格但未识别出型号，核对属于哪个型号")
     elif pictures and len(read) >= 40 and not has_code:

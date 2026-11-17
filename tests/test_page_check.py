@@ -389,6 +389,16 @@ class PageCheckTests(Base):
         self.assertEqual(run("reducto_ocr.py", "run", *args).returncode, 2)
         self.assertFalse((self.build / "reducto-units").exists())
 
+    def test_spec_codes_like_ip31_and_smd1010_do_not_hide_missing_model_check(self) -> None:
+        import page_check
+        import pymupdf
+        document = pymupdf.open()
+        page = document.new_page()
+        read = "| Specification | | |\n| --- | --- | --- |\n| LED Type | SMD1010/GOB | |\n| Protection | IP31 | AC90-264V |"
+        reasons = page_check.ocr_first_reasons(page, read, page_check.GENERIC_CODE)
+        document.close()
+        self.assertIn("有表格但未识别出型号，核对属于哪个型号", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -203,7 +203,44 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
     parts = [frontmatter(fields), "", f"# {doc['title']}", "", *card]
     current, table_columns, show_images, pending_marked, previous = None, [], False, set(), ""
     row_notes: dict[str, list[str]] = {}
+    deferred_table_notes: list[str] = []
+    emitted_platform_notes: set[str] = set()
     figure_groups: set[str] = set()
+    table_sep_re = re.compile(r"^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
+
+    def ensure_table_spacing(text: str) -> str:
+        lines = text.splitlines()
+        out: list[str] = []
+        for idx, line in enumerate(lines):
+            stripped = line.lstrip()
+            if (
+                stripped.startswith("|")
+                and "|" in stripped[1:]
+                and idx + 1 < len(lines)
+                and table_sep_re.match(lines[idx + 1])
+                and out
+                and out[-1].strip()
+                and not out[-1].lstrip().startswith(("|", ">"))
+            ):
+                out.append("")
+            out.append(line)
+        return "\n".join(out)
+
+    def ends_with_table() -> bool:
+        for item in reversed(parts):
+            if item.strip():
+                last_line = item.splitlines()[-1].lstrip()
+                return last_line.startswith("|") and "|" in last_line[1:]
+        return False
+
+    def is_headless_table(text: str) -> bool:
+        nonempty = [line for line in text.splitlines() if line.strip()]
+        if not nonempty:
+            return False
+        first = nonempty[0].lstrip()
+        if not (first.startswith("|") and "|" in first[1:]):
+            return False
+        return len(nonempty) < 2 or not table_sep_re.match(nonempty[1])
 
     def flush_row_notes() -> None:
         # A table cell has no room for a sentence: what the ⚠ in a row means is said under the table.
@@ -212,10 +249,20 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             parts.extend(f"> 第 {'、'.join(numbers)} 行：{text}" for text, numbers in row_notes.items())
             row_notes.clear()
 
+    def flush_table_notes() -> None:
+        if deferred_table_notes:
+            if parts and parts[-1] != "":
+                parts.append("")
+            for item in deferred_table_notes:
+                parts.extend([item, ""])
+            deferred_table_notes.clear()
+
     for block in blocks:
         new_group = block["group"] != current
         if new_group:
             flush_row_notes()
+            flush_table_notes()
+            emitted_platform_notes.clear()
             current = block["group"]
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
@@ -238,15 +285,32 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             cus = cus_ids.get(f"{doc['item_id']}:{'' if whole else hold}", "")
             parts.extend([f"> 🕒 待客户确认（{cus}）：{block['client_hold']}，回复前不要对外使用。", ""])
         note = flag_note(block, anm_ids)
+        platform_note = ""
         if block.get("ocr"):
             platform = {"reducto": "Reducto", "ai": "AI 看图"}.get(block.get("reader"), "MinerU")
             if platform in {"MinerU", "Reducto"}:
                 detail = ("本页采用平台识别结果；尺寸图标注及图纸模型描述按规则排除，同页正文和表格保留"
                           if any(b.get("dimension_drawing") for b in blocks if b["group"] == current)
                           else "本页正文整页使用平台识别结果，不并入同页 PDF 原生文字层")
-                parts.extend([f"> 提取平台：{platform}（{detail}）", ""])
+                platform_note = f"> 提取平台：{platform}（{detail}）"
             else:
-                parts.extend([f"> 提取平台：{platform}（与文件文字层分开保留）", ""])
+                platform_note = f"> 提取平台：{platform}（与文件文字层分开保留）"
+        defer_for_table = (
+            block["kind"] != "row"
+            and not block.get("reviewed_supplement")
+            and not block.get("dimension_drawing")
+            and not block.get("figure_description")
+            and is_headless_table(block["text"])
+            and ends_with_table()
+        )
+        if not defer_for_table:
+            flush_table_notes()
+            if platform_note:
+                parts.extend([platform_note, ""])
+                emitted_platform_notes.add(platform_note)
+        else:
+            if platform_note and platform_note not in emitted_platform_notes and platform_note not in deferred_table_notes:
+                deferred_table_notes.append(platform_note)
         if block["kind"] == "row":
             if not table_columns:
                 group_rows = [b for b in blocks if b["group"] == current]
@@ -299,13 +363,20 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             if table and not text.lstrip().startswith("|"):
                 text = as_table(text, header=not continued)  # Read before tables were kept as tables.
             if note:
-                parts.append(f"> {note}")
-                parts.append("")
+                if defer_for_table:
+                    deferred_table_notes.append(f"> {note}")
+                else:
+                    parts.append(f"> {note}")
+                    parts.append("")
             elif continued and parts and parts[-1] == "":
                 parts.pop()
-            parts.extend([merged_sheet_table(text, block.get('table_layout', {})), ""])
+            if defer_for_table and parts and parts[-1] == "":
+                parts.pop()
+            rendered_body = merged_sheet_table(text, block.get('table_layout', {}))
+            parts.extend([ensure_table_spacing(rendered_body), ""])
         previous = block["locator"]
     flush_row_notes()
+    flush_table_notes()
     return "\n".join(parts).rstrip() + "\n"
 
 

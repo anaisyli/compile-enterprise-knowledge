@@ -124,6 +124,58 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(record["status"], "已确认可用")
         self.assertIn("原位置", record["note"])
 
+    def test_sheet_blocks_keeps_sheet_name_and_fills_merged_cells_and_images(self):
+        from extract_blocks import sheet_blocks
+        text = "A1=Item no.; B1=Model no.; C1=Description\nA2=1; B2=SL55HT; C2=Android 16 4K\nA3=2; B3=SL65HT"
+        stats = {"sheets_without_header": [], "unknown_headers": [], "rows_kept": 0, "templates": {}}
+        blocks = sheet_blocks(
+            "DOC-1", "item1", "Interactive", "表 1 · Interactive", text, [],
+            {"model no.": "style", "description": "description"}, {2: ["pic1.png"]},
+            stats, [], {}, merges=["C2:C3", "D2:D3"], neutral_label="表 1",
+        )
+        self.assertEqual([b["group"] for b in blocks], ["表 1 · Interactive", "表 1 · Interactive"])
+        self.assertEqual([b["cells"]["description"] for b in blocks], ["Android 16 4K", "Android 16 4K"])
+        self.assertEqual([b["images"] for b in blocks], [["pic1.png"], ["pic1.png"]])
+
+    def test_docx_units_repeats_vertical_merges_and_keeps_grid_span(self):
+        import tempfile, zipfile
+        from extract_package_text import docx_units
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+            '<w:tbl>'
+            '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Spec</w:t></w:r></w:p></w:tc></w:tr>'
+            '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Series A</w:t></w:r></w:p></w:tc>'
+            '<w:tc><w:p><w:r><w:t>A10</w:t></w:r></w:p></w:tc></w:tr>'
+            '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+            '<w:tc><w:p><w:r><w:t>A20</w:t></w:r></w:p></w:tc></w:tr>'
+            '</w:tbl></w:body></w:document>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / "t.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("word/document.xml", xml)
+            units, _ = docx_units(docx_path)
+        self.assertIn("| Series A | A10 |", units[0]["text"])
+        self.assertIn("| Series A | A20 |", units[0]["text"])
+
+    def test_render_source_adds_blank_line_before_table_and_keeps_split_table_whole(self):
+        from render_kb import render_doc
+        doc = {"doc_id": "DOC-1", "title": "Brochure", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "item1", "source_sha256": "abc"}
+        blocks = [
+            {"block_id": "b1", "doc_id": "DOC-1", "kind": "text", "group": "第 3 页", "locator": "page 3 ocr",
+             "ocr": True, "reader": "mineru", "status": "valid", "flags": [],
+             "text": "Wide viewing angle\n| Spec | A |\n| --- | --- |\n| Pitch | P1.25 |"},
+            {"block_id": "b2", "doc_id": "DOC-1", "kind": "text", "group": "第 3 页", "locator": "page 3 ocr",
+             "ocr": True, "reader": "mineru", "status": "valid",
+             "flags": [{"type": "unverified_name", "terms": ["CCC"]}],
+             "text": "| Protection | IP31 |"},
+        ]
+        rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {})
+        self.assertIn("Wide viewing angle\n\n| Spec | A |", rendered)
+        self.assertIn("| Pitch | P1.25 |\n| Protection | IP31 |\n\n> ⚠ 含没核实的词：CCC", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
-from fetch_website import module_for as web_module, page_kind as web_kind
+from fetch_website import is_listing_page, module_for as web_module, page_kind as web_kind
 from extract_package_text import markdown_table
 from routing import (
     AUDIO_FILES,
@@ -66,7 +66,7 @@ from routing import (
     route_asset,
     video_cover,
 )
-from sheet_layout import lay_out
+from sheet_layout import CELL_REF, fill_merges, lay_out
 from office import convert_office
 from collections import Counter, defaultdict
 from kb_common import (
@@ -344,6 +344,8 @@ def sheet_blocks(
     stats: dict[str, Any],
     terms: list[dict[str, str]],
     column_overrides: dict[str, dict[str, str]],
+    merges: list[str] | None = None,
+    neutral_label: str | None = None,
 ) -> list[dict[str, Any]]:
     rows = parse_sheet_rows(text)
     found = find_header(rows, rules, sheet, header_map)
@@ -351,6 +353,29 @@ def sheet_blocks(
         stats["sheets_without_header"].append(sheet)
         return []
     header_row, roles = found
+    row_images = dict(images)
+    body_merges: list[str] = []
+    for merge in merges or []:
+        if ":" not in merge:
+            continue
+        start, end = merge.split(":", 1)
+        first, last = CELL_REF.match(start), CELL_REF.match(end)
+        if not first or not last or first.group(1) != last.group(1):
+            continue
+        top, bottom = int(first.group(2)), int(last.group(2))
+        if top > header_row and bottom > top:
+            body_merges.append(merge)
+    if body_merges:
+        fill_merges(rows, body_merges, column_number)
+        for merge in body_merges:
+            start, end = merge.split(":", 1)
+            top, bottom = int(CELL_REF.match(start).group(2)), int(CELL_REF.match(end).group(2))
+            sources = [r for r in range(top, bottom + 1) if row_images.get(r)]
+            if len(sources) == 1:
+                shared_pics = row_images[sources[0]]
+                for r in range(top, bottom + 1):
+                    if not row_images.get(r):
+                        row_images[r] = shared_pics
     headers = rows[header_row]
     signature = template_signature(headers)
     roles.update(column_overrides.get(signature, {}))
@@ -395,18 +420,21 @@ def sheet_blocks(
                 cells[role] = f"{cells[role]} / {value}" if role in cells else value
         if not ({"description", "fabric", "style"} & set(cells)):
             continue
-        # A sheet name can be a customer name, so published labels are neutral.
+        # A sheet name can be a customer name; guard_blocks.py switches to sheet_neutral if needed.
+        row_label = neutral_label or label
         blocks.append(
             {
                 "block_id": short_hash(f"{item_id}|{sheet}!{number}"),
                 "doc_id": doc_id,
                 "kind": "row",
                 "group": label,
-                "locator": f"{label} 第 {number} 行",
+                "sheet_name": sheet,
+                "sheet_neutral": row_label,
+                "locator": f"{row_label} 第 {number} 行",
                 "source_locator": f"{sheet}!{number}",
                 "text": " | ".join(cells[role] for role in ROLE_ORDER if role in cells),
                 "cells": cells,
-                "images": images.get(number, []),
+                "images": row_images.get(number, []),
                 **({"screening_hint": sorted(advised)} if advised else {}),
             }
         )
@@ -948,22 +976,28 @@ def main() -> int:
                 if match.group("state") != "visible":
                     stats.setdefault("hidden_sheets", []).append(match.group("name"))
                     continue
+                sheet_name = match.group("name")
+                sheet_neutral = f"表 {position}"
+                group_label = f"表 {position} · {sheet_name}"
                 rows = sheet_blocks(
-                    doc_id, item_id, match.group("name"), f"表 {position}", unit["text"], rules,
-                    config["header_map"], image_maps.get(item_id, {}).get(match.group("name"), {}),
+                    doc_id, item_id, sheet_name, group_label, unit["text"], rules,
+                    config["header_map"], image_maps.get(item_id, {}).get(sheet_name, {}),
                     stats, terms, column_overrides,
+                    merges=unit.get("merges", []), neutral_label=sheet_neutral,
                 )
                 if rows:
                     item_blocks.extend(rows)
                     continue
                 as_table = document_blocks(doc_id, item_id, [unit])
-                if as_table and match.group("name") in stats["sheets_without_header"]:
+                if as_table and sheet_name in stats["sheets_without_header"]:
                     # Read as the whole table it is, so nothing is lost and nothing to report.
-                    stats["sheets_without_header"].remove(match.group("name"))
+                    stats["sheets_without_header"].remove(sheet_name)
                 for block in as_table:
-                    block["group"] = f"表 {position}"
+                    block["group"] = group_label
+                    block["sheet_name"] = sheet_name
+                    block["sheet_neutral"] = sheet_neutral
                     # Screening named places to clean in this sheet: kept, with its marks shown.
-                    if any(r["sheet"] in (None, match.group("name")) for r in rules):
+                    if any(r["sheet"] in (None, sheet_name) for r in rules):
                         block["screening_hint"] = ["这张表没有产品表头，整张保留"]
                 item_blocks.extend(as_table)
             item_blocks.extend(document_blocks(doc_id, item_id, plain))
@@ -1025,9 +1059,10 @@ def main() -> int:
     for page in site_pages:
         parts = segments(page["url"])
         same = SITE_COPY.sub("", "/".join(parts)).casefold()
-        if (len(parts) == 1 and first_segments[parts[0]] >= 2) or same in seen_paths:
+        listing = bool(page.get("is_listing")) or is_listing_page(page.get("title", "")) or (len(parts) == 1 and first_segments[parts[0]] >= 2)
+        if listing or same in seen_paths:
             # A category listing repeats its products; a saved copy repeats its original.
-            reason = "website_listing" if len(parts) == 1 and first_segments[parts[0]] >= 2 else "website_duplicate"
+            reason = "website_listing" if listing else "website_duplicate"
             routes[page["page_id"]] = {"route": "skip", "reason": reason,
                                        "asset": {"display_name": page["url"], "decision": "web", "resource_type": "website",
                                                  "source_hash": page["html_sha256"]}}

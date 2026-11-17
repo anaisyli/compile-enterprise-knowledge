@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 3, ".doc": 3, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 4, ".doc": 4, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -77,9 +77,27 @@ def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
                 if text:
                     units.append({"locator": f"para {index}", "text": text})
             elif child.tag == f"{WORD}tbl":
-                rows = [["".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip() for cell in row.findall(f"{WORD}tc")]
-                        for row in child.findall(f"{WORD}tr")]
-                rows = [row for row in rows if any(row)]
+                rows: list[list[str]] = []
+                prev_row: list[str] = []
+                for tr in child.findall(f"{WORD}tr"):
+                    row_cells: list[str] = []
+                    col = 0
+                    for cell in tr.findall(f"{WORD}tc"):
+                        tc_pr = cell.find(f"{WORD}tcPr")
+                        span_node = tc_pr.find(f"{WORD}gridSpan") if tc_pr is not None else None
+                        raw_span = span_node.get(f"{WORD}val", "1") if span_node is not None else "1"
+                        span = max(1, int(raw_span)) if raw_span.isdigit() else 1
+                        vmerge = tc_pr.find(f"{WORD}vMerge") if tc_pr is not None else None
+                        text = "".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip()
+                        if vmerge is not None and vmerge.get(f"{WORD}val") != "restart" and not text and col < len(prev_row):
+                            text = prev_row[col]
+                        row_cells.append(text)
+                        for _ in range(span - 1):
+                            row_cells.append("")
+                        col += span
+                    if any(row_cells):
+                        rows.append(row_cells)
+                        prev_row = row_cells
                 if rows:
                     units.append({"locator": f"table at {index}", "text": markdown_table(rows)})
     return units, {}
