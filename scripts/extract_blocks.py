@@ -619,7 +619,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                                             "header_rows": 0 if preserve_grid else sum(r <= header_end for r in rows)},
                            **({"images": sheet_pics} if sheet_pics else {})})
             continue
-        first_line = text.splitlines()[0].strip()
+        first_line = text.splitlines()[0].strip() if text.splitlines() else ""
         if unit["locator"].startswith("para ") and is_word_heading(first_line):
             heading = first_line
         blocks.append(
@@ -643,6 +643,11 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                 **({"dimension_drawing": True, "drawing_model_confirmed": unit.get("drawing_model_confirmed", False)}
                    if unit.get("dimension_drawing") else {}),
                 **({"images": unit["images"]} if unit.get("images") else {}),
+                **({"table_layout": {"rows": list(range(1, unit["table_rows"] + 1)),
+                                     "columns": list(range(1, unit["table_cols"] + 1)),
+                                     "merges": unit["merges"],
+                                     "header_rows": 0}}
+                   if unit.get("merges") and unit.get("table_rows") and unit.get("table_cols") else {}),
             }
         )
     return blocks

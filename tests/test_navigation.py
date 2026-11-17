@@ -137,9 +137,11 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual([b["cells"]["description"] for b in blocks], ["Android 16 4K", "Android 16 4K"])
         self.assertEqual([b["images"] for b in blocks], [["pic1.png"], ["pic1.png"]])
 
-    def test_docx_units_repeats_vertical_merges_and_keeps_grid_span(self):
+    def test_docx_units_preserves_merges_and_renders_html_table(self):
         import tempfile, zipfile
+        from extract_blocks import document_blocks
         from extract_package_text import docx_units
+        from render_kb import render_doc
         xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
@@ -156,8 +158,15 @@ class NavigationTests(unittest.TestCase):
             with zipfile.ZipFile(docx_path, "w") as zf:
                 zf.writestr("word/document.xml", xml)
             units, _ = docx_units(docx_path)
-        self.assertIn("| Series A | A10 |", units[0]["text"])
-        self.assertIn("| Series A | A20 |", units[0]["text"])
+        self.assertEqual(units[0]["merges"], ["A1:B1", "A2:A3"])
+        blocks = document_blocks("DOC-W", "itemw", units)
+        blocks[0]["status"] = "valid"
+        doc = {"doc_id": "DOC-W", "title": "WordSpec", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "itemw", "source_sha256": "w1"}
+        rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {})
+        self.assertIn('<td colspan="2">Spec</td>', rendered)
+        self.assertIn('<td rowspan="2">Series A</td><td>A10</td>', rendered)
+        self.assertIn('<tr><td>A20</td></tr>', rendered)
 
     def test_render_source_adds_blank_line_before_table_and_keeps_split_table_whole(self):
         from render_kb import render_doc

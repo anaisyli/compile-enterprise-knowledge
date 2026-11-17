@@ -120,6 +120,14 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
     graded = load_triage(build).get("files", {}).get(item)
     if graded:
         parts.append("分级 " + "、".join(f"{g} {n}" for g, n in graded["counts"].items() if n))
+    text_path = build / "package-text" / f"{item}.json"
+    pkg_units = load_json(text_path).get("units", []) if text_path.is_file() else []
+    merged_tables = sum(1 for u in pkg_units if u.get("merges"))
+    plain_tables = sum(1 for u in pkg_units if not u.get("merges") and ("| --- |" in u.get("text", "") or "table" in u.get("locator", "")))
+    if merged_tables:
+        parts.append(f"含 {merged_tables} 张合并单元格/多层表头表格（已按 HTML 表格保留跨行跨列，或展开引用）")
+    elif plain_tables:
+        parts.append(f"含 {plain_tables} 张表格")
     if unread:
         parts.append(f"{len(unread)} 页没有文字层")
     if looked:
@@ -142,6 +150,10 @@ def sample_findings(build: Path, sample: dict[str, Any], done: dict[str, Any], s
         parts.append(f"MinerU 试读：{fuller} 页读出了文字层没有的内容")
     reducto_path = build / "reducto-units" / f"{item}.json"
     reducto = load_json(reducto_path) if reducto_path.is_file() else {}
+    ocr_units = (load_json(read_path).get("units", []) if read_path.is_file() else []) + reducto.get("units", [])
+    empty_header_tables = sum(1 for u in ocr_units if re.search(r"\|\s*\|\s*\|", u.get("text", "")))
+    if empty_header_tables:
+        parts.append(f"其中 {empty_header_tables} 处表格存在空表头/疑似多层表头")
     if reducto.get("pages_read"):
         conflicts = graded["counts"]["D"] if graded else 0
         parts.append(f"Reducto 试读：读了 {len(reducto['pages_read'])} 页" + (f"，{conflicts} 页和其他来源对不上（D 级）" if conflicts else ""))

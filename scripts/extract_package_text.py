@@ -67,6 +67,14 @@ TABLE_MIN_ROWS = 2
 TABLE_FILL = 0.5
 
 
+def col_letters(index: int) -> str:
+    letters = ""
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[list[dict[str, Any]], dict[str, Any]]:
     units: list[dict[str, Any]] = []
     saved_by_media: dict[str, str] = {}
@@ -115,29 +123,53 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                         unit["images"] = pics
                     units.append(unit)
             elif child.tag == f"{WORD}tbl":
-                rows: list[list[str]] = []
-                prev_row: list[str] = []
+                grid: list[list[str]] = []
+                # Track vertical merge anchors per column: col_1based -> (top_row, bottom_row, span)
+                active_v: dict[int, list[int]] = {}
+                merges: list[str] = []
                 for tr in child.findall(f"{WORD}tr"):
                     row_cells: list[str] = []
-                    col = 0
+                    col = 1
+                    row_idx = len(grid) + 1
                     for cell in tr.findall(f"{WORD}tc"):
                         tc_pr = cell.find(f"{WORD}tcPr")
                         span_node = tc_pr.find(f"{WORD}gridSpan") if tc_pr is not None else None
                         raw_span = span_node.get(f"{WORD}val", "1") if span_node is not None else "1"
                         span = max(1, int(raw_span)) if raw_span.isdigit() else 1
                         vmerge = tc_pr.find(f"{WORD}vMerge") if tc_pr is not None else None
+                        vval = vmerge.get(f"{WORD}val") if vmerge is not None else None
                         text = "".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip()
-                        if vmerge is not None and vmerge.get(f"{WORD}val") != "restart" and not text and col < len(prev_row):
-                            text = prev_row[col]
-                        row_cells.append(text)
-                        for _ in range(span - 1):
-                            row_cells.append("")
+                        if vmerge is not None and vval != "restart" and col in active_v:
+                            active_v[col][1] = row_idx
+                            row_cells.extend([""] * span)
+                        else:
+                            for c in range(col, col + span):
+                                old = active_v.pop(c, None)
+                                if old and (old[1] > old[0] or old[2] > 1):
+                                    merges.append(f"{col_letters(c)}{old[0]}:{col_letters(c + old[2] - 1)}{old[1]}")
+                            if vmerge is not None or span > 1:
+                                active_v[col] = [row_idx, row_idx, span]
+                            row_cells.append(text)
+                            row_cells.extend([""] * (span - 1))
                         col += span
-                    if any(row_cells):
-                        rows.append(row_cells)
-                        prev_row = row_cells
-                if rows:
-                    units.append({"locator": f"table at {index}", "text": markdown_table(rows)})
+                    grid.append(row_cells)
+                for c, old in sorted(active_v.items()):
+                    if old[1] > old[0] or old[2] > 1:
+                        merges.append(f"{col_letters(c)}{old[0]}:{col_letters(c + old[2] - 1)}{old[1]}")
+                nonempty_rows = [r for r in grid if any(cell.strip() for cell in r)]
+                if nonempty_rows:
+                    if merges:
+                        width = max(len(r) for r in grid)
+                        padded = [r + [""] * (width - len(r)) for r in grid]
+                        units.append({
+                            "locator": f"table at {index}",
+                            "text": markdown_table(padded),
+                            "merges": merges,
+                            "table_rows": len(padded),
+                            "table_cols": width,
+                        })
+                    else:
+                        units.append({"locator": f"table at {index}", "text": markdown_table(nonempty_rows)})
     return units, ({"page_pictures": {"1": all_saved}} if all_saved else {})
 
 
