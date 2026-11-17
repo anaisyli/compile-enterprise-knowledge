@@ -269,7 +269,13 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         reference = doc.get("role") == "reference"
         quotation = doc.get("folder", "").startswith("产品表/报价单")
         for block in blocks:
-            if block["kind"] != "row" or block["status"] == "pending_client":
+            if block["status"] == "pending_client":
+                continue
+            if block["kind"] != "row":
+                for name in block.get("images", []):
+                    add(name, doc_id, block["group"], folder=doc_folder(doc, PAGES), prefix="",
+                        label=block["group"], alt=f"{doc['title']} {block['group']}", use=INTERNAL,
+                        location=block["locator"], product=doc_product(doc_id))
                 continue
             cells = block.get("cells", {})
             clean = not block.get("flags")

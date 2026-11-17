@@ -545,7 +545,8 @@ def technical_workbook(name: str, units: list[dict[str, Any]]) -> bool:
 
 
 def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
-                    preserve_grid: bool = False) -> list[dict[str, Any]]:
+                    preserve_grid: bool = False,
+                    sheet_images: dict[str, dict[int, list[str]]] | None = None) -> list[dict[str, Any]]:
     blocks, heading = [], "正文"
     units = suppress_drawing_dimensions(units)
     if any(u["locator"].endswith(OCR_SUFFIX) or u.get("figure_description") for u in units):
@@ -567,6 +568,8 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
             # 表 n back when the name turns out to be a customer's.
             names = {"sheet_name": sheet.group("name"), "sheet_neutral": f"表 {sheets}"}
             group = f"表 {sheets} · {sheet.group('name')}"
+            pics_by_row = (sheet_images or {}).get(sheet.group("name"), {})
+            sheet_pics = list(dict.fromkeys(pic for r in sorted(pics_by_row) for pic in pics_by_row[r]))
             laid = None if preserve_grid else lay_out(rows, unit.get("merges", []))
             if laid:
                 # Lines above the real header, the table, lines below: every word kept, only arranged.
@@ -578,7 +581,8 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                         blocks.append({"block_id": short_hash(f"{item_id}|{unit['locator']}{'|' + part if part else ''}"),
                                        "doc_id": doc_id, "kind": "text", "group": group,
                                        "locator": f"{unit['locator']} {part}".strip(), "text": part_text,
-                                       "ocr": False, "ai_read": False, "ai_checked": False, **names})
+                                       "ocr": False, "ai_read": False, "ai_checked": False, **names,
+                                       **({"images": sheet_pics} if not part and sheet_pics else {})})
                 continue
             columns = sorted({c for row in rows.values() for c in row}, key=column_number)
             row_numbers = sorted(rows)
@@ -603,7 +607,8 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                            "ocr": False, "ai_read": False, "ai_checked": False,
                            "table_layout": {"rows": row_numbers, "columns": [column_number(c) for c in columns],
                                             "merges": unit.get("merges", []),
-                                            "header_rows": 0 if preserve_grid else sum(r <= header_end for r in rows)}})
+                                            "header_rows": 0 if preserve_grid else sum(r <= header_end for r in rows)},
+                           **({"images": sheet_pics} if sheet_pics else {})})
             continue
         first_line = text.splitlines()[0].strip()
         if unit["locator"].startswith("para ") and len(first_line) <= 40 and HEADING.match(first_line):
@@ -1015,7 +1020,8 @@ def main() -> int:
                            file_name=f"报价单-{asset['source_hash'][:8]}.md")
             sheet_reports[item_id] = stats
         else:
-            item_blocks = document_blocks(doc_id, item_id, units, preserve_grid=technical)
+            item_blocks = document_blocks(doc_id, item_id, units, preserve_grid=technical,
+                                          sheet_images=image_maps.get(item_id, {}))
             if asset.get("decision") == "B":
                 # Places screening wanted cleaned in a document: the guard cleans prices and customers
                 # wherever they are; what it cannot place is told to a person.

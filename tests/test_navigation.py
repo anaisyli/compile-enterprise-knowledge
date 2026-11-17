@@ -234,6 +234,12 @@ class NavigationTests(unittest.TestCase):
         rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {})
         self.assertIn("效果图：\n\n![[90_素材/产品/k1-docx-1.png|360]]", rendered)
 
+    def test_document_blocks_preserves_sheet_images_for_technical_workbooks(self):
+        from extract_blocks import document_blocks
+        units = [{"locator": "sheet T series (visible)", "text": "A1=Model; B1=SL55HT\nA2=Size; B2=55inch", "merges": []}]
+        blocks = document_blocks("DOC-4", "item4", units, preserve_grid=True, sheet_images={"T series": {2: ["t1.png"]}})
+        self.assertEqual(blocks[0]["images"], ["t1.png"])
+
 
 if __name__ == "__main__":
     unittest.main()
