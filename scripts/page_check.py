@@ -71,8 +71,11 @@ RULES = """# 看图核对规则
    没有漏的写空字符串。
 2. text_errors：提取的文字和图上不一样的地方（乱码、错字、缺字），简单写哪里不对。没有就写空字符串。
    structure 选了“尺寸图”的页，text_errors 会被忽略，不用填写。
-3. pairing：这一页有几款产品时，写清楚每个款号对应哪款（比如“左：没写款号；中：没写款号；右：ANS S-002”）。
-   原图本身看不出对应关系的，unclear 写 true。只有一款或没有产品的，pairing 写空字符串。
+3. pairing：写清楚这一页的表或描述属于哪个型号/产品：
+   - 一页有几款产品时，写清楚每个款号对应哪款（比如“左：没写款号；中：没写款号；右：ANS S-002”）。
+   - 只有一款产品但提取文字（或参数表）里没写型号时，在图上找型号写进 pairing（如“本页参数表属于：X3-SMD”），
+     并在 missing 里补出图上被漏掉的型号/系列标题；原图本身也没标明型号或看不出对应关系的，写“图上未标明型号”并把 unclear 设为 true。
+   - 纯目录、公司介绍等不涉及具体型号的页，pairing 写空字符串。
 4. structure：这一页（或这张图）主要是什么结构：表格、流程图、时间轴、地图、图表、尺寸图；都不是写空字符串。
 5. structured：structure 不为空时，把图上的字按原结构排好：
    - 表格：写成 Markdown 表，第一行是表头，每格照抄图上的字。
@@ -151,18 +154,24 @@ def native_text(units: list[dict[str, str]], unit: str, number: int) -> str:
     return "\n".join(u["text"] for u in units if native.match(u["locator"]))
 
 
-def ocr_first_reasons(page: Any, read: str) -> list[str]:
+def ocr_first_reasons(page: Any, read: str, codes: re.Pattern[str] | None = None) -> list[str]:
     """Why a page whose text came from MinerU or Reducto must be looked at against its picture.
 
     Only what a platform's text cannot show: which code goes with which of several products, words
-    printed in pictures it left out, a drawing whose callouts must not be copied, broken output.
-    Remaining ordinary pages go to the 30% random sample."""
+    printed in pictures it left out, a table or description with no recognized model/code, a drawing
+    whose callouts must not be copied, broken output. Remaining ordinary pages go to the 30% random sample."""
     pictures = content_pictures(page)
     reasons = []
     if len(pictures) >= 2:
         reasons.append(f"同页 {len(pictures)} 张图，核对款号和产品的对应")
     if pictures and len(read) < FEW_WORDS:
         reasons.append("有图、读出的字少")
+    has_table = "| --- |" in read
+    has_code = bool(codes and codes.search(read))
+    if has_table and not has_code:
+        reasons.append("有表格但未识别出型号，核对属于哪个型号")
+    elif pictures and len(read) >= 40 and not has_code:
+        reasons.append("有产品图和文字但未识别出型号，核对属于哪个型号")
     if not pictures and len(read) < FEW_WORDS * 2 and drawing_paths(page) >= DRAWING_PATHS:
         reasons.append("线条图多，可能是尺寸图")
     if ODD.search(read):
@@ -368,7 +377,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     # The platform's text is the page's text; look at the picture only where it cannot be trusted alone.
                     read = (seen["text"] if method == "reducto" and seen is not None
                             else mineru_texts.get(number, "") or (seen or {}).get("text", ""))
-                    reasons = disagree + [r for r in ocr_first_reasons(page, read) if r not in disagree]
+                    reasons = disagree + [r for r in ocr_first_reasons(page, read, codes) if r not in disagree]
                 else:
                     reasons = disagree + [r for r in found if r not in disagree]
                 if f"{item_id}|{unit} {number}" in requested:

@@ -333,6 +333,10 @@ class PageCheckTests(Base):
         picked = self.todo()
         self.assertEqual(picked[0]["grade"], "D")
         self.assertIn("文字层有 S555，MinerU 没读出", picked[0]["reasons"])
+        # A table without any model/code in OCR text is also flagged to verify which model it belongs to.
+        self.write_reading("mineru-units", "| Specification | |\n| --- | --- |\n| Pixel Pitch | P2.976 |")
+        self.pipeline()
+        self.assertIn("有表格但未识别出型号，核对属于哪个型号", self.todo()[0]["reasons"])
 
     def write_reading(self, folder: str, text: str, **extra) -> None:
         engine = {"engine": "reducto"} if folder == "reducto-units" else {}
