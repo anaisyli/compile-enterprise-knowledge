@@ -176,6 +176,64 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("Wide viewing angle\n\n| Spec | A |", rendered)
         self.assertIn("| Pitch | P1.25 |\n| Protection | IP31 |\n\n> ⚠ 含没核实的词：CCC", rendered)
 
+    def test_render_doc_emits_missing_slide_picture_and_infers_drawing_model_from_title(self):
+        from render_kb import PICTURE_FILES, render_doc
+        PICTURE_FILES["slide4.png"] = "90_素材/页面图/slide4.png"
+        doc = {"doc_id": "DOC-2", "title": "产品资料-43寸双面吊挂广告机-3568D", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "item2", "source_sha256": "def"}
+        blocks = [
+            {"block_id": "b1", "doc_id": "DOC-2", "kind": "text", "group": "第 3 张幻灯片", "locator": "slide 3",
+             "status": "valid", "flags": [], "text": "Slide 3"},
+            {"block_id": "b2", "doc_id": "DOC-2", "kind": "text", "group": "第 5 张幻灯片", "locator": "slide 5",
+             "status": "valid", "flags": [], "dimension_drawing": True, "drawing_model_confirmed": False,
+             "text": "型号待确认 的双面吊挂装配图"},
+        ]
+        rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {}, pictures={"第 4 张幻灯片": "slide4.png"})
+        self.assertIn("## 第 4 张幻灯片\n\n![[90_素材/页面图/slide4.png|360]]", rendered)
+        self.assertIn("43寸双面吊挂广告机-3568D（型号来自文件名，待核对） 的双面吊挂装配图，尺寸见原图", rendered)
+
+    def test_docx_units_extracts_inline_images_and_render_doc_embeds_them(self):
+        import tempfile, zipfile
+        from extract_package_text import docx_units
+        from render_kb import PICTURE_FILES, render_doc
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>'
+            '<w:p><w:r><w:t>效果图：</w:t></w:r></w:p>'
+            '<w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/effect.png"/>'
+            '</Relationships>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docx_path = tmp_path / "t.docx"
+            assets_dir = tmp_path / "assets"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+                zf.writestr("word/_rels/document.xml.rels", rels_xml)
+                zf.writestr("word/media/effect.png", b"\x89PNG\r\n\x1a\n" + b"0" * 6000)
+            units, facts = docx_units(docx_path, assets_dir, "k1")
+        self.assertEqual(facts["page_pictures"], {"1": ["k1-docx-1.png"]})
+        self.assertEqual(units[1]["images"], ["k1-docx-1.png"])
+        PICTURE_FILES["k1-docx-1.png"] = "90_素材/产品/k1-docx-1.png"
+        doc = {"doc_id": "DOC-3", "title": "产品资料-43寸", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "item3", "source_sha256": "ghi"}
+        blocks = [
+            {"block_id": "p1", "doc_id": "DOC-3", "kind": "text", "group": "正文", "locator": "para 1",
+             "status": "valid", "flags": [], "text": "效果图："},
+            {"block_id": "p2", "doc_id": "DOC-3", "kind": "text", "group": "正文", "locator": "para 2",
+             "status": "valid", "flags": [], "text": "", "images": ["k1-docx-1.png"]},
+        ]
+        rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {})
+        self.assertIn("效果图：\n\n![[90_素材/产品/k1-docx-1.png|360]]", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,8 +25,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from kb_common import (BUILD_DIRECTORY, load_json, load_jsonl, long_path, run_lock, safe_name, sha256_file,
-                       short_hash, write_json, write_jsonl, write_text)
+from kb_common import (BUILD_DIRECTORY, infer_model_from_title, load_json, load_jsonl, long_path, run_lock, safe_name,
+                       sha256_file, short_hash, write_json, write_jsonl, write_text)
 from guard_blocks import HARD_PATTERNS
 from legacy_migrations import repair_legacy_picture_name
 from products import clean_levels, parts_of, product_folders
@@ -294,7 +294,10 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
             if (doc_id, group) not in unsafe:
                 drawing = dimension_result(page)
                 if drawing:
-                    model = safe_name(drawing.get("drawing_model") or "型号待确认", "型号待确认")
+                    raw_model = drawing.get("drawing_model") or "型号待确认"
+                    if raw_model == "型号待确认":
+                        raw_model = infer_model_from_title(doc.get("title", "")) or "型号待确认"
+                    model = safe_name(raw_model, "型号待确认")
                     folder = drawing_folder(model, placed, match, namer.forbidden)
                     add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
                         alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True,
@@ -313,7 +316,10 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                 continue
             drawing = dimension_result(page)
             if drawing:
-                model = safe_name(drawing.get("drawing_model") or "型号待确认", "型号待确认")
+                raw_model = drawing.get("drawing_model") or "型号待确认"
+                if raw_model == "型号待确认":
+                    raw_model = infer_model_from_title(doc.get("title", "")) or "型号待确认"
+                model = safe_name(raw_model, "型号待确认")
                 folder = drawing_folder(model, placed, match, namer.forbidden)
                 drawing_names = drawing.get("drawing_picture_ids", names)
                 for name in names:

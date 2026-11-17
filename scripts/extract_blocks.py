@@ -553,7 +553,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
     sheets = 0
     for unit in units:
         text = unit["text"].replace("\r\n", "\n").strip()
-        if not text:
+        if not text and not unit.get("images"):
             continue
         sheet = SHEET_UNIT.match(unit["locator"])
         if sheet:
@@ -628,6 +628,7 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                    if unit.get("figure_description") else {}),
                 **({"dimension_drawing": True, "drawing_model_confirmed": unit.get("drawing_model_confirmed", False)}
                    if unit.get("dimension_drawing") else {}),
+                **({"images": unit["images"]} if unit.get("images") else {}),
             }
         )
     return blocks

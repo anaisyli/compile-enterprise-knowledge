@@ -545,3 +545,17 @@ def parse_frontmatter(text: str) -> dict[str, str]:
             key, value = line.split(": ", 1)
             fields[key] = value.strip().strip('"')
     return fields
+
+
+TITLE_CATEGORY_PREFIX = re.compile(r"^(?:产品资料|产品画册|规格书|说明书|参数表|图纸|产品|报价单)-")
+GENERIC_MODEL_STEMS = {"目录", "画册", "产品资料", "说明书", "规格书", "参数表", "图纸", "产品"}
+
+
+def infer_model_from_title(title: str) -> str:
+    """Fallback product/model label from a single-product document title when a drawing lacks one."""
+    stem = TITLE_CATEGORY_PREFIX.sub("", (title or "").strip()).strip()
+    if not stem or stem in GENERIC_MODEL_STEMS:
+        return ""
+    if re.search(r"[A-Za-z0-9]{2,}|\d+\s*寸", stem):
+        return stem
+    return ""

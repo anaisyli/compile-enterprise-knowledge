@@ -35,6 +35,7 @@ from kb_common import (
     SKILL_VERSION,
     TIERS,
     frontmatter,
+    infer_model_from_title,
     load_config,
     load_json,
     load_jsonl,
@@ -206,7 +207,25 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
     deferred_table_notes: list[str] = []
     emitted_platform_notes: set[str] = set()
     figure_groups: set[str] = set()
+    rendered_picture_groups: set[str] = set()
     table_sep_re = re.compile(r"^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
+    page_group_re = re.compile(r"^第 (\d+) (页|张幻灯片)$")
+
+    def emit_missing_picture_groups(limit_unit: str | None = None, limit_num: int | None = None) -> None:
+        candidates: list[tuple[int, str]] = []
+        for group_name in pictures:
+            if group_name in rendered_picture_groups:
+                continue
+            m = page_group_re.match(group_name)
+            if not m:
+                continue
+            num, unit_name = int(m.group(1)), m.group(2)
+            if limit_unit is not None and (unit_name != limit_unit or (limit_num is not None and num >= limit_num)):
+                continue
+            candidates.append((num, group_name))
+        for _, group_name in sorted(candidates):
+            rendered_picture_groups.add(group_name)
+            parts.extend(["", f"## {group_name}", "", f"![[{shown(pictures[group_name])}|{PAGE_PICTURE_WIDTH}]]", ""])
 
     def ensure_table_spacing(text: str) -> str:
         lines = text.splitlines()
@@ -263,9 +282,13 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             flush_row_notes()
             flush_table_notes()
             emitted_platform_notes.clear()
+            next_match = page_group_re.match(block["group"])
+            if next_match:
+                emit_missing_picture_groups(next_match.group(2), int(next_match.group(1)))
             current = block["group"]
             parts.extend(["", f"## {current}", ""])
             if current in pictures:
+                rendered_picture_groups.add(current)
                 parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
             for note in page_notes.get(current, []) if not any(b.get('transcription_review') for b in blocks if b['group'] == current) else []:
                 parts.extend([f"> {line}" for line in note.splitlines()] + [""])
@@ -337,7 +360,12 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             parts.extend([literal_dimensions(block["text"]), ""])
         elif block.get("dimension_drawing"):
             marker = "⚠ " if not block.get("drawing_model_confirmed") else ""
-            parts.append(f"{marker}{block['text']}，尺寸见原图")
+            drawing_text = block["text"]
+            if not block.get("drawing_model_confirmed") and drawing_text.startswith("型号待确认"):
+                inferred = infer_model_from_title(doc.get("title", ""))
+                if inferred:
+                    drawing_text = f"{inferred}（型号来自文件名，待核对）" + drawing_text.removeprefix("型号待确认")
+            parts.append(f"{marker}{drawing_text}，尺寸见原图")
         elif block.get("figure_description"):
             if current not in figure_groups:
                 figure_groups.add(current)
@@ -373,10 +401,15 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             if defer_for_table and parts and parts[-1] == "":
                 parts.pop()
             rendered_body = merged_sheet_table(text, block.get('table_layout', {}))
-            parts.extend([ensure_table_spacing(rendered_body), ""])
+            if rendered_body.strip():
+                parts.extend([ensure_table_spacing(rendered_body), ""])
+            for img_name in block.get("images", []):
+                if img_name in PICTURE_FILES and img_name != pictures.get(current):
+                    parts.extend([f"![[{shown(img_name)}|{PAGE_PICTURE_WIDTH}]]", ""])
         previous = block["locator"]
     flush_row_notes()
     flush_table_notes()
+    emit_missing_picture_groups()
     return "\n".join(parts).rstrip() + "\n"
 
 

@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 4, ".ppt": 4, ".docx": 4, ".doc": 4, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 5, ".doc": 5, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -67,15 +67,53 @@ TABLE_MIN_ROWS = 2
 TABLE_FILL = 0.5
 
 
-def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    units = []
+def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    saved_by_media: dict[str, str] = {}
+    all_saved: list[str] = []
     with zipfile.ZipFile(long_path(path)) as archive:
+        names = set(archive.namelist())
+        rels: dict[str, str] = {}
+        if assets is not None and "word/_rels/document.xml.rels" in names:
+            for rel in ET.fromstring(archive.read("word/_rels/document.xml.rels")):
+                rid, target = rel.get("Id"), (rel.get("Target") or "").lstrip("/")
+                if rid and target:
+                    media_path = target if target.startswith("word/") else f"word/{target}"
+                    if media_path in names and Path(media_path).suffix.casefold() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
+                        rels[rid] = media_path
+
+        def paragraph_images(node: ET.Element) -> list[str]:
+            if assets is None or not rels:
+                return []
+            pics: list[str] = []
+            for blip in node.iter(f"{DRAWING}blip"):
+                media_path = rels.get(blip.get(f"{RELATIONSHIP}embed", ""))
+                if not media_path:
+                    continue
+                if media_path not in saved_by_media:
+                    raw = archive.read(media_path)
+                    if len(raw) < 5_000:
+                        saved_by_media[media_path] = ""
+                        continue
+                    assets.mkdir(parents=True, exist_ok=True)
+                    out_name = f"{key}-docx-{len(all_saved) + 1}{Path(media_path).suffix.casefold()}"
+                    (assets / out_name).write_bytes(raw)
+                    saved_by_media[media_path] = out_name
+                    all_saved.append(out_name)
+                if saved_by_media[media_path] and saved_by_media[media_path] not in pics:
+                    pics.append(saved_by_media[media_path])
+            return pics
+
         body = ET.fromstring(archive.read("word/document.xml")).find(f"{WORD}body")
         for index, child in enumerate(body if body is not None else [], start=1):
             if child.tag == f"{WORD}p":
                 text = "".join(node.text or "" for node in child.iter(f"{WORD}t")).strip()
-                if text:
-                    units.append({"locator": f"para {index}", "text": text})
+                pics = paragraph_images(child)
+                if text or pics:
+                    unit: dict[str, Any] = {"locator": f"para {index}", "text": text}
+                    if pics:
+                        unit["images"] = pics
+                    units.append(unit)
             elif child.tag == f"{WORD}tbl":
                 rows: list[list[str]] = []
                 prev_row: list[str] = []
@@ -100,7 +138,7 @@ def docx_units(path: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
                         prev_row = row_cells
                 if rows:
                     units.append({"locator": f"table at {index}", "text": markdown_table(rows)})
-    return units, {}
+    return units, ({"page_pictures": {"1": all_saved}} if all_saved else {})
 
 
 def slide_boxes(root: ET.Element) -> list[dict[str, Any]]:
@@ -405,7 +443,7 @@ def read_item(path: Path, extension: str, cache: Path, key: str, timeout: int) -
     if extension in LEGACY_OFFICE:
         path, extension = convert(path, LEGACY_OFFICE[extension], cache, key, timeout), f".{LEGACY_OFFICE[extension]}"
     if extension == ".docx":
-        units, facts = docx_units(path)
+        units, facts = docx_units(path, cache.parent / ASSETS_DIRECTORY, key)
     elif extension == ".pptx":
         units, facts = pptx_units(path)
         facts.update(slide_pictures(path, cache, key, timeout))
