@@ -564,7 +564,8 @@ def infer_model_from_title(title: str) -> str:
 def path_uri(path: Path) -> str:
     """Build a file URI that Windows Obsidian can open for both local drives and UNC shares."""
     uri = path.resolve().as_uri()
-    # Python turns \\server\share into file://server/share; Obsidian strips file:// and drops \\ unless file:////.
+    # Python turns \\server\share into file://server/share; Windows Obsidian strips file:///
+    # and collapses extra forward slashes, so UNC shares need file:///%5C%5Cserver/share.
     if uri.startswith("file://") and not uri.startswith("file:///"):
-        return "file:////" + uri[len("file://"):]
+        return "file:///%5C%5C" + uri[len("file://"):]
     return uri

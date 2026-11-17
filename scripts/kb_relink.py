@@ -57,6 +57,8 @@ def link_path(link: str) -> str:
     path = unquote(parsed.path)
     if parsed.netloc:
         return f"//{parsed.netloc}{path}"
+    if path.startswith("/\\\\"):
+        return "//" + path[3:].replace("\\", "/")
     return path[1:] if re.match(r"^/[A-Za-z]:", path) else path
 
 

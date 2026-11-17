@@ -266,7 +266,7 @@ class NavigationTests(unittest.TestCase):
         from kb_relink import FILE_LINK, link_path
         unc = Path("//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
         uri = path_uri(unc)
-        self.assertTrue(uri.startswith("file:////100.115.130.127/"), uri)
+        self.assertTrue(uri.startswith("file:///%5C%5C100.115.130.127/"), uri)
         self.assertIsNotNone(FILE_LINK.fullmatch(uri))
         self.assertEqual(link_path(uri), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
         self.assertEqual(link_path("file://100.115.130.127/onlytest1/SEO-Runs/test.pdf"), "//100.115.130.127/onlytest1/SEO-Runs/test.pdf")
