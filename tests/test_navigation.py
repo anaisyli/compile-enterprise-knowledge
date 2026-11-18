@@ -360,7 +360,7 @@ class NavigationTests(unittest.TestCase):
         notes = {"第 3 页": ["看图整理：\nTechnical Data\n| Technical | Data |\n| --- | --- |\n| Size | DN50 |"]}
         rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {}, page_notes=notes, removed_groups={"第 3 页"})
         self.assertIn("本页因清理了敏感内容，不附未脱敏的整页原图", rendered)
-        self.assertIn("> Technical Data\n>\n> | Technical | Data |", rendered)
+        self.assertIn("> 看图整理：\n\nTechnical Data\n\n| Technical | Data |", rendered)
         self.assertIn("| Seat test | 1.76 Mpa |\n\n| NO. | Name of parts | Material |\n| --- | --- | --- |", rendered)
         self.assertIn("| 1 | Body | GG25 |\n\n| DN | D | D1 | L |\n| --- | --- | --- | --- |", rendered)
 
