@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 7, ".doc": 7, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 8, ".doc": 8, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -128,10 +128,21 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                     pics.append(saved_by_media[media_path])
             return pics
 
+        def word_text(node: ET.Element, *, joiner: str = "\n\n") -> str:
+            parts: list[str] = []
+            for elem in node.iter():
+                if elem.tag == f"{WORD}t" and elem.text:
+                    parts.append(elem.text)
+                elif elem.tag in (f"{WORD}br", f"{WORD}cr"):
+                    parts.append("\n")
+                elif elem.tag == f"{WORD}tab":
+                    parts.append(" ")
+            return joiner.join(line.strip() for line in "".join(parts).splitlines() if line.strip())
+
         body = ET.fromstring(archive.read("word/document.xml")).find(f"{WORD}body")
         for index, child in enumerate(body if body is not None else [], start=1):
             if child.tag == f"{WORD}p":
-                text = "".join(node.text or "" for node in child.iter(f"{WORD}t")).strip()
+                text = word_text(child, joiner="\n\n")
                 pics = paragraph_images(child)
                 if text or pics:
                     p_pr = child.find(f"{WORD}pPr")
@@ -169,7 +180,7 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                         span = max(1, int(raw_span)) if raw_span.isdigit() else 1
                         vmerge = tc_pr.find(f"{WORD}vMerge") if tc_pr is not None else None
                         vval = vmerge.get(f"{WORD}val") if vmerge is not None else None
-                        text = "".join(node.text or "" for node in cell.iter(f"{WORD}t")).strip()
+                        text = word_text(cell, joiner=" ")
                         if vmerge is not None and vval != "restart" and col in active_v:
                             active_v[col][1] = row_idx
                             row_cells.extend([""] * span)

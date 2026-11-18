@@ -478,6 +478,23 @@ class NavigationTests(unittest.TestCase):
             self.assertIn("| SIZEDN(MM) | PRESSURE MPA | PRESSURE MPA | PRESSURE MPA | PRESSURE MPA | ANSI | ANSI |", upgraded["units"][0]["text"])
             self.assertIn("| SIZEDN(MM) | PN6 | PN10 | PN16 | PN25 | 150LB | 300LB |", upgraded["units"][0]["text"])
 
+    def test_docx_units_preserves_soft_line_breaks_as_paragraph_breaks(self):
+        import tempfile, zipfile
+        from extract_package_text import docx_units
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body>'
+            '<w:p><w:r><w:t>1. First section</w:t><w:br/><w:t>Body line one.</w:t><w:br/><w:br/><w:t>1.1 Subsection</w:t></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / "softbreaks.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+            units, _ = docx_units(docx_path)
+        self.assertEqual(units[0]["text"], "1. First section\n\nBody line one.\n\n1.1 Subsection")
+
 
 if __name__ == "__main__":
     unittest.main()
