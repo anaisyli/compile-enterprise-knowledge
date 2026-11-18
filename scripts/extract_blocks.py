@@ -114,7 +114,7 @@ LOCATOR = re.compile(
     r")"
 )
 SHEET_UNIT = re.compile(r"^sheet (?P<name>.+) \((?P<state>[^)]+)\)$")
-HEADING = re.compile(r"^(?:第[一二三四五六七八九十\d]+[章节部分]|[一二三四五六七八九十]+[、.]|\d+(?:\.\d+)*[、.\s])")
+HEADING = re.compile(r"^(?:第[一二三四五六七八九十\d]+[章节部分]|[一二三四五六七八九十]+[、.]|\d+(?:\.\d+)*[、.])")
 SENTENCE_PUNCT = re.compile(r"[，。！？；]")
 
 
@@ -620,8 +620,9 @@ def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                            **({"images": sheet_pics} if sheet_pics else {})})
             continue
         first_line = text.splitlines()[0].strip() if text.splitlines() else ""
-        if unit["locator"].startswith("para ") and is_word_heading(first_line):
-            heading = first_line
+        if unit["locator"].startswith("para ") and not unit.get("subheading") and not unit.get("list_item"):
+            if unit.get("heading") or is_word_heading(first_line):
+                heading = first_line
         blocks.append(
             {
                 "block_id": short_hash(f"{item_id}|{unit['locator']}"),

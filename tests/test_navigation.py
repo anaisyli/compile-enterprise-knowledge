@@ -364,6 +364,50 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("| Seat test | 1.76 Mpa |\n\n| NO. | Name of parts | Material |\n| --- | --- | --- |", rendered)
         self.assertIn("| 1 | Body | GG25 |\n\n| DN | D | D1 | L |\n| --- | --- | --- | --- |", rendered)
 
+    def test_docx_units_respects_word_styles_for_headings_bullets_and_small_diagrams(self):
+        import tempfile, zipfile
+        from extract_blocks import document_blocks
+        from extract_package_text import docx_units
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>'
+            '<w:p><w:pPr><w:pStyle w:val="3"/></w:pPr><w:r><w:t>4. Company History and Global Expansion Timeline</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="4"/></w:pPr><w:r><w:t>2009 - YIFA Founded in Luoyang</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="16"/></w:pPr><w:r><w:t>14 CNC machines</w:t></w:r></w:p>'
+            '<w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        styles_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:style w:styleId="3"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>'
+            '<w:style w:styleId="4"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>'
+            '<w:style w:styleId="16"><w:name w:val="List Bullet"/><w:pPr><w:numPr/></w:pPr></w:style>'
+            '</w:styles>'
+        )
+        rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/diag.jpeg"/>'
+            '</Relationships>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docx_path = tmp_path / "yifa.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+                zf.writestr("word/styles.xml", styles_xml)
+                zf.writestr("word/_rels/document.xml.rels", rels_xml)
+                zf.writestr("word/media/diag.jpeg", b"\xff\xd8\xff\xe0" + b"0" * 3400)
+            units, facts = docx_units(docx_path, tmp_path / "assets", "k2")
+        self.assertEqual(len(facts["page_pictures"]["1"]), 1)
+        blocks = document_blocks("DOC-Y", "itemy", units)
+        self.assertEqual([b["group"] for b in blocks], ["4. Company History and Global Expansion Timeline"] * 4)
+        self.assertEqual(blocks[1]["text"], "### 2009 - YIFA Founded in Luoyang")
+        self.assertEqual(blocks[2]["text"], "- 14 CNC machines")
+
 
 if __name__ == "__main__":
     unittest.main()

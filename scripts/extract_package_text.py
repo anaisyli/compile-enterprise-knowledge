@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 6, ".doc": 6, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 7, ".doc": 7, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -81,6 +81,21 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
     all_saved: list[str] = []
     with zipfile.ZipFile(long_path(path)) as archive:
         names = set(archive.namelist())
+        heading_levels: dict[str, int] = {}
+        bullet_styles: set[str] = set()
+        if "word/styles.xml" in names:
+            for st in ET.fromstring(archive.read("word/styles.xml")).findall(f"{WORD}style"):
+                sid = st.get(f"{WORD}styleId")
+                if not sid:
+                    continue
+                st_name = (st.find(f"{WORD}name").get(f"{WORD}val", "") if st.find(f"{WORD}name") is not None else "").casefold()
+                ol = st.find(f".//{WORD}outlineLvl")
+                if ol is not None and (ol.get(f"{WORD}val") or "").isdigit():
+                    heading_levels[sid] = int(ol.get(f"{WORD}val"))
+                elif st_name.startswith("heading ") and st_name.split()[-1].isdigit():
+                    heading_levels[sid] = int(st_name.split()[-1]) - 1
+                if "list" in st_name or "bullet" in st_name or st.find(f".//{WORD}numPr") is not None:
+                    bullet_styles.add(sid)
         rels: dict[str, str] = {}
         if assets is not None and "word/_rels/document.xml.rels" in names:
             for rel in ET.fromstring(archive.read("word/_rels/document.xml.rels")):
@@ -100,7 +115,7 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                     continue
                 if media_path not in saved_by_media:
                     raw = archive.read(media_path)
-                    if len(raw) < 5_000:
+                    if len(raw) < 500:
                         saved_by_media[media_path] = ""
                         continue
                     assets.mkdir(parents=True, exist_ok=True)
@@ -119,7 +134,22 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                 text = "".join(node.text or "" for node in child.iter(f"{WORD}t")).strip()
                 pics = paragraph_images(child)
                 if text or pics:
+                    p_pr = child.find(f"{WORD}pPr")
+                    p_style = p_pr.find(f"{WORD}pStyle") if p_pr is not None else None
+                    sid = p_style.get(f"{WORD}val", "") if p_style is not None else ""
+                    direct_ol = p_pr.find(f"{WORD}outlineLvl") if p_pr is not None else None
+                    ol_level = (int(direct_ol.get(f"{WORD}val")) if direct_ol is not None and (direct_ol.get(f"{WORD}val") or "").isdigit()
+                                else heading_levels.get(sid))
+                    is_bullet = sid in bullet_styles or (p_pr is not None and p_pr.find(f"{WORD}numPr") is not None and ol_level is None)
                     unit: dict[str, Any] = {"locator": f"para {index}", "text": text}
+                    if ol_level == 0 and text:
+                        unit["heading"] = True
+                    elif ol_level is not None and ol_level >= 1 and text:
+                        unit["text"] = f"### {text}" if not text.startswith("#") else text
+                        unit["subheading"] = True
+                    elif is_bullet and text and not re.match(r"^(?:[-*•◆]|\d+[.、)）])", text):
+                        unit["text"] = f"- {text}"
+                        unit["list_item"] = True
                     if pics:
                         unit["images"] = pics
                     units.append(unit)
