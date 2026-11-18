@@ -422,6 +422,36 @@ class NavigationTests(unittest.TestCase):
             alias.write_bytes(b"excel-touched-header-bytes")
             self.assertEqual(orig.read_bytes(), b"original-xls-bytes")
 
+    def test_cleanup_record_distinguishes_drop_blocks_from_reviewed_removal_and_translates_reasons(self):
+        import tempfile
+        from governance import cleanup_record
+        docs = {"DOC-1": {"doc_id": "DOC-1", "title": "产品画册-Smartline", "folder": "产品画册", "file_name": "产品画册-Smartline.md"}}
+        blocks = [
+            {
+                "block_id": "b1",
+                "doc_id": "DOC-1",
+                "locator": "slide 4 ocr",
+                "status": "removed",
+                "hold_reasons": ["reviewer_dropped", "customer_reference"],
+                "reviewed_removal": {"reason": "customer_reference", "screening_locator": "slide 4 第3段代工客户与出货量句"},
+            },
+            {
+                "block_id": "b2",
+                "doc_id": "DOC-1",
+                "locator": "page 1 ocr",
+                "status": "removed",
+                "hold_reasons": ["reviewer_dropped"],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp)
+            cleanup_record(build, blocks, docs)
+            text = (build / "vault" / "05_数据与审核/50_运行记录/内容清理记录.md").read_text(encoding="utf-8")
+        self.assertIn("| 客户或代工信息 | 1 |", text)
+        self.assertIn("| 人工判断删除 | 1 |", text)
+        self.assertNotIn("customer_reference", text)
+        self.assertIn("slide 4 ocr · 局部清理：slide 4 第3段代工客户与出货量句（客户或代工信息）", text)
+
 
 if __name__ == "__main__":
     unittest.main()

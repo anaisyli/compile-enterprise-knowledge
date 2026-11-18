@@ -872,11 +872,25 @@ def main() -> int:
     routes = load_json(build / "routes.json")
     docs = {doc["doc_id"]: doc for doc in load_jsonl(build / "docs.jsonl")}
     decisions_path = build / "review-decisions.json"
-    waiting_d = set(unapproved_d(routes, load_json(decisions_path) if decisions_path.is_file() else {}))
+    decisions = load_json(decisions_path) if decisions_path.is_file() else {}
+    waiting_d = set(unapproved_d(routes, decisions))
     for doc in docs.values():
         doc["d_unapproved"] = doc["item_id"] in waiting_d
         doc["d_by"] = "internal" if routes.get(doc["item_id"], {}).get("reason") == "kept_internally" else "client"
+    drop_blocks = set(decisions.get("drop_blocks", []))
     blocks = load_jsonl(build / "blocks.jsonl")
+    blocks_changed = False
+    for block in blocks:
+        if (block["block_id"] in drop_blocks or block.get("part_of") in drop_blocks) and not block.get("reviewed_removal"):
+            if block["status"] in VISIBLE:
+                block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped"]
+                blocks_changed = True
+        elif block["status"] == "removed" and block.get("hold_reasons") == ["reviewer_dropped"] and not block.get("reviewed_removal"):
+            block["status"] = "pending_client" if block.get("client_hold") else ("flagged" if block.get("flags") else "kept")
+            block["hold_reasons"] = []
+            blocks_changed = True
+    if blocks_changed:
+        write_jsonl(build / "blocks.jsonl", blocks)
     by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for block in blocks:
         if block["status"] in VISIBLE:

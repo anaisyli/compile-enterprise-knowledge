@@ -663,6 +663,8 @@ def cleanup_record(build_dir: Path, blocks: list[dict[str, Any]], docs: dict[str
     labels = {"price": "报价金额", "bare_cost": "成本", "cost_word": "成本用语", "payment_term": "付款条件",
               "quoted_terms": "给客户的报价条件",
               "order_number": "订单号", "email": "外部邮箱", "phone": "电话", "denied_term": "竞品或禁用词",
+              "competitor_reference": "竞品或第三方参考", "detailed_address": "详细地址",
+              "customer_reference": "客户或代工信息", "contact_info": "联系方式",
               "quantity": "数量或包装", "material_usage": "单耗或用料", "internal_note": "业务备注",
               "customer_name": "可能的客户名", "paired_answer": "被删问题的答案", "reviewer_dropped": "人工判断删除"}
     totals: dict[str, int] = defaultdict(int)
@@ -670,10 +672,16 @@ def cleanup_record(build_dir: Path, blocks: list[dict[str, Any]], docs: dict[str
     for block in blocks:
         if block["status"] != "removed":
             continue
-        reasons = sorted({labels.get(r.split(":")[0], r.split(":")[0]) for r in block["hold_reasons"]})
+        raw_reasons = ([r for r in block["hold_reasons"] if r != "reviewer_dropped"]
+                       if block.get("reviewed_removal") else block["hold_reasons"]) or block["hold_reasons"]
+        reasons = sorted({labels.get(r.split(":")[0], r.split(":")[0]) for r in raw_reasons})
         for reason in reasons:
             totals[reason] += 1
-        per_doc[block["doc_id"]].append(f"{block['locator']}（{'、'.join(reasons)}）")
+        removal_note = (block.get("reviewed_removal") or {}).get("screening_locator", "").strip()
+        locator = f"{block['locator']} · 局部清理：{removal_note}" if removal_note else (
+            f"{block['locator']}（局部清理）" if block.get("reviewed_removal") else block["locator"]
+        )
+        per_doc[block["doc_id"]].append(f"{locator}（{'、'.join(reasons)}）")
     lines = ["# 内容清理记录", "", "按初筛规则删除的内容只记原因和位置，不重复原文。", "", "## 按原因", "",
              "| 原因 | 段数 |", "| --- | ---: |"]
     lines.extend(f"| {reason} | {count} |" for reason, count in sorted(totals.items(), key=lambda kv: -kv[1]))

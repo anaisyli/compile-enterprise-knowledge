@@ -12,13 +12,14 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, merge_ledger, parse_ledger, render_ledger
-from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, run_lock, write_json, write_text
+from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, cleanup_record, merge_ledger, parse_ledger, render_ledger
+from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, run_lock, write_json, write_jsonl, write_text
 from pictures import INDEX, LIST_CSV, PUBLIC, CONFIRMED_MEDIA, retained_media, retained_section
 
 REGISTER = "02_源资料/源资料与可检索性台账.md"
 PLAN = "02_源资料/处理计划与样例.md"
 SOURCE = "02_源资料/10_净化原文"
+CLEANUP = "05_数据与审核/50_运行记录/内容清理记录.md"
 RECEIPT = "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json"
 ARCHIVE = "05_数据与审核/60_版本归档/10_正式知识历史"
 # Written into the vault by kb_status after each publish, never part of a build.
@@ -225,6 +226,31 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
                     recovered[kind] = len(parse_ledger(texts[key])[1])
                     break
     texts[INDEX], texts[LIST_CSV] = material_texts(build, texts[INDEX], texts[LIST_CSV])
+    if (build / "blocks.jsonl").is_file() and (build / "docs.jsonl").is_file():
+        vault_decisions = vault / "05_数据与审核/70_构建状态/review-decisions.json"
+        build_decisions = build / "review-decisions.json"
+        decisions_path = (vault_decisions if vault_decisions.is_file() and (
+            not build_decisions.is_file() or vault_decisions.stat().st_mtime >= build_decisions.stat().st_mtime
+        ) else build_decisions)
+        decisions = load_json(decisions_path) if decisions_path.is_file() else {}
+        drop_blocks = set(decisions.get("drop_blocks", []))
+        blocks = load_jsonl(build / "blocks.jsonl")
+        blocks_changed = False
+        for block in blocks:
+            if (block["block_id"] in drop_blocks or block.get("part_of") in drop_blocks) and not block.get("reviewed_removal"):
+                if block["status"] in {"kept", "flagged", "pending_client"}:
+                    block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped"]
+                    blocks_changed = True
+            elif block["status"] == "removed" and block.get("hold_reasons") == ["reviewer_dropped"] and not block.get("reviewed_removal"):
+                block["status"] = "pending_client" if block.get("client_hold") else ("flagged" if block.get("flags") else "kept")
+                block["hold_reasons"] = []
+                blocks_changed = True
+        if blocks_changed:
+            write_jsonl(build / "blocks.jsonl", blocks)
+        docs = {doc["doc_id"]: doc for doc in load_jsonl(build / "docs.jsonl")}
+        cleanup_record(build, blocks, docs)
+        if (build / "vault" / CLEANUP).is_file() and (vault / CLEANUP).is_file():
+            texts[CLEANUP] = (build / "vault" / CLEANUP).read_text(encoding="utf-8")
     state = gather(run, vault)
     for kind, (key, _, _) in LEDGERS.items():
         text = texts.get(key) or next((t for k, t in texts.items() if Path(k).parent == Path(key).parent), "")
