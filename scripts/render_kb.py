@@ -737,14 +737,19 @@ def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str
         return ""
     source = Path(route["package"]) / route["path"]
     alias = Path(route["package"]) / ALIAS_FOLDER / f"{stem}{source.suffix}"
+    is_legacy = source.suffix.casefold() in {".xls", ".doc", ".ppt"}
     try:
         if read_only:
-            return path_uri(alias) if alias.exists() and alias.samefile(source) else ""
-        if alias.exists() and not alias.samefile(source):
+            return path_uri(alias) if alias.exists() and (is_legacy or alias.samefile(source)) else ""
+        if alias.exists() and not is_legacy and not alias.samefile(source):
             alias.unlink()  # The name now belongs to another file, or the original was replaced.
         if not alias.exists():
             alias.parent.mkdir(parents=True, exist_ok=True)
-            os.link(source, alias)
+            if is_legacy:
+                # Excel/Word mutates legacy .xls/.doc headers on open; copy so viewing never alters source_hash.
+                shutil.copy2(source, alias)
+            else:
+                os.link(source, alias)
         return path_uri(alias)
     except OSError:
         return ""

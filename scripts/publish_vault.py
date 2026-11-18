@@ -404,9 +404,11 @@ def main() -> int:
                 new_paths.setdefault(f"DOC-{route['source_hash'][:10]}", page)
     # A drawing now filed as pictures in 90_素材: its old text page goes to the archive, no 已失效 stub.
     material = {f"DOC-{r['source_hash'][:10]}" for r in routes.values() if r.get("reason") == "drawing" and r.get("source_hash")}
-    # A file temporarily held (e.g. LibreOffice blocked in sandbox) keeps its published page intact.
+    # A file temporarily held (e.g. LibreOffice blocked in sandbox or hash_mismatch) keeps its published page intact.
     held_docs = {f"DOC-{r['source_hash'][:10]}" for r in routes.values()
-                 if r.get("source_hash") and (r.get("route") == "hold" or r.get("status") in {"needs_libreoffice", "failed"})}
+                 if r.get("source_hash") and (r.get("route") == "hold" or r.get("status") in {"needs_libreoffice", "failed", "hash_mismatch"})}
+    if held_docs:
+        held_docs.add("DOC-TABLES")
     leaving = []
     for key in sorted(set(previous) - set(planned)):
         target = vault / key

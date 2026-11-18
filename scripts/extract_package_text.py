@@ -634,9 +634,19 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for item_id, status in pool.map(one, jobs):
+            old_status = statuses.get(item_id, {})
+            unit_file = text_dir / f"{item_id}.json"
+            if (
+                status["status"] == "needs_libreoffice"
+                and unit_file.is_file()
+                and old_status.get("source_hash") == status.get("source_hash")
+                and old_status.get("status") in {"read_ok", "partial", "needs_ocr"}
+            ):
+                # Sandbox blocked LibreOffice, but a valid extraction for the same file bytes already exists.
+                continue
             statuses[item_id] = status
-            if status["status"] not in {"read_ok", "partial", "needs_ocr"}:
-                (text_dir / f"{item_id}.json").unlink(missing_ok=True)
+            if status["status"] not in {"read_ok", "partial", "needs_ocr", "needs_libreoffice"}:
+                unit_file.unlink(missing_ok=True)
     # Folders an older version left behind when LibreOffice still held them.
     for leftover in cache.glob("lo-*") if cache.is_dir() else []:
         shutil.rmtree(leftover, ignore_errors=True)

@@ -18,6 +18,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -108,11 +109,15 @@ def remake_aliases(package: Path, dry_run: bool) -> tuple[int, list[str]]:
                 made += 1
                 continue
             try:
-                if alias.exists() and not alias.samefile(source):
+                is_legacy = source.suffix.casefold() in {".xls", ".doc", ".ppt"}
+                if alias.exists() and not is_legacy and not alias.samefile(source):
                     alias.unlink()
                 if not alias.exists():
                     alias.parent.mkdir(parents=True, exist_ok=True)
-                    os.link(source, alias)
+                    if is_legacy:
+                        shutil.copy2(source, alias)
+                    else:
+                        os.link(source, alias)
                 made += 1
             except OSError as exc:
                 problems.append(f"建不了 {alias.name}（{exc.strerror or type(exc).__name__}）")

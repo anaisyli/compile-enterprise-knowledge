@@ -408,6 +408,20 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(blocks[1]["text"], "### 2009 - YIFA Founded in Luoyang")
         self.assertEqual(blocks[2]["text"], "- 14 CNC machines")
 
+    def test_alias_link_copies_legacy_xls_so_opening_in_excel_never_mutates_package_original(self):
+        import tempfile
+        from render_kb import ALIAS_FOLDER, alias_link
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp)
+            orig = pkg / "D/型号一览表.xls"
+            orig.parent.mkdir(parents=True)
+            orig.write_bytes(b"original-xls-bytes")
+            uri = alias_link({"package": str(pkg), "path": "D/型号一览表.xls"}, "报价单-58e4edff")
+            self.assertTrue(uri)
+            alias = pkg / ALIAS_FOLDER / "报价单-58e4edff.xls"
+            alias.write_bytes(b"excel-touched-header-bytes")
+            self.assertEqual(orig.read_bytes(), b"original-xls-bytes")
+
 
 if __name__ == "__main__":
     unittest.main()
