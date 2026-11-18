@@ -229,19 +229,26 @@ class NavigationTests(unittest.TestCase):
                 zf.writestr("word/_rels/document.xml.rels", rels_xml)
                 zf.writestr("word/media/effect.png", b"\x89PNG\r\n\x1a\n" + b"0" * 6000)
             units, facts = docx_units(docx_path, assets_dir, "k1")
-        self.assertEqual(facts["page_pictures"], {"1": ["k1-docx-1.png"]})
-        self.assertEqual(units[1]["images"], ["k1-docx-1.png"])
-        PICTURE_FILES["k1-docx-1.png"] = "90_素材/产品/k1-docx-1.png"
+        img_id = facts["page_pictures"]["1"][0]
+        self.assertTrue(img_id.startswith("img-"), img_id)
+        self.assertEqual(units[1]["images"], [img_id])
+        PICTURE_FILES[img_id] = f"90_素材/产品/{img_id}"
         doc = {"doc_id": "DOC-3", "title": "产品资料-43寸", "tier": "T2", "module": "20_产品介绍",
                "item_id": "item3", "source_sha256": "ghi"}
         blocks = [
             {"block_id": "p1", "doc_id": "DOC-3", "kind": "text", "group": "正文", "locator": "para 1",
              "status": "valid", "flags": [], "text": "效果图："},
             {"block_id": "p2", "doc_id": "DOC-3", "kind": "text", "group": "正文", "locator": "para 2",
-             "status": "valid", "flags": [], "text": "", "images": ["k1-docx-1.png"]},
+             "status": "valid", "flags": [], "text": "", "images": [img_id]},
         ]
         rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {})
-        self.assertIn("效果图：\n\n![[90_素材/产品/k1-docx-1.png|360]]", rendered)
+        self.assertIn(f"效果图：\n\n![[90_素材/产品/{img_id}|360]]", rendered)
+        self.assertIn("Touch type | Non-touch | Capacitive Touch", render_doc(
+            doc, [{"block_id": "t1", "doc_id": "DOC-3", "kind": "text", "group": "第 2 页", "locator": "page 2",
+                   "status": "valid", "flags": [],
+                   "text": "SS50 Series\nTouch type\tNon-touch\tCapacitive Touch\nLCD Panel\nSize\t43\t55\nRes\t1080\t2160"}],
+            "有效", ["来源卡片"], {}, {},
+        ))
 
     def test_document_blocks_preserves_sheet_images_for_technical_workbooks(self):
         from extract_blocks import document_blocks

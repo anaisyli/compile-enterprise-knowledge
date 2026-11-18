@@ -668,7 +668,7 @@ def main() -> int:
         trusted = block["block_id"] in keep_blocks or block.get("part_of") in keep_blocks
         if block["kind"] == "row" and not ({"description", "fabric", "style"} & set(block["cells"])):
             block["status"], block["hold_reasons"] = "dropped", ["reviewer_dropped_cells"]
-        elif not block["text"] or (block["kind"] == "text" and garbled(block["text"])):
+        elif (not block["text"] or (block["kind"] == "text" and garbled(block["text"]))) and not block.get("images"):
             block["status"], block["hold_reasons"] = "dropped", ["empty_or_garbled"]
         elif block.get("reviewed_removal"):
             block["status"], block["hold_reasons"] = "removed", ["reviewer_dropped", block["reviewed_removal"]["reason"]]

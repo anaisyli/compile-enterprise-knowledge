@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 5, ".doc": 5, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 6, ".doc": 6, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -104,7 +104,8 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                         saved_by_media[media_path] = ""
                         continue
                     assets.mkdir(parents=True, exist_ok=True)
-                    out_name = f"{key}-docx-{len(all_saved) + 1}{Path(media_path).suffix.casefold()}"
+                    digest = hashlib.sha256(raw).hexdigest()[:12]
+                    out_name = f"img-{digest}{Path(media_path).suffix.casefold()}"
                     (assets / out_name).write_bytes(raw)
                     saved_by_media[media_path] = out_name
                     all_saved.append(out_name)

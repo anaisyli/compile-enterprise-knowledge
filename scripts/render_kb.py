@@ -228,7 +228,45 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             rendered_picture_groups.add(group_name)
             parts.extend(["", f"## {group_name}", "", f"![[{shown(pictures[group_name])}|{PAGE_PICTURE_WIDTH}]]", ""])
 
+    def tab_lines_to_markdown(text: str) -> str:
+        lines = text.splitlines()
+        tab_counts = [line.count("\t") for line in lines if "\t" in line]
+        if len(tab_counts) < 3:
+            return text
+        width = max(tab_counts) + 1
+        out: list[str] = []
+        table_rows: list[list[str]] = []
+
+        def flush_tab_table() -> None:
+            if not table_rows:
+                return
+            if out and out[-1].strip():
+                out.append("")
+            header = table_rows[0]
+            out.append("| " + " | ".join(header) + " |")
+            out.append("|" + " --- |" * width)
+            for row in table_rows[1:]:
+                out.append("| " + " | ".join(row) + " |")
+            table_rows.clear()
+
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if "\t" in line:
+                cells = [escape_cell(c.strip()) for c in line.split("\t")]
+                cells += [""] * (width - len(cells))
+                table_rows.append(cells[:width])
+            elif table_rows and stripped and any("\t" in rest for rest in lines[idx + 1:]):
+                # Subheading row inside a tab-separated table: repeat across columns.
+                cell = escape_cell(stripped)
+                table_rows.append([cell] * width)
+            else:
+                flush_tab_table()
+                out.append(line)
+        flush_tab_table()
+        return "\n".join(out)
+
     def ensure_table_spacing(text: str) -> str:
+        text = tab_lines_to_markdown(text)
         lines = text.splitlines()
         out: list[str] = []
         for idx, line in enumerate(lines):

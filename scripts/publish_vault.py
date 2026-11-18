@@ -404,12 +404,17 @@ def main() -> int:
                 new_paths.setdefault(f"DOC-{route['source_hash'][:10]}", page)
     # A drawing now filed as pictures in 90_素材: its old text page goes to the archive, no 已失效 stub.
     material = {f"DOC-{r['source_hash'][:10]}" for r in routes.values() if r.get("reason") == "drawing" and r.get("source_hash")}
+    # A file temporarily held (e.g. LibreOffice blocked in sandbox) keeps its published page intact.
+    held_docs = {f"DOC-{r['source_hash'][:10]}" for r in routes.values()
+                 if r.get("source_hash") and (r.get("route") == "hold" or r.get("status") in {"needs_libreoffice", "failed"})}
     leaving = []
     for key in sorted(set(previous) - set(planned)):
         target = vault / key
         if key.startswith(SOURCE.as_posix()) and target.suffix == ".md" and target.is_file():
             fields = parse_frontmatter(target.read_text(encoding="utf-8"))
-            if fields.get("doc_id") and fields.get("status") != "已失效" and fields["doc_id"] not in new_paths and fields["doc_id"] not in material:
+            if (fields.get("doc_id") and fields.get("status") != "已失效"
+                    and fields["doc_id"] not in new_paths and fields["doc_id"] not in material
+                    and fields["doc_id"] not in held_docs):
                 leaving.append(key)
     live = sum(1 for key in previous if key.startswith(SOURCE.as_posix()) and key.endswith(".md"))
     if len(leaving) > max(WITHDRAW_LIMIT, live * WITHDRAW_SHARE) and not args.allow_withdraw:
@@ -513,6 +518,8 @@ def main() -> int:
         elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id") in material:
             archive(vault, key, stamp, archived, move=True)
             renamed.append(f"{key} → 90_素材（图纸，改按素材处理，每页一张图）")
+        elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id") in held_docs:
+            written[key] = normalized_hash(target)
         elif key.startswith(SOURCE.as_posix()) and parse_frontmatter(old).get("doc_id"):
             # Only documents this vault really published leave a 已失效 record.
             if parse_frontmatter(old).get("status") != "已失效":
