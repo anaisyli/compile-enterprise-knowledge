@@ -293,6 +293,52 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(lines[2], "| DN | Top Flange | F | D | K |")
         self.assertEqual(lines[3], "| 50 | F05 | 50 | 165 | 125 |")
 
+    def test_mineru_extract_persists_batch_id_and_reuses_it_after_download_failure(self):
+        import io, tempfile, zipfile
+        from mineru_client import MinerUError, extract
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("full.md", "hello")
+        valid_zip = buf.getvalue()
+
+        class FakeApi:
+            def __init__(self):
+                self.submits = 0
+                self.waits = 0
+                self.downloads = 0
+
+            def submit(self, source, options):
+                self.submits += 1
+                return "batch-123"
+
+            def wait(self, batch_id, timeout):
+                self.waits += 1
+                assert batch_id == "batch-123"
+                return {"state": "done", "full_zip_url": "https://example.com/r.zip"}
+
+            def download(self, url):
+                self.downloads += 1
+                if self.downloads == 1:
+                    raise MinerUError("结果下载失败：IncompleteRead", "result-download", retryable=True)
+                return valid_zip
+
+        api = FakeApi()
+        opts = {"model": "vlm", "ocr": True, "table": True, "language": "ch"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "a.pdf"
+            src.write_bytes(b"%PDF-1.4")
+            task_file = root / "a.task.json"
+            with self.assertRaises(MinerUError):
+                extract(api, src, root / "out1", opts, task_file=task_file)
+            self.assertTrue(task_file.is_file())
+            self.assertEqual(api.submits, 1)
+            members = extract(api, src, root / "out2", opts, task_file=task_file)
+            self.assertEqual(members, ["full.md"])
+            self.assertEqual(api.submits, 1)
+            self.assertEqual(api.waits, 2)
+            self.assertFalse(task_file.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

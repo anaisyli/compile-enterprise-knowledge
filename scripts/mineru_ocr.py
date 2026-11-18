@@ -287,17 +287,19 @@ def main() -> int:
         source = Path(entry["path"])
         key = (routes[entry["item_id"]].get("source_hash") or entry["item_id"])[:32]
         cached = cache / f"{key}.json"
+        task_file = cache / f"{key}.task.json"
         if cached.is_file():
             units = load_json(cached)
             report["cached"].append(entry["display_name"])
         else:
             try:
                 with tempfile.TemporaryDirectory(prefix="mineru-") as temp:
-                    extract(api, source, Path(temp), {"model": "vlm", "ocr": True, "table": True, "language": "ch"})
+                    extract(api, source, Path(temp), {"model": "vlm", "ocr": True, "table": True, "language": "ch"},
+                            task_file=task_file)
                     units = page_units(Path(temp))
             except MinerUError as exc:
                 failure = failure_report(exc)
-                report["failed"].append({"file": entry["display_name"], **failure})
+                report["failed"].append({"file": entry["display_name"], "task_file": str(task_file) if task_file.is_file() else "", **failure})
                 if failure["failure_type"] in {"credential-missing-or-expired", "credential-invalid", "quota-or-rate-limit"}:
                     break  # The next file would fail the same way.
                 continue

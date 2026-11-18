@@ -281,8 +281,16 @@ class MinerUApi:
         for attempt in range(len(RETRY_DELAYS) + 1):
             try:
                 with urlopen(Request(url), timeout=600) as response:
-                    return response.read()
-            except (URLError, TimeoutError, OSError) as exc:
+                    expected = response.headers.get("Content-Length") if hasattr(response, "headers") else None
+                    data = response.read()
+                if expected and expected.isdigit() and len(data) < int(expected):
+                    raise http.client.IncompleteRead(data, int(expected) - len(data))
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    bad_member = archive.testzip()
+                    if bad_member is not None:
+                        raise zipfile.BadZipFile(f"ZIP 成员损坏：{bad_member}")
+                return data
+            except (URLError, TimeoutError, OSError, http.client.HTTPException, zipfile.BadZipFile) as exc:
                 last = MinerUError(f"结果下载失败：{exc}", "result-download", retryable=True)
             if attempt < len(RETRY_DELAYS):
                 time.sleep(RETRY_DELAYS[attempt])
@@ -313,14 +321,39 @@ def client_from_env(api_base: str = DEFAULT_API_BASE) -> MinerUApi:
     return MinerUApi(token, api_base)
 
 
-def extract(api: MinerUApi, source: Path, destination: Path, options: dict, timeout: int = 1800) -> list[str]:
-    """Parse one file and unpack MinerU's full result into `destination`."""
+def extract(api: MinerUApi, source: Path, destination: Path, options: dict, timeout: int = 1800,
+            task_file: Path | None = None) -> list[str]:
+    """Parse one file and unpack MinerU's full result into `destination`, reusing an existing task on retry."""
     if not source.is_file():
         raise MinerUError(f"输入文件不存在：{source}", "input-check")
     destination.mkdir(parents=True, exist_ok=True)
-    batch_id = api.submit(source, options)
-    result = api.wait(batch_id, timeout)
-    return safe_extract(api.download(str(result["full_zip_url"])), destination)
+    batch_id = ""
+    result = None
+    if task_file and task_file.is_file():
+        try:
+            saved = json.loads(task_file.read_text(encoding="utf-8"))
+            if saved.get("batch_id") and saved.get("options") == options:
+                batch_id = str(saved["batch_id"])
+                result = api.wait(batch_id, timeout)
+        except MinerUError as exc:
+            if exc.retryable:
+                raise
+            batch_id, result = "", None
+        except (OSError, ValueError):
+            batch_id, result = "", None
+    if not result:
+        batch_id = api.submit(source, options)
+        if task_file:
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text(json.dumps({"batch_id": batch_id, "options": options}, ensure_ascii=False), encoding="utf-8")
+        result = api.wait(batch_id, timeout)
+    members = safe_extract(api.download(str(result["full_zip_url"])), destination)
+    if task_file and task_file.is_file():
+        try:
+            task_file.unlink()
+        except OSError:
+            pass
+    return members
 
 
 def make_test_pdf(path: Path) -> None:
