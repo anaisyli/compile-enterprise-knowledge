@@ -339,6 +339,31 @@ class NavigationTests(unittest.TestCase):
             self.assertEqual(api.waits, 2)
             self.assertFalse(task_file.is_file())
 
+    def test_latex_math_not_flagged_as_price_and_fused_tables_split_cleanly(self):
+        from guard_blocks import HARD_PATTERNS
+        from render_kb import render_doc
+        self.assertIsNone(HARD_PATTERNS["price"].search(r"water at $4^{\circ}$ C or $60^{\circ}$ F, size $2\frac{1}{2}$"))
+        self.assertIsNotNone(HARD_PATTERNS["price"].search("Unit price: $45"))
+        doc = {"doc_id": "DOC-V", "title": "YFZ41T", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "itemv", "source_sha256": "v1"}
+        fused = (
+            "| PN | 16 | | |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Seat test | 1.76 Mpa | | |\n"
+            "| NO. | Name of parts | Material | |\n"
+            "| 1 | Body | GG25 | |\n"
+            "| DN | D | D1 | L |\n"
+            "| 40 | 150 | 110 | 140 |"
+        )
+        blocks = [{"block_id": "bv", "doc_id": "DOC-V", "kind": "text", "group": "第 3 页", "locator": "page 3 ocr",
+                   "status": "valid", "flags": [], "text": fused}]
+        notes = {"第 3 页": ["看图整理：\nTechnical Data\n| Technical | Data |\n| --- | --- |\n| Size | DN50 |"]}
+        rendered = render_doc(doc, blocks, "有效", ["来源卡片"], {}, {}, page_notes=notes, removed_groups={"第 3 页"})
+        self.assertIn("本页因清理了敏感内容，不附未脱敏的整页原图", rendered)
+        self.assertIn("> Technical Data\n>\n> | Technical | Data |", rendered)
+        self.assertIn("| Seat test | 1.76 Mpa |\n\n| NO. | Name of parts | Material |\n| --- | --- | --- |", rendered)
+        self.assertIn("| 1 | Body | GG25 |\n\n| DN | D | D1 | L |\n| --- | --- | --- | --- |", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

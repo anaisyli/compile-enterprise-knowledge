@@ -191,10 +191,11 @@ def as_table(text: str, header: bool = True) -> str:
 
 def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, card: list[str],
                anm_ids: dict[str, str], cus_ids: dict[str, str], pictures: dict[str, str] | None = None,
-               page_notes: dict[str, list[str]] | None = None) -> str:
+               page_notes: dict[str, list[str]] | None = None,
+               removed_groups: set[str] | None = None) -> str:
     """pictures: page heading -> picture of that page, for pages nothing was removed from.
     page_notes: page heading -> what the page check found there."""
-    pictures, page_notes = pictures or {}, page_notes or {}
+    pictures, page_notes, removed_groups = pictures or {}, page_notes or {}, removed_groups or set()
     tier = TIERS[doc["tier"]]
     fields = {
         "doc_id": doc["doc_id"], "title": doc["title"], "layer": "来源层", "tier": doc["tier"], "tier_label": tier["label"],
@@ -265,23 +266,77 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
         flush_tab_table()
         return "\n".join(out)
 
+    def split_fused_table_block(table_lines: list[str]) -> list[str]:
+        parsed: list[list[str]] = []
+        for raw in table_lines:
+            if table_sep_re.match(raw):
+                continue
+            cells = [c.strip() for c in re.split(r"(?<!\\)\|", raw.strip())[1:-1]]
+            if cells:
+                parsed.append(cells)
+        if len(parsed) < 3:
+            return table_lines
+        sub_tables: list[list[list[str]]] = []
+        current_sub: list[list[str]] = []
+        current_width = 0
+        new_header_re = re.compile(r"^(?:NO\.?|Item\s*no\.?|Part|DN|Size|Model|PN|Specification|Technical)\b", re.I)
+
+        def active_width(row: list[str]) -> int:
+            w = len(row)
+            while w > 0 and not row[w - 1]:
+                w -= 1
+            return max(w, 1)
+
+        for row in parsed:
+            w = active_width(row)
+            if current_sub and len(current_sub) >= 2 and w != current_width and new_header_re.match(row[0]):
+                sub_tables.append(current_sub)
+                current_sub = [row]
+                current_width = w
+            else:
+                current_sub.append(row)
+                current_width = max(current_width, w) if len(current_sub) == 1 else current_width
+        if current_sub:
+            sub_tables.append(current_sub)
+        if len(sub_tables) <= 1:
+            return table_lines
+        out_lines: list[str] = []
+        for idx_s, sub in enumerate(sub_tables):
+            if idx_s > 0:
+                out_lines.append("")
+            width = max(active_width(r) for r in sub)
+            trimmed = [(r[:width] + [""] * max(0, width - len(r))) for r in sub]
+            out_lines.append("| " + " | ".join(trimmed[0]) + " |")
+            out_lines.append("|" + " --- |" * width)
+            for r in trimmed[1:]:
+                out_lines.append("| " + " | ".join(r) + " |")
+        return out_lines
+
     def ensure_table_spacing(text: str) -> str:
         text = tab_lines_to_markdown(text)
         lines = text.splitlines()
         out: list[str] = []
-        for idx, line in enumerate(lines):
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx]
             stripped = line.lstrip()
-            if (
-                stripped.startswith("|")
-                and "|" in stripped[1:]
-                and idx + 1 < len(lines)
-                and table_sep_re.match(lines[idx + 1])
-                and out
-                and out[-1].strip()
-                and not out[-1].lstrip().startswith(("|", ">"))
-            ):
-                out.append("")
+            is_row = stripped.startswith("|") and "|" in stripped[1:]
+            if is_row and idx + 1 < len(lines) and table_sep_re.match(lines[idx + 1]):
+                if out and out[-1].strip() and not table_sep_re.match(out[-1]):
+                    out.append("")
+                tbl: list[str] = []
+                while idx < len(lines):
+                    s = lines[idx].lstrip()
+                    if not (s.startswith("|") and "|" in s[1:]):
+                        break
+                    if tbl and idx + 1 < len(lines) and table_sep_re.match(lines[idx + 1]):
+                        break
+                    tbl.append(lines[idx])
+                    idx += 1
+                out.extend(split_fused_table_block(tbl))
+                continue
             out.append(line)
+            idx += 1
         return "\n".join(out)
 
     def ends_with_table() -> bool:
@@ -329,8 +384,10 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             if current in pictures:
                 rendered_picture_groups.add(current)
                 parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
+            elif current in removed_groups:
+                parts.extend(["> （本页因清理了敏感内容，不附未脱敏的整页原图；清理详情见《内容清理记录》。）", ""])
             for note in page_notes.get(current, []) if not any(b.get('transcription_review') for b in blocks if b['group'] == current) else []:
-                parts.extend([f"> {line}" for line in note.splitlines()] + [""])
+                parts.extend([f"> {line}" if line.strip() else ">" for line in ensure_table_spacing(note).splitlines()] + [""])
             if any(b.get('transcription_review') for b in blocks if b['group'] == current):
                 review_message = ('> 本页平台识别正文保持原样，另附已有人工校对记录供对照；两者未合并。'
                                   if any(b.get('reviewed_supplement') for b in blocks if b['group'] == current)
@@ -338,7 +395,7 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.extend([review_message, ''])
                 for note in dict.fromkeys(b.get('transcription_review_note') for b in blocks
                                          if b['group'] == current and b.get('transcription_review_note')):
-                    parts.extend([f'> {literal_dimensions(line)}' for line in note.splitlines()] + [''])
+                    parts.extend([f'> {literal_dimensions(line)}' if line.strip() else '>' for line in ensure_table_spacing(note).splitlines()] + [''])
             table_columns = []
         if block["status"] == "pending_client" and (block["group"], block["client_hold"]) not in pending_marked:
             pending_marked.add((block["group"], block["client_hold"]))
@@ -872,8 +929,8 @@ def main() -> int:
     ensure_dimension_previews(build, routes, status_info)
     checks = page_check_notes(build, gov)
     published, statuses = {}, {}
-    # A page picture shows the whole page, so only pages nothing was removed from or held on get one.
-    unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] in {"removed", "pending_client"}}
+    # A page picture shows the whole page, so pages where sensitive content was removed do not get one.
+    unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] == "removed"}
     package_read_only = bool(config.get("package_read_only"))
     originals = make_aliases(routes, docs, order, package_read_only)
     twins = twin_links(routes, docs, order, package_read_only)
@@ -932,8 +989,9 @@ def main() -> int:
         info = status_info.get(doc["item_id"], {})
         pictures = {page_group(info, page): name for page, name in info.get("page_images", {}).items()
                     if (doc_id, page_group(info, page)) not in unsafe and name in PICTURE_FILES}
+        doc_removed_groups = {group for d_id, group in unsafe if d_id == doc_id and group in {page_group(info, p) for p in info.get("page_images", {})}}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
-                                                     checks.get(doc["item_id"], {})))
+                                                     checks.get(doc["item_id"], {}), doc_removed_groups))
         published[doc_id], statuses[doc_id] = doc_path(doc), status
 
     write_table_summary(clean, visible, docs, statuses)

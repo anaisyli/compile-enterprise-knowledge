@@ -159,13 +159,18 @@ def html_table(body: str) -> str:
     return markdown_table(rows)
 
 
+TABLE_SEP_RE = re.compile(r"^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+
+
 def separate_markdown_tables(text: str) -> str:
-    """Ensure Markdown tables have blank lines before and after so Obsidian renders them as tables."""
+    """Ensure Markdown tables have blank lines before, after, and between consecutive tables."""
+    lines = text.splitlines()
     out: list[str] = []
     in_table = False
-    for line in text.splitlines():
+    for idx, line in enumerate(lines):
         is_row = line.lstrip().startswith("|") and "|" in line.lstrip()[1:]
-        if is_row and not in_table and out and out[-1].strip():
+        is_new_header = is_row and idx + 1 < len(lines) and bool(TABLE_SEP_RE.match(lines[idx + 1]))
+        if (is_row and not in_table or is_new_header) and out and out[-1].strip():
             out.append("")
         elif not is_row and in_table and line.strip() and out and out[-1].strip():
             out.append("")

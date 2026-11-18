@@ -318,7 +318,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():
             group = page_group(info, page)
-            if (doc_id, group) in unsafe:
+            if (doc_id, group) in unsafe or any(b.get("status") == "pending_client" for b in blocks if b["group"] == group):
                 continue
             drawing = dimension_result(page)
             if drawing:
