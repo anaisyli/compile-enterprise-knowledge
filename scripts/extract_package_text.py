@@ -53,7 +53,7 @@ THUMBNAIL_DPI = 45
 ASSETS_DIRECTORY = "assets"
 # Raised when the way a kind of file is read changes, so only those files are read again:
 # a change to PDF reading must not send every old workbook back through LibreOffice.
-READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 8, ".doc": 8, ".xlsx": 3, ".xls": 3}
+READER_VERSIONS = {".pdf": 4, ".pptx": 5, ".ppt": 5, ".docx": 9, ".doc": 9, ".xlsx": 3, ".xls": 3}
 # Photos printed in a PDF are kept as material when they are big enough to be one.
 PICTURE_MIN_SIDE = 300
 PICTURE_MIN_BYTES = 15_000
@@ -199,19 +199,25 @@ def docx_units(path: Path, assets: Path | None = None, key: str = "") -> tuple[l
                     if old[1] > old[0] or old[2] > 1:
                         merges.append(f"{col_letters(c)}{old[0]}:{col_letters(c + old[2] - 1)}{old[1]}")
                 nonempty_rows = [r for r in grid if any(cell.strip() for cell in r)]
+                pics = paragraph_images(child)
                 if nonempty_rows:
+                    unit: dict[str, Any] = {"locator": f"table at {index}", "text": ""}
                     if merges:
                         width = max(len(r) for r in grid)
                         padded = [r + [""] * (width - len(r)) for r in grid]
-                        units.append({
-                            "locator": f"table at {index}",
+                        unit.update({
                             "text": markdown_table(padded),
                             "merges": merges,
                             "table_rows": len(padded),
                             "table_cols": width,
                         })
                     else:
-                        units.append({"locator": f"table at {index}", "text": markdown_table(nonempty_rows)})
+                        unit["text"] = markdown_table(nonempty_rows)
+                    if pics:
+                        unit["images"] = pics
+                    units.append(unit)
+                elif pics:
+                    units.append({"locator": f"table at {index}", "text": "", "images": pics})
     return units, ({"page_pictures": {"1": all_saved}} if all_saved else {})
 
 

@@ -495,6 +495,41 @@ class NavigationTests(unittest.TestCase):
             units, _ = docx_units(docx_path)
         self.assertEqual(units[0]["text"], "1. First section\n\nBody line one.\n\n1.1 Subsection")
 
+    def test_docx_units_extracts_images_inside_tables(self):
+        import tempfile, zipfile
+        from extract_package_text import docx_units
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<w:body>'
+            '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Valve Spec</w:t></w:r></w:p></w:tc>'
+            '<w:tc><w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>'
+            '<w:tbl><w:tr><w:tc><w:p><w:r><w:drawing><a:blip r:embed="rId2"/></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>'
+            '</w:body></w:document>'
+        )
+        rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/t1.png"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/t2.png"/>'
+            '</Relationships>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docx_path = tmp_path / "tbl_imgs.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+                zf.writestr("word/_rels/document.xml.rels", rels_xml)
+                zf.writestr("word/media/t1.png", b"\x89PNG" + b"0" * 600)
+                zf.writestr("word/media/t2.png", b"\x89PNG" + b"1" * 600)
+            units, facts = docx_units(docx_path, tmp_path / "assets", "k3")
+        self.assertEqual(len(units), 2)
+        self.assertEqual(len(units[0]["images"]), 1)
+        self.assertEqual(len(units[1]["images"]), 1)
+        self.assertEqual(len(facts["page_pictures"]["1"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
