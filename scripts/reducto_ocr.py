@@ -133,7 +133,7 @@ def disagrees(reasons: list[str]) -> bool:
 
 
 def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool = False,
-               full_document_item_ids: list[str] | None = None) -> list[dict[str, Any]]:
+               full_document_item_ids: list[str] | None = None, refresh_stale: bool = False) -> list[dict[str, Any]]:
     """Per file read “Reducto 整份 + AI 核对”, every page (page-triage.json) Reducto has not read yet.
 
     With samples_only, every page of each paged kind's sample still waiting for a decision, so
@@ -180,7 +180,10 @@ def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool
         # is chosen it is because MinerU read the file badly, and a trial compares both on the same pages.
         chosen_reducto = info.get("method") == "reducto" and not samples_only
         record = record_of(build, item_id)
-        done = set(record.get("pages_read", [])) if record.get("source_hash") == asset.get("source_hash") else set()
+        if refresh_stale and not record.get("raw"):
+            done = set()
+        else:
+            done = set(record.get("pages_read", [])) if record.get("source_hash") == asset.get("source_hash") else set()
         pages = {int(number): [why, f"{page['grade']} 级{GRADES[page['grade']][0]}", *page.get("reasons", [])]
                  for number, page in info.get("pages", {}).items()
                  if int(number) not in done}
@@ -256,15 +259,64 @@ def page_text(entry: dict[str, Any]) -> str:
     return separate_markdown_tables("\n\n".join(blocks))
 
 
+# Bump when page_text / html_table change: records keep Reducto's raw blocks, so a rebuild re-renders
+# them with the current converter instead of reusing tables flattened by an older one.
+RENDERER = 2
+
+
+def render_units(record: dict[str, Any]) -> bool:
+    """Re-render every page from the stored raw blocks. True when any unit text changed."""
+    raw = record.get("raw") or {}
+    if not raw:
+        return False
+    units = {u["locator"]: u for u in record.get("units", [])}
+    changed = False
+    for number, blocks in raw.items():
+        unit_kind = next((u["locator"].split()[0] for u in units.values()), "page")
+        locator = next((loc for loc in units if page_of(loc) == int(number)), f"{unit_kind} {number} ocr")
+        text = page_text({"text": blocks})
+        old = units.get(locator, {})
+        if text and old.get("text") != text:
+            units[locator] = {"locator": locator, "text": text, "engine": "reducto"}
+            changed = True
+    record["units"] = sorted(units.values(), key=lambda u: int(u["locator"].split()[1]))
+    if record.get("renderer") != RENDERER:
+        record["renderer"] = RENDERER
+        changed = True
+    return changed
+
+
+def rerender_all(build: Path) -> list[str]:
+    """Bring every record that carries raw blocks up to the current converter. Free: nothing is sent."""
+    done = []
+    folder = build / FOLDER
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        record = load_json(path)
+        if record.get("raw") and record.get("renderer") != RENDERER and render_units(record):
+            write_json(path, record)
+            done.append(path.stem)
+    return done
+
+
+def stale(build: Path) -> list[str]:
+    """Records read before raw blocks were kept: their tables may be flattened by an old converter."""
+    folder = build / FOLDER
+    return [p.stem for p in sorted(folder.glob("*.json")) if folder.is_dir()
+            and not load_json(p).get("raw")] if folder.is_dir() else []
+
+
 def store(build: Path, entry: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     record = record_of(build, entry["item_id"])
     if record.get("source_hash") != entry["source_hash"]:
         record = {}  # The file changed: what was read before belongs to another version.
     units = {u["locator"]: u for u in record.get("units", [])}
     figures = dict(record.get("figures", {}))
+    raw = dict(record.get("raw", {}))
     for number in entry["pages"]:
         read = result["pages"].get(number, {})
         locator = f"{entry['unit']} {number} ocr"
+        if read.get("text"):
+            raw[str(number)] = read["text"]
         text = page_text(read)
         if read.get("figures"):
             # The model's picture descriptions mix what is printed with what it thinks it sees:
@@ -279,7 +331,8 @@ def store(build: Path, entry: dict[str, Any], result: dict[str, Any]) -> dict[st
               "extracted_at": date.today().isoformat(),
               "pages_read": sorted(set(record.get("pages_read", [])) | set(entry["pages"])),
               "job_ids": record.get("job_ids", []) + [result["job_id"]],
-              "units": sorted(units.values(), key=lambda u: int(u["locator"].split()[1])), "figures": figures}
+              "units": sorted(units.values(), key=lambda u: int(u["locator"].split()[1])), "figures": figures,
+              "raw": raw, "renderer": RENDERER}
     write_json(build / FOLDER / f"{entry['item_id']}.json", record)
     return record
 
@@ -315,6 +368,7 @@ def main() -> int:
     parser.add_argument("--config", help="kb-config.json")
     parser.add_argument("--only", action="append", default=[], help="item_id to run; default every planned file")
     parser.add_argument("--samples", action="store_true", help="Only the samples of kinds still waiting for a decision")
+    parser.add_argument("--refresh-stale", action="store_true", help="Re-parse cached records that predate raw HTML caching")
     args = parser.parse_args()
     if not run_lock(Path(args.out).resolve(), f"reducto_ocr.py {args.command}"):
         return 3
@@ -331,7 +385,8 @@ def main() -> int:
     if not (build / "page-triage.json").is_file():
         print(json_text({"ok": False, "reason": "还没有页面分级（page-triage.json），先跑一次流水线"}))
         return 2
-    chosen = candidates(build, files, args.samples, (config.get("reducto") or {}).get("full_document_item_ids"))
+    chosen = candidates(build, files, args.samples, (config.get("reducto") or {}).get("full_document_item_ids"),
+                        refresh_stale=args.refresh_stale)
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:

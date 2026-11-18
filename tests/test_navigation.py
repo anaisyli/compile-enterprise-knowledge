@@ -452,6 +452,32 @@ class NavigationTests(unittest.TestCase):
         self.assertNotIn("customer_reference", text)
         self.assertIn("slide 4 ocr · 局部清理：slide 4 第3段代工客户与出货量句（客户或代工信息）", text)
 
+    def test_reducto_rerender_all_upgrades_cached_raw_html_without_reuploading(self):
+        import json, tempfile
+        from reducto_ocr import RENDERER, rerender_all, stale
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp)
+            folder = build / "reducto-units"
+            folder.mkdir()
+            (folder / "item-with-raw.json").write_text(json.dumps({
+                "item_id": "item-with-raw",
+                "source": "reducto",
+                "renderer": 1,
+                "units": [{"locator": "page 5 ocr", "text": "| SIZEDN(MM) | PRESSURE MPA | ANSI | | | | |", "engine": "reducto"}],
+                "raw": {"5": ["<table><tr><th rowspan='2'>SIZEDN(MM)</th><th colspan='4'>PRESSURE MPA</th><th colspan='2'>ANSI</th></tr><tr><th>PN6</th><th>PN10</th><th>PN16</th><th>PN25</th><th>150LB</th><th>300LB</th></tr></table>"]},
+            }), encoding="utf-8")
+            (folder / "item-legacy.json").write_text(json.dumps({
+                "item_id": "item-legacy",
+                "source": "reducto",
+                "units": [{"locator": "page 12 ocr", "text": "| old |", "engine": "reducto"}],
+            }), encoding="utf-8")
+            self.assertEqual(rerender_all(build), ["item-with-raw"])
+            self.assertEqual(stale(build), ["item-legacy"])
+            upgraded = json.loads((folder / "item-with-raw.json").read_text(encoding="utf-8"))
+            self.assertEqual(upgraded["renderer"], RENDERER)
+            self.assertIn("| SIZEDN(MM) | PRESSURE MPA | PRESSURE MPA | PRESSURE MPA | PRESSURE MPA | ANSI | ANSI |", upgraded["units"][0]["text"])
+            self.assertIn("| SIZEDN(MM) | PN6 | PN10 | PN16 | PN25 | 150LB | 300LB |", upgraded["units"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

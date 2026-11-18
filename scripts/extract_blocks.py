@@ -887,6 +887,8 @@ def main() -> int:
         triage.update({item["item_id"]: item for item in load_json(package / TRIAGE_NAME)["items"]})
         point_files.append(package / POINTS_NAME)
     status = merge_extract_status(build, [Path(raw).resolve() for raw in args.extract_status])
+    from reducto_ocr import rerender_all
+    rerender_all(build)
     ocr_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else build / "mineru-units"
     text_dirs = [d for d in unit_dirs(build, [Path(raw).resolve() for raw in args.text_dir], ocr_dir)
                  if d.is_dir() or d in [Path(raw).resolve() for raw in args.text_dir]]
