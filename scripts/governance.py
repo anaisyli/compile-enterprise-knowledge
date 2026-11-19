@@ -506,6 +506,16 @@ def build(
             "counts": {kind: len(rs) for kind, rs in records.items()}}
 
 
+def strip_fingerprints(lines: list[str]) -> list[str]:
+    """Remove embedded fingerprint comments and surrounding blank lines from detail blocks."""
+    cleaned = [line for line in lines if not re.fullmatch(r"<!--\s*fingerprint:\s*[a-f0-9]+\s*-->", line.strip())]
+    while cleaned and not cleaned[0].strip():
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+    return cleaned
+
+
 def render_ledger(kind: str, title: str, purpose: str, project_id: str, today: str, records: list[dict[str, Any]]) -> str:
     lines = [f"# {title}", "", f"- 项目ID：{project_id}", f"- 最近检查日期：{today}", f"- 文件用途：{purpose}",
              "- 总览入口：[[00_知识库总览]]",
@@ -520,8 +530,9 @@ def render_ledger(kind: str, title: str, purpose: str, project_id: str, today: s
         lines.append("| 无 |" + " |" * (len(columns) - 1))
     lines.extend(["", "## 事项详情", ""])
     for record in sorted(records, key=lambda r: r["id"]):
-        fp = hashlib.sha256("\n".join(record["details"]).encode("utf-8")).hexdigest()[:12]
-        lines.extend([f"### {record['id']}｜{record['row'][0]}", f"<!-- fingerprint: {fp} -->", "", *record["details"], ""])
+        details = strip_fingerprints(record["details"])
+        fp = hashlib.sha256("\n".join(details).encode("utf-8")).hexdigest()[:12]
+        lines.extend([f"### {record['id']}｜{record['row'][0]}", f"<!-- fingerprint: {fp} -->", "", *details, ""])
     return "\n".join(lines) + "\n"
 
 
@@ -564,6 +575,9 @@ def parse_ledger(text: str) -> tuple[list[str], dict[str, list[str]], dict[str, 
                 in_notes = False
             else:
                 notes[current].append(line)
+    for note in notes.values():
+        while note and not note[-1].strip():
+            note.pop()
     return header, rows, notes
 
 
@@ -654,6 +668,8 @@ def merge_ledger(old_text: str, new_text: str) -> str:
     present = {re.match(r"^###\s+(\S+)｜", l.strip()).group(1) for l in merged if re.match(r"^###\s+(\S+)｜", l.strip())}
     for record_id, note in sorted(old_notes.items()):
         if record_id not in present:
+            while merged and not merged[-1].strip():
+                merged.pop()
             merged.extend(["", f"### {record_id}｜（系统已不再登记，保留人工记录）", "", *note])
     return "\n".join(merged).rstrip() + "\n"
 

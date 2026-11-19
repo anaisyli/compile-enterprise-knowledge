@@ -119,6 +119,23 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(curate.assign(block, docs["led"], topics["cat-other"], []), "其他产品资料")
         self.assertEqual(curate.line_name(docs["spec"]), "广告机")
 
+    def test_solution_and_news_folders_do_not_become_product_categories(self) -> None:
+        docs = {f"n{i}": {"title": "新闻", "folder": "官网页面/新闻资讯", "module": curate.MODULES["industry"]}
+                for i in range(3)}
+        docs.update({f"s{i}": {"title": "方案", "folder": "官网页面/解决方案", "module": curate.MODULES["solution"]}
+                     for i in range(3)})
+        topics = curate.topics_for({}, docs, {})
+        self.assertFalse(any(t["slug"].startswith("cat-") for t in topics))
+
+    def test_generated_figure_captions_cannot_supply_source_facts_or_model_codes(self) -> None:
+        block = {"block_id": "0123456789ab", "doc_id": "d0", "status": "flagged", "text": "YFD71XA butterfly valve",
+                 "figure_description": True}
+        topic = {"slug": "products", "by_line": True, "modules": ["20_产品介绍"]}
+        docs = {"d0": {"title": "画册", "module": "20_产品介绍", "folder": "产品画册"}}
+        self.assertEqual(curate.plan(topic, [block], docs, {"d0": "有效"}, {}), {})
+        self.assertEqual(curate.style_codes([block], ["YFD"]), {})
+        self.assertEqual(list(curate.style_codes([{**block, "figure_description": False}], ["YFD"])), ["YFD71XA"])
+
 
 if __name__ == "__main__":
     unittest.main()

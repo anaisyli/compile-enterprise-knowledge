@@ -95,6 +95,35 @@ class OfflineSnapshotTests(unittest.TestCase):
         self.assertTrue(all(p["is_listing"] and p["kind"] == "listing" for p in pages.values()))
         self.assertFalse(website.is_listing_page("How to archive inspection records - Example"))
 
+    def test_online_refresh_preserves_published_identity_across_trailing_slash(self) -> None:
+        pages = {}
+        original = website.record_page(self.store, pages, "https://www.example.com/product/a", "Old",
+                                       [{"locator": "section 1", "text": "Old evidence."}], b"old")
+        refreshed = website.record_page(self.store, pages, "https://www.example.com/product/a/", "New",
+                                        [{"locator": "section 1", "text": "New evidence."}], b"new")
+        self.assertEqual(set(pages), {original["page_id"]})
+        self.assertEqual(refreshed["url"], original["url"])
+        record = json.loads((self.store / "units" / f"{original['page_id']}.json").read_text())
+        self.assertEqual(record["units"][0]["text"], "New evidence.")
+
+    def test_old_slash_duplicates_merge_latest_evidence_into_original_identity(self) -> None:
+        pages = {}
+        first = website.record_page(self.store, pages, "https://www.example.com/product/a", "Old",
+                                    [{"locator": "section 1", "text": "Old evidence."}], b"old")
+        aliases = {}
+        latest = website.record_page(self.store, aliases, "https://www.example.com/product/a/", "New",
+                                     [{"locator": "section 1", "text": "New evidence."}], b"new")
+        first["fetched_at"], latest["fetched_at"] = "2026-11-13", "2026-11-19"
+        pages.update(aliases)
+        self.assertEqual(website.merge_duplicate_page_urls(self.store, pages), 1)
+        self.assertEqual(set(pages), {first["page_id"]})
+        self.assertEqual(pages[first["page_id"]]["html_sha256"], latest["html_sha256"])
+        self.assertEqual(pages[first["page_id"]]["url"], first["url"])
+        record = json.loads((self.store / "units" / f"{first['page_id']}.json").read_text())
+        self.assertEqual(record["item_id"], first["page_id"])
+        self.assertEqual(record["units"][0]["text"], "New evidence.")
+        self.assertTrue((self.store / "units" / f"{latest['page_id']}.json").is_file())
+
     def test_invalid_hash_refuses_the_entire_import_before_writing_pages(self) -> None:
         pages = self.snapshot([("https://www.example.com/first", '<h1>First page</h1><p>A useful description.</p>'),
                                ("https://www.example.com/second", '<h1>Second page</h1><p>Another description.</p>')])

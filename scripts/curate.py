@@ -160,7 +160,7 @@ def topics_for(config: dict[str, Any], docs: dict[str, dict[str, Any]], statuses
     # Product pages follow the categories the website and the catalogs actually use.
     counts: dict[str, int] = defaultdict(int)
     for d in docs.values():
-        if d.get("folder", "").startswith("官网页面/"):
+        if d.get("folder", "").startswith("官网页面/") and d.get("module", MODULES["product"]) == MODULES["product"]:
             counts[d["folder"].split("/", 1)[1]] += 1
     categories = sorted(c for c, n in counts.items() if n >= MIN_CATEGORY_PAGES and c != "公司与服务")
     for category in categories:
@@ -264,7 +264,7 @@ def plan(topic: dict[str, Any], blocks: list[dict[str, Any]], docs: dict[str, di
     unique: set[str] = set()
     for block in blocks:
         doc = docs.get(block["doc_id"])
-        if not doc or block["status"] not in USABLE or statuses.get(block["doc_id"]) not in USABLE_DOCS:
+        if not doc or block.get("figure_description") or block["status"] not in USABLE or statuses.get(block["doc_id"]) not in USABLE_DOCS:
             continue
         name = assign(block, doc, topic, sections)
         if block["block_id"] in keep:
@@ -301,9 +301,11 @@ def page_sections(page: str) -> set[str]:
 def style_codes(blocks: list[dict[str, Any]], prefixes: list[str]) -> dict[str, list[str]]:
     if not prefixes:
         return {}
-    pattern = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, prefixes), key=len, reverse=True)) + r")[\s-]?[A-Z]?-?\d{2,4}(?:-\d+)?\b")
+    pattern = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, prefixes), key=len, reverse=True)) + r")[\s-]?[A-Z]?-?\d{2,4}[A-Z]{0,4}(?:-\d+)?\b")
     found: dict[str, list[str]] = defaultdict(list)
     for block in blocks:
+        if block.get("figure_description"):
+            continue
         for match in pattern.finditer(block["text"]):
             code = re.sub(r"\s+", "-", match.group(0).upper())
             if block["block_id"] not in found[code]:
@@ -440,6 +442,9 @@ def check(out: Path) -> dict[str, Any]:
             unknown = [c for c in cited if c not in allowed]
             if unknown:
                 errors.append(f"第 {number} 行引用了不在本主题原文里的块：{', '.join(unknown)}")
+                continue
+            if any(blocks[c].get("figure_description") for c in cited):
+                errors.append(f"第 {number} 行引用了平台生成的图形描述，不能作为原文事实")
                 continue
             source = squeezed(" ".join(blocks[c]["text"] for c in cited))
             bare = CITATION.sub("", line)

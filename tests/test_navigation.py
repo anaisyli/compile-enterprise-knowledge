@@ -588,6 +588,31 @@ class NavigationTests(unittest.TestCase):
             "status": "kept", "figure_description": True, "hold_reasons": [],
         }))
 
+    def test_merge_ledger_is_idempotent_without_blank_line_or_fingerprint_buildup(self):
+        from governance import merge_ledger, render_ledger
+        records = [
+            {"id": "P-002-MAT-001", "row": ["事项一", "1 项", "待处理", "专员"], "updated": "2026-11-19",
+             "details": ["<!-- fingerprint: deadbeef0000 -->", "", "- 详情一"]},
+            {"id": "P-002-MAT-002", "row": ["事项二", "2 项", "待处理", "专员"], "updated": "2026-11-19",
+             "details": ["- 详情二"]},
+        ]
+        fresh = render_ledger("MAT", "源资料处理台账", "用途", "P-002", "2026-11-19", records)
+        self.assertEqual(fresh.count("<!-- fingerprint:"), 2)
+        self.assertNotIn("deadbeef0000", fresh)
+        # Simulate an old ledger with a human note and accumulated blank lines.
+        old = fresh.replace(
+            "- 详情一\n",
+            "- 详情一\n\n#### 处理记录\n- 2026-11-19：已核对。\n\n\n\n\n",
+            1,
+        )
+        merged1 = merge_ledger(old, fresh)
+        merged2 = merge_ledger(merged1, fresh)
+        merged3 = merge_ledger(merged2, fresh)
+        self.assertEqual(merged1, merged2)
+        self.assertEqual(merged2, merged3)
+        self.assertNotIn("\n\n\n", merged1)
+        self.assertIn("- 2026-11-19：已核对。\n\n### P-002-MAT-002｜事项二", merged1)
+
 
 if __name__ == "__main__":
     unittest.main()

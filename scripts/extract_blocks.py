@@ -553,6 +553,15 @@ def technical_workbook(name: str, units: list[dict[str, Any]]) -> bool:
     return bool(named or len({f.casefold() for f in fields}) >= 3)
 
 
+def reviewed_source_units(build: Path, item_id: str, source_hash: str, source_name: str,
+                          text_dirs: list[Path]) -> list[dict[str, Any]]:
+    """Apply a complete page adoption after assembling all of its machine drafts."""
+    from source_fidelity import reviewed_units
+    units = load_units(text_dirs, item_id)
+    units.extend(reducto_figure_units(build, item_id, source_name))
+    return reviewed_units(build, item_id, source_hash, units)
+
+
 def document_blocks(doc_id: str, item_id: str, units: list[dict[str, str]],
                     preserve_grid: bool = False,
                     sheet_images: dict[str, dict[int, list[str]]] | None = None) -> list[dict[str, Any]]:
@@ -955,12 +964,10 @@ def main() -> int:
         tier = route["tier"]
         extension = extension_of(asset.get("display_name") or "")
         doc_id = f"DOC-{asset['source_hash'][:10]}"
-        from source_fidelity import reviewed_units
-        units = reviewed_units(build, item_id, asset['source_hash'], load_units(text_dirs, item_id))
+        units = reviewed_source_units(build, item_id, asset['source_hash'], asset.get("display_name") or "", text_dirs)
         technical = technical_workbook(asset.get("display_name", ""), units)
         if technical:
             tier = "T2"
-        units.extend(reducto_figure_units(build, item_id, asset.get("display_name") or ""))
         title, folder = package_title(asset, tier, config.get("doc_titles", {}))
         doc = {
             "doc_id": doc_id,
@@ -1120,7 +1127,7 @@ def main() -> int:
             title, folder = f"官网-{name}", "官网页面/公司与服务"
         docs.append({"doc_id": doc_id, "item_id": page["page_id"], "title": title, "folder": folder,
                      "original_name": page["title"], "source_label": "客户官网",
-                     "file_name": safe_name(title) + ".md", "tier": "T1", "module": page["module"],
+                     "file_name": safe_name(re.sub(r"[\\/]", "／", title)) + ".md", "tier": "T1", "module": page["module"],
                      "resource_type": "website", "decision": "web", "source_sha256": page["html_sha256"],
                      "package_path": page["url"], "origin": "website", "fetched_at": page["fetched_at"]})
         page_blocks = document_blocks(doc_id, page["page_id"], units)

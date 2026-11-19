@@ -111,6 +111,22 @@ class SourceFidelityTests(unittest.TestCase):
             self.assertTrue(blocks[1]['reviewed_supplement'])
             self.assertEqual([b['group'] for b in blocks], ['第 2 页', '第 2 页'])
 
+    def test_complete_adoption_does_not_reappend_generated_figure_descriptions(self):
+        from extract_blocks import reviewed_source_units
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            record.update(locator='page 2', text='Words visible on the original page', adopted=True,
+                          note='Compared every source word and rejected generated image captions')
+            write_json(patch_file, {'sample': [record]})
+            write_json(build / 'reducto-units' / 'sample.json', {'figures': {'2': ['Invented YFAY model'],
+                                                                          '3': ['Unreviewed page caption']}})
+            collect_reviews(out, [patch_file], apply=True)
+            with patch('extract_blocks.load_units', return_value=[
+                    {'locator': 'page 2 ocr', 'engine': 'reducto', 'text': 'Machine draft'}]):
+                units = reviewed_source_units(build, 'sample', sha256_file(source), 'catalog.pdf', [])
+            self.assertEqual([u['text'] for u in units], [record['text'], 'Unreviewed page caption'])
+            self.assertTrue(units[1]['figure_description'])
+
     def test_platform_draft_keeps_literal_text_and_rejects_stale_results(self) -> None:
         from render_kb import write_platform_comparison
         with tempfile.TemporaryDirectory() as tmp:

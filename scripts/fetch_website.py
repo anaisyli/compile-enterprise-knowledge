@@ -48,6 +48,7 @@ MODULE_PATHS = [
     ("product", re.compile(r"(?i)product|collection|catalog|shop|item|category|产品")),
     ("solution", re.compile(r"(?i)service|solution|oem|odm|custom|process|服务|定制")),
     ("faq", re.compile(r"(?i)faq|question|问答")),
+    ("industry", re.compile(r"(?i)^(?:news|blog|articles?|20\d{2})$")),
 ]
 EMPTY_SHELL_CHARS = 80
 # Page-builder fragments, feeds, and archive listings repeat other pages' content.
@@ -271,9 +272,11 @@ def page_kind(url: str, text_length: int) -> str:
 
 
 def record_page(store: Path, pages: dict[str, dict[str, Any]], url: str, title: str, units: list[dict[str, str]], raw: bytes) -> dict[str, Any]:
-    page_id = f"web-{short_hash(url, 16)}"
+    key = canonical_snapshot_url(url)
+    previous = next((p for p in pages.values() if canonical_snapshot_url(p["url"]) == key), {})
+    page_id = previous.get("page_id") or f"web-{short_hash(url, 16)}"
+    url = previous.get("url", url)
     html_sha = hashlib.sha256(raw).hexdigest()
-    previous = pages.get(page_id, {})
     length = sum(len(unit["text"]) for unit in units)
     page = {
         "page_id": page_id, "url": url, "title": normalize_space(title) or urlparse(url).path or url,
@@ -376,6 +379,37 @@ def canonical_snapshot_url(url: str) -> str:
         raise ValueError(f"快照里不是可接受的官网网址：{url}")
     return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/") or "/",
                        parsed.query, ""))
+
+
+def merge_duplicate_page_urls(store: Path, pages: dict[str, dict[str, Any]]) -> int:
+    """Repair slash aliases from old crawls, keeping the first identity and latest evidence.
+
+    Original HTML and alias unit files remain available. Validate every replacement before
+    writing, so an incomplete alias cannot replace a working published source.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for page in pages.values():
+        groups.setdefault(canonical_snapshot_url(page["url"]), []).append(page)
+    changes = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        first = min(group, key=lambda p: (p.get("fetched_at", ""), p["url"].endswith("/"), p["page_id"]))
+        latest = max(group, key=lambda p: p.get("fetched_at", ""))
+        record = load_json(store / "units" / f"{latest['page_id']}.json")
+        if record.get("item_id") != latest["page_id"] or canonical_snapshot_url(record.get("url", "")) != canonical_snapshot_url(latest["url"]):
+            raise ValueError(f"正文与快照页面身份不对应：{latest['page_id']}")
+        raw = store / "raw" / f"{latest['html_sha256'][:16]}.html"
+        if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != latest["html_sha256"]:
+            raise ValueError(f"原始 HTML 哈希不一致，不合并：{latest['page_id']}")
+        page = {**latest, "page_id": first["page_id"], "url": first["url"]}
+        changes.append((group, page, {**record, "item_id": first["page_id"], "url": first["url"]}))
+    for group, page, record in changes:
+        write_json(store / "units" / f"{page['page_id']}.json", record)
+        for alias in group:
+            pages.pop(alias["page_id"], None)
+        pages[page["page_id"]] = page
+    return sum(len(group) - 1 for group, _, _ in changes)
 
 
 def is_listing_page(title: str, raw: bytes | None = None) -> bool:
@@ -597,6 +631,9 @@ def main() -> int:
     store = Path(args.out).resolve() / BUILD_DIRECTORY / "website"
     index = store / "pages.json"
     pages = {page["page_id"]: page for page in load_json(index)} if index.is_file() else {}
+    merged_aliases = merge_duplicate_page_urls(store, pages)
+    if merged_aliases:
+        write_json(index, sorted(pages.values(), key=lambda page: page["url"]))
     if args.import_snapshot:
         try:
             report = import_snapshot(Path(args.import_snapshot), config, store, pages, args.reparse)

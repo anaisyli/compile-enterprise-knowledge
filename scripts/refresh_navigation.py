@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, cleanup_record, merge_ledger, parse_ledger, render_ledger
+from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, cleanup_record, merge_ledger, parse_ledger, render_ledger, strip_fingerprints
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, run_lock, write_json, write_jsonl, write_text
 from pictures import INDEX, LIST_CSV, PUBLIC, CONFIRMED_MEDIA, retained_media, retained_section
 
@@ -199,7 +199,7 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
     for kind, (key, title, purpose) in LEDGERS.items():
         ledger_key = next((k for k in texts if Path(k).parent == Path(key).parent), None)
         if ledger_key:
-            details = {match[1]: match[2].split("#### 处理记录", 1)[0].strip().splitlines()
+            details = {match[1]: strip_fingerprints(match[2].split("#### 处理记录", 1)[0].splitlines())
                        for match in re.finditer(r"^###\s+([A-Z]-\d{3}-[A-Z]{3}-\d{3})｜[^\n]*\n([\s\S]*?)(?=^### |\Z)", texts[ledger_key], re.M)}
             records = [{**r, "details": details.get(r["id"], [])} for r in machine.get(kind, [])]
             # Older builds counted spelling/case variants as different risk terms.
