@@ -1111,7 +1111,9 @@ def main() -> int:
             continue
         doc_id = f"WEB-{page['page_id'][4:14]}"
         name = strip_site_name(page["title"], config["own_terms"])
-        if len(parts) >= 2:
+        # Product slugs are often single-segment URLs; check configured categories
+        # first while keeping automatic two-segment classification as fallback.
+        if parts and (parts[0] in config.get("categories", {}) or len(parts) >= 2):
             category = config.get("categories", {}).get(parts[0]) or parts[0].replace("-", " ").title()
             title, folder = f"{category}-{name}", f"官网页面/{safe_name(category)}"
         else:

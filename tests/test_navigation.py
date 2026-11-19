@@ -530,6 +530,44 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(len(units[1]["images"]), 1)
         self.assertEqual(len(facts["page_pictures"]["1"]), 2)
 
+    def test_fetch_website_parser_tables_pre_div_p_and_table_images(self):
+        from fetch_website import PageParser, VALUE_DIV_CLASS
+        html = (
+            "<html><body>"
+            "<div class='p'>Standalone div paragraph</div>"
+            "<div class='p-4'><p>Tailwind padded paragraph</p></div>"
+            "<pre>Raw Materials →\nJaw Crusher →\nFinished Products</pre>"
+            "<table><tr><th rowspan='2'>Material</th><th colspan='2'>Rating</th></tr>"
+            "<tr><td>Moderate</td><td>Moderate</td></tr>"
+            "<tr><td><img src='/img/a.jpg' alt='valve'></td><td>1000*3800</td><td>Low</td></tr></table>"
+            "</body></html>"
+        )
+        parser = PageParser()
+        parser.feed(html)
+        parser.flush()
+        self.assertIsNotNone(VALUE_DIV_CLASS.search("p"))
+        self.assertIsNone(VALUE_DIV_CLASS.search("p-4"))
+        self.assertIsNone(VALUE_DIV_CLASS.search("icon-p"))
+        texts = [t for _, t in parser.blocks]
+        self.assertIn("Standalone div paragraph", texts)
+        self.assertIn("Raw Materials →\nJaw Crusher →\nFinished Products", texts)
+        table_block = next(t for tag, t in parser.blocks if tag == "table")
+        self.assertIn('rowspan="2"', table_block)
+        self.assertIn('colspan="2"', table_block)
+        self.assertEqual(table_block.count("<td>Moderate</td>"), 2)
+        self.assertEqual(len(parser.images), 1)
+        self.assertEqual(parser.images[0][1], "/img/a.jpg")
+
+    def test_literal_dimensions_skips_html_tables_and_price_catches_trailing_cny_gbp(self):
+        from guard_blocks import HARD_PATTERNS
+        from source_fidelity import literal_dimensions
+        mixed = "Size 1000*3800 mm\n<table><tr><td>1000*3800</td></tr></table>"
+        out = literal_dimensions(mixed)
+        self.assertIn(r"Size 1000\*3800 mm", out)
+        self.assertIn("<td>1000*3800</td>", out)
+        self.assertIsNotNone(HARD_PATTERNS["price"].search("Price is 3500 CNY/t"))
+        self.assertIsNotNone(HARD_PATTERNS["price"].search("Cost 120 GBP"))
+
 
 if __name__ == "__main__":
     unittest.main()

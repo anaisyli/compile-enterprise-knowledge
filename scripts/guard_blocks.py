@@ -39,7 +39,7 @@ HARD_PATTERNS = {
     "price": re.compile(
         r"(?i)(?:\b(?:usd|rmb|cny|eur|gbp)\s*[:：]?\s*\d|\bus\$\s*\d|"
         r"(?:[€£¥￥]|\$(?!\d+(?:\.\d+)?\s*(?:\\[a-z]+|\^|_|\$)))\s*\d|"
-        r"\d\s*(?:usd|rmb|eur|元/|美元)|"
+        r"\d\s*(?:usd|rmb|cny|eur|gbp|元/|美元)|"
         # The amount follows the word closely; "报价单-3f2a" is a file title, not a quote.
         r"(?:单价|报价(?!单)|价格|含税|unit\s*price|(?<![a-z])price)[\s:：为是约在]{0,3}(?:usd|rmb|cny|us\$|\$|¥|￥)?\s*\d)"
     ),

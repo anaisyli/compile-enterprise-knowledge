@@ -48,7 +48,10 @@ def validate_review(build: Path, item_id: str, source_hash: str, record: dict) -
 
 def literal_dimensions(text: str) -> str:
     """A multiplication asterisk between digits is source data, not Markdown emphasis."""
-    return re.sub(r'(?<=\d)([ \t]*)\*(?=[ \t]*\d)', r'\1\\*', text)
+    # HTML cells display a literal asterisk already; Markdown backslashes would show.
+    parts = re.split(r'(<table\b.*?</table>)', text, flags=re.I | re.S)
+    return ''.join(part if i % 2 else re.sub(r'(?<=\d)([ \t]*)\*(?=[ \t]*\d)', r'\1\\*', part)
+                   for i, part in enumerate(parts))
 
 
 def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict]) -> list[dict]:

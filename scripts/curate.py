@@ -342,10 +342,19 @@ def prepare(out: Path, config: dict[str, Any]) -> dict[str, Any]:
             if not topic.get("parent") and not topic.get("by_line") and not topic.get("by_product") and section["available"] > SPLIT_AT:
                 slug = f"{topic['slug']}-{safe_name(name)}"
                 topic["split"][name] = slug
-                prefix = (topic.get("file") or topic["title"]).split("-")[0]
-                queue.append({"slug": slug, "title": name, "file": f"{prefix}-{name}", "module": topic["module"], "parent": topic["slug"],
-                              "given": section["pool"], "available": section["available"], "documents": section["documents"]})
-                section["chosen"] = []
+                parent_file = topic.get("file") or topic["title"]
+                # Existing citations must stay available on both sides of a split.
+                # plan() separates cited passages from pool; passing pool alone made
+                # a parent's cited evidence disappear from the child's source input.
+                split_pool = {doc_id: list(group) for doc_id, group in section["pool"].items()}
+                for block in section["chosen"]:
+                    group = split_pool.setdefault(block["doc_id"], [])
+                    if not any(b["block_id"] == block["block_id"] for b in group):
+                        group.append(block)
+                queue.append({"slug": slug, "title": name, "file": f"{parent_file}-{name}", "module": topic["module"], "parent": topic["slug"],
+                              "given": split_pool, "available": section["available"], "documents": section["documents"]})
+                retained = set(CITATION.findall(page))
+                section["chosen"] = [b for b in section["chosen"] if b["block_id"] in retained]
         chosen = [b for s in sections.values() for b in s["chosen"]]
         # The page's own heading wins: people rename topics by editing it.
         topic["title"] = page_title(page) or topic["title"]

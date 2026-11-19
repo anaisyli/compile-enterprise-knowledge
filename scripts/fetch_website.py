@@ -16,6 +16,7 @@ import sys
 import time
 import zipfile
 from datetime import datetime
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -32,10 +33,11 @@ from kb_state import restore
 USER_AGENT = f"compile-enterprise-knowledge/{SKILL_VERSION} (+client website reader)"
 SKIP_EXTENSIONS = re.compile(r"(?i)\.(?:jpe?g|png|gif|webp|svg|ico|pdf|zip|rar|mp4|mov|mp3|css|js|xml|json|docx?|xlsx?|pptx?)$")
 SKIP_TAGS = {"script", "style", "noscript", "nav", "footer", "header", "form", "svg", "iframe", "select", "button"}
-BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "dt", "dd", "blockquote", "summary"}
+BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "figcaption", "dt", "dd", "blockquote", "summary", "pre"}
+TABLE_TAGS = {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption"}
 # Standalone <strong>/<b> outside a paragraph or heading (common for FAQ questions in accordion divs).
 INLINE_BLOCK_TAGS = {"strong", "b"}
-VALUE_DIV_CLASS = re.compile(r"(?i)(?:^|[\s_-])(?:counter|count|number|stat|metric|tit|title)(?:$|[\s_-])")
+VALUE_DIV_CLASS = re.compile(r"(?i)(?:^|[\s_-])(?:counter|count|number|stat|metric|tit|title)(?:$|[\s_-])|(?:^|\s)p(?:$|\s)")
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 HEADINGS = {"h1", "h2", "h3", "h4"}
 # Customer stories need the client's consent, like cases in documents.
@@ -68,6 +70,8 @@ class PageParser(HTMLParser):
         self.title = ""
         self.in_title = False
         self.stack: list[tuple[str, bool]] = []
+        self.table_depth = 0
+        self.table_parts: list[str] = []
         # (index of the text block it belongs to, address, alt text) for each picture in the content.
         self.images: list[tuple[int, str, str]] = []
 
@@ -86,13 +90,28 @@ class PageParser(HTMLParser):
             # Lazy-loading themes keep the real address in data-src.
             src = values.get("data-src") or values.get("data-lazy-src") or values.get("src") or ""
             if src and not src.startswith("data:"):
-                # Inside an open paragraph the picture belongs to it; otherwise to the text before it.
-                position = len(self.blocks) if self.current is not None else len(self.blocks) - 1
+                # Inside an open paragraph or table the picture belongs to it; otherwise to the text before it.
+                position = len(self.blocks) if (self.current is not None or self.table_depth) else len(self.blocks) - 1
                 self.images.append((position, src, normalize_space(values.get("alt") or values.get("title") or "")))
         if tag == "a":
-            href = dict(attrs).get("href")
+            href = values.get("href")
             if href:
                 self.links.append(href)
+        if tag == "table" and not self.skip:
+            if not self.table_depth:
+                self.flush()
+                self.table_parts = []
+            self.table_depth += 1
+        if self.table_depth and not self.skip:
+            # Keep the source grid, including repeated values and merged headers. Only
+            # inert table markup survives; website scripts, styles and attributes do not.
+            if tag in TABLE_TAGS:
+                spans = "".join(f' {key}="{values[key]}"' for key in ("rowspan", "colspan")
+                                if tag in {"td", "th"} and re.fullmatch(r"[1-9]\d*", values.get(key) or ""))
+                self.table_parts.append(f"<{tag}{spans}>")
+            elif tag == "br":
+                self.table_parts.append("<br>")
+            return
         if tag == "title":
             self.in_title = True
         if tag in BLOCK_TAGS and not self.skip:
@@ -115,18 +134,33 @@ class PageParser(HTMLParser):
                     break
         if tag == "title":
             self.in_title = False
+        if self.table_depth:
+            if tag in TABLE_TAGS:
+                self.table_parts.append(f"</{tag}>")
+            if tag == "table":
+                self.table_depth -= 1
+                if not self.table_depth:
+                    # Keep each grid together. Repeated page-furniture cleanup must not
+                    # mistake a standalone </tr> or common cell value for navigation.
+                    table = re.sub(r">\s+<", "><", "".join(self.table_parts))
+                    self.blocks.append(("table", table))
+                    self.table_parts = []
+            return
         if tag in BLOCK_TAGS or (tag in INLINE_BLOCK_TAGS and self.tag == tag) or (tag == "div" and self.tag == "div"):
             self.flush()
 
     def handle_data(self, data: str) -> None:
         if self.in_title:
             self.title += data
+        elif self.table_depth and not self.skip:
+            self.table_parts.append(escape(re.sub(r"\s+", " ", data)))
         elif self.current is not None and not self.skip:
             self.current.append(data)
 
     def flush(self) -> None:
         if self.current is not None:
-            text = normalize_space("".join(self.current))
+            raw = "".join(self.current)
+            text = "\n".join(normalize_space(line) for line in raw.splitlines()).strip() if self.tag == "pre" else normalize_space(raw)
             if text:
                 self.blocks.append((self.tag, text))
         self.current = None
@@ -427,7 +461,10 @@ def deduplicate_shared_sections(store: Path, pages: dict[str, dict[str, Any]]) -
         return (0 if not parts else 1 if page.get("module") == MODULES["company"] else 2,
                 len(parts), page["url"])
 
-    owners = {text: min(ids, key=rank) for text, ids in occurrences.items() if len(ids) >= 3}
+    # Identical descriptions/specifications shared by a few related products remain
+    # evidence on each page. Only sections common to most of the site are furniture.
+    threshold = max(3, (len(records) + 1) // 2)
+    owners = {text: min(ids, key=rank) for text, ids in occurrences.items() if len(ids) >= threshold}
     removed = []
     for page_id, record in records.items():
         kept = []
@@ -456,6 +493,10 @@ def import_snapshot(path: Path, config: dict[str, Any], store: Path,
             raise ValueError("快照 pages.json 必须是页面数组。")
         previous_report = reader.read("fetch-report.json", required=False)
         previous_report = json.loads(previous_report.decode("utf-8-sig")) if previous_report else None
+        # Repeated offline imports keep the actual last online crawl, rather than
+        # nesting offline reports until its failed URLs disappear from governance.
+        while previous_report and isinstance(previous_report.get("last_crawl"), dict):
+            previous_report = previous_report["last_crawl"]
         known_urls = {canonical_snapshot_url(page["url"]): page for page in pages.values()}
         hosts = allowed_hosts(config)
         pending = []
@@ -519,6 +560,7 @@ def import_snapshot(path: Path, config: dict[str, Any], store: Path,
         return {"offline": True, "imported": len(pending), "reparsed": len(pending) if reparse else 0,
                 "failed": [], "needs_browser": [], "pictures": 0,
                 "shared_sections_removed": len(removed),
+                **({"using_snapshot": previous_report["using_snapshot"]} if previous_report and previous_report.get("using_snapshot") else {}),
                 **({"last_crawl": previous_report} if previous_report else {})}
     finally:
         reader.close()

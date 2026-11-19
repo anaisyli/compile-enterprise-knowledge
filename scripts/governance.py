@@ -313,10 +313,10 @@ def build(
                                          f"{len(unverified)} 个词", "待判断", "知识库专员", detail)
     if reports:
         report_name = (f"{len(reports)} 处验货或检测报告模板" if reports == report_templates
-                       else f"{len(reports)} 处检测或审核报告（含 {len(report_templates)} 处模板）")
+                       else f"{len(reports)} 处提及检测或审核报告的内容（含 {len(report_templates)} 处模板）")
         anm_ids["report_page"] = add("ANM", "report_page", report_name, f"{len(reports)} 处", "待判断",
                                      "知识库专员",
-                                     ["- 为什么有风险：模板及示例值不能作为真实检测、认证或验货结果；实际报告还需核对日期、主体和适用范围。",
+                                     ["- 为什么有风险：自动命中报告字样不代表资料中已有真实报告，选型建议也可能要求索取报告；模板及示例值不能作为真实检测、认证或验货结果，实际报告还需核对日期、主体和适用范围。",
                                       "- 现在怎么处理：已入库并标 ⚠；模板只作流程参考，不作为已通过检测或认证的证据。", ""]
                                      + [f"- {page}" for page in sorted(reports)])
 
