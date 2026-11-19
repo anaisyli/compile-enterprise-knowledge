@@ -38,6 +38,9 @@ TABLE_TAGS = {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption"}
 # Standalone <strong>/<b> outside a paragraph or heading (common for FAQ questions in accordion divs).
 INLINE_BLOCK_TAGS = {"strong", "b"}
 VALUE_DIV_CLASS = re.compile(r"(?i)(?:^|[\s_-])(?:counter|count|number|stat|metric|tit|title)(?:$|[\s_-])|(?:^|\s)p(?:$|\s)")
+COUNTER_ATTRS = ("data-count", "data-to-value", "data-purecounter-end", "data-target", "data-stop", "data-number", "data-end")
+COUNTER_VALUE = re.compile(r"\d+(?:[.,]\d+)*")
+COUNTER_PLACEHOLDER = re.compile(r"0+(?:[.,]0+)?")
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 HEADINGS = {"h1", "h2", "h3", "h4"}
 # Customer stories need the client's consent, like cases in documents.
@@ -73,6 +76,7 @@ class PageParser(HTMLParser):
         self.stack: list[tuple[str, bool]] = []
         self.table_depth = 0
         self.table_parts: list[str] = []
+        self.counter_stack: list[tuple[int, str, list[str]]] = []
         # (index of the text block it belongs to, address, alt text) for each picture in the content.
         self.images: list[tuple[int, str, str]] = []
 
@@ -125,11 +129,27 @@ class PageParser(HTMLParser):
             # Number cards and standalone div titles were previously dropped because only
             # paragraph/heading tags opened a text block. Preserve their real text in place.
             self.current, self.tag = [], "div"
+        if tag not in VOID_TAGS and not self.skip:
+            for attr in COUNTER_ATTRS:
+                raw_val = (values.get(attr) or "").strip()
+                if COUNTER_VALUE.fullmatch(raw_val):
+                    self.counter_stack.append((len(self.stack), raw_val, []))
+                    break
 
     def handle_endtag(self, tag: str) -> None:
         if tag not in VOID_TAGS:
             for index in range(len(self.stack) - 1, -1, -1):
                 if self.stack[index][0] == tag:
+                    while self.counter_stack and self.counter_stack[-1][0] > index:
+                        _, target, parts = self.counter_stack.pop()
+                        inner = "".join(parts)
+                        text = target if (not inner.strip() or COUNTER_PLACEHOLDER.fullmatch(inner.strip())) else inner
+                        if self.counter_stack:
+                            self.counter_stack[-1][2].append(text)
+                        elif self.table_depth and not self.skip:
+                            self.table_parts.append(escape(re.sub(r"\s+", " ", text)))
+                        elif self.current is not None and not self.skip:
+                            self.current.append(text)
                     self.skip -= sum(int(skipped) for _, skipped in self.stack[index:])
                     del self.stack[index:]
                     break
@@ -153,6 +173,8 @@ class PageParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.in_title:
             self.title += data
+        elif self.counter_stack and not self.skip:
+            self.counter_stack[-1][2].append(data)
         elif self.table_depth and not self.skip:
             self.table_parts.append(escape(re.sub(r"\s+", " ", data)))
         elif self.current is not None and not self.skip:

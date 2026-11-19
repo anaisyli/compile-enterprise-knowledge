@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import fetch_website as website
 from kb_common import BUILD_DIRECTORY, short_hash
-from kb_state import WEBSITE, restore, save
+from kb_state import WEBSITE, merge_pages, restore, save
 
 
 class OfflineSnapshotTests(unittest.TestCase):
@@ -94,6 +94,17 @@ class OfflineSnapshotTests(unittest.TestCase):
         website.import_snapshot(self.source, self.config, self.store, pages, reparse=True)
         self.assertTrue(all(p["is_listing"] and p["kind"] == "listing" for p in pages.values()))
         self.assertFalse(website.is_listing_page("How to archive inspection records - Example"))
+
+    def test_save_restore_index_does_not_resurrect_stale_slash_alias(self) -> None:
+        self.root.mkdir(exist_ok=True)
+        source, target = self.root / "source-pages.json", self.root / "vault-pages.json"
+        old = {"page_id": "web-old", "url": "https://www.example.com", "fetched_at": "2026-11-13"}
+        current = {"page_id": "web-current", "url": "https://www.example.com/", "fetched_at": "2026-11-19"}
+        source.write_text(json.dumps([current]), encoding="utf-8")
+        target.write_text(json.dumps([old, current]), encoding="utf-8")
+        self.assertTrue(merge_pages(source, target))
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), [current])
+        self.assertFalse(merge_pages(source, target))
 
     def test_online_refresh_preserves_published_identity_across_trailing_slash(self) -> None:
         pages = {}
@@ -177,6 +188,27 @@ class OfflineSnapshotTests(unittest.TestCase):
         fresh = self.root / "fresh-run"
         restore(fresh, vault)
         self.assertEqual((fresh / BUILD_DIRECTORY / "website" / "raw" / raw.name).read_bytes(), raw.read_bytes())
+
+    def test_animated_counter_placeholders_read_target_attribute(self) -> None:
+        html = (
+            "<html><body>"
+            '<h3><span class="odometer" data-count="18">00</span>+</h3><p>Years</p>'
+            '<h3><span class="odometer" data-count="98">00</span>%</h3><p>Retention</p>'
+            '<p>Clients: <span class="purecounter" data-purecounter-end="232"></span></p>'
+            '<div class="elementor-counter-number" data-to-value="1,200">0</div>'
+            '<button data-count="3">Comments</button>'
+            "</body></html>"
+        )
+        parser = website.PageParser()
+        parser.feed(html)
+        parser.flush()
+        texts = [t for _, t in parser.blocks]
+        self.assertIn("18+", texts)
+        self.assertIn("98%", texts)
+        self.assertIn("Clients: 232", texts)
+        self.assertIn("1,200", texts)
+        self.assertNotIn("00+", texts)
+        self.assertNotIn("00%", texts)
 
 
 if __name__ == "__main__":
