@@ -386,7 +386,14 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
             elif current in removed_groups:
                 parts.extend(["> （本页因清理了敏感内容，不附未脱敏的整页原图；清理详情见《内容清理记录》。）", ""])
-            for note in page_notes.get(current, []) if not any(b.get('transcription_review') for b in blocks if b['group'] == current) else []:
+            has_transcript = any(b.get('transcription_review') for b in blocks if b['group'] == current)
+            for note in page_notes.get(current, []):
+                # A checked transcript supersedes old OCR-error notes; product/series
+                # attribution remains useful and must not disappear with those notes.
+                unresolved_client_question = any(marker in note for marker in
+                                                 ("CUS-", "待客户确认", "不作分配", "尚待客户确认"))
+                if has_transcript and not unresolved_client_question:
+                    continue
                 if re.match(r"^(?:⚠\s*)?(?:看图整理|同页表格的旧人工整理稿)[（：]", note) and "\n" in note:
                     header, body = note.split("\n", 1)
                     parts.extend([f"> {header.strip()}", "", *ensure_table_spacing(body.lstrip("\n")).splitlines(), ""])
@@ -399,6 +406,8 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
                 parts.extend([review_message, ''])
                 for note in dict.fromkeys(b.get('transcription_review_note') for b in blocks
                                          if b['group'] == current and b.get('transcription_review_note')):
+                    if any(b.get('reviewed_supplement') for b in blocks if b['group'] == current):
+                        note = note.replace('校正版替换本页错误提取正文', '另附人工校对稿；平台原稿保持原样')
                     parts.extend([f'> {literal_dimensions(line)}' if line.strip() else '>' for line in ensure_table_spacing(note).splitlines()] + [''])
             table_columns = []
         if block["status"] == "pending_client" and (block["group"], block["client_hold"]) not in pending_marked:

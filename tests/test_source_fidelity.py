@@ -136,6 +136,64 @@ class SourceFidelityTests(unittest.TestCase):
             write_platform_comparison(run, build, docs, config, {})
             self.assertNotIn("1.76 MPa", output.read_text(encoding="utf-8"))
 
+    def test_explicitly_adopted_review_replaces_body_but_preserves_drawing_and_cache(self):
+        from extract_blocks import document_blocks
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            record.update(locator='page 2', text='<table><tr><td rowspan="2">B</td><td>0.01</td></tr>'
+                          '<tr><td>0.03</td></tr></table>', adopted=True, part='non_drawing',
+                          note='Compared the merged cells with the source image; ambiguity retained.')
+            write_json(patch_file, {'sample': [record]})
+            collect_reviews(out, [patch_file], apply=True)
+            cache = build / 'reducto-units' / 'sample.json'
+            write_json(cache, {'units': [{'locator': 'page 2 ocr', 'text': 'wrong cells'}]})
+            original_cache = cache.read_bytes()
+            drawing = {'locator': 'page 2 drawing', 'text': 'Drawing', 'dimension_drawing': True}
+            units = reviewed_units(build, 'sample', sha256_file(source), [
+                {'locator': 'page 1 ocr', 'text': 'other page'}, drawing,
+                {'locator': 'page 2 ocr', 'engine': 'reducto', 'text': 'wrong cells'},
+                {'locator': 'page 2 check', 'text': 'old incorrect supplement'},
+                {'locator': 'page 2 figure 1', 'text': 'inferred description', 'figure_description': True}])
+            self.assertEqual({u['locator'] for u in units}, {'page 1 ocr', 'page 2', 'page 2 drawing'})
+            self.assertEqual(next(u['text'] for u in units if u['locator'] == 'page 2'), record['text'])
+            self.assertEqual(cache.read_bytes(), original_cache)
+            blocks = document_blocks('doc', 'sample', units)
+            corrected = next(b for b in blocks if b['locator'] == 'page 2')
+            self.assertFalse(corrected['ai_read'])
+            self.assertNotIn('reviewed_supplement', corrected)
+
+    def test_adopted_review_hides_stale_ocr_error_but_keeps_unresolved_cus_note(self):
+        from render_kb import render_doc
+        doc = {"doc_id": "d1", "title": "YFD343H", "tier": "T2", "module": "20_产品介绍",
+               "item_id": "sample", "source_sha256": "source-hash"}
+        block = {"kind": "text", "group": "第 14 页", "locator": "page 14", "status": "valid",
+                 "flags": [], "text": "Corrected transcript", "transcription_review": True}
+        notes = {"第 14 页": [
+            "⚠ 看图核对：旧OCR错字，以原图为准（P-002-ANM-004）",
+            "⚠ 看图核对：等级含义尚待客户确认（P-002-CUS-006）",
+        ]}
+
+        rendered = render_doc(doc, [block], "有效", [], {}, {}, page_notes=notes)
+
+        self.assertIn("Corrected transcript", rendered)
+        self.assertNotIn("旧OCR错字", rendered)
+        self.assertIn("P-002-CUS-006", rendered)
+
+    def test_adoption_requires_evidence_and_is_a_review_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, build, source, record, patch_file = self.make_review_fixture(Path(tmp))
+            collect_reviews(out, [patch_file], apply=True)
+            record['adopted'] = True
+            write_json(patch_file, {'sample': [record]})
+            with self.assertRaisesRegex(ValueError, 'Missing reviewed adoption evidence'):
+                collect_reviews(out, [patch_file], apply=True, replace_reviewed=True)
+            record['note'] = 'Rechecked source image.'
+            write_json(patch_file, {'sample': [record]})
+            with self.assertRaisesRegex(ValueError, 'Already reviewed'):
+                collect_reviews(out, [patch_file], apply=True)
+            self.assertEqual(collect_reviews(out, [patch_file], apply=True, replace_reviewed=True)['replaced'], 1)
+            self.assertTrue(json.loads((build / 'reviewed-pages.json').read_text(encoding='utf-8'))['sample'][0]['adopted'])
+
     def test_section_title_prints_once_but_a_later_equal_paragraph_is_kept(self) -> None:
         from render_kb import render_doc
         doc = {"doc_id": "d1", "title": "Word sample", "tier": "T2", "module": "20_产品介绍",

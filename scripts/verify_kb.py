@@ -398,7 +398,7 @@ def main() -> int:
                         errors.append(f"source line lost: {doc['title']} {unit['locator']}")
                         break
                     continue
-                text = normalize_space(line)
+                text = normalize_space(re.sub(r"<br\s*/?>", "", line, flags=re.IGNORECASE))
                 if unit["locator"].endswith(" ocr") and ocr_format_key(text) in accounted_ocr:
                     continue  # The same words are present; only OCR list formatting differs.
                 if text and squeeze(text) not in accounted and (platform_page or not FURNITURE.search(text)) and doc.get("origin") != "website":

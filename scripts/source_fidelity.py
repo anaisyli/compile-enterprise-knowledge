@@ -23,6 +23,10 @@ def validate_review(build: Path, item_id: str, source_hash: str, record: dict) -
         raise ValueError(f'Stale reviewed transcript: {item_id}')
     excluded = record.get('exclude_kind')
     text = record.get('text', '')
+    if 'adopted' in record and not isinstance(record['adopted'], bool):
+        raise ValueError(f'Invalid reviewed adoption: {item_id}')
+    if record.get('adopted') and not str(record.get('note', '')).strip():
+        raise ValueError(f'Missing reviewed adoption evidence: {item_id}')
     if not isinstance(text, str) or not record.get('reviewed_by') or not record.get('image_sha256'):
         raise ValueError(f'Incomplete page review: {item_id}')
     if excluded:
@@ -68,7 +72,7 @@ def reviewed_units(build: Path, item_id: str, source_hash: str, units: list[dict
                           'reviewed_by': record['reviewed_by'], 'review_note': record.get('note', '')})
             continue
         platform_page = any(u['locator'] == locator + ' ocr' and is_platform_page_unit(u) for u in units)
-        if platform_page and not record.get('exclude_kind'):
+        if platform_page and not record.get('exclude_kind') and not record.get('adopted'):
             # A previous full-page human transcript is evidence to retain, not
             # permission to replace the platform page selected for this build.
             units.append({'locator': locator + ' review', 'text': record['text'], 'engine': 'reviewed',
@@ -120,7 +124,7 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
                     raise ValueError(f'Review image must be inside run directory: {item_id}')
                 normalized = {k: record[k] for k in ('locator', 'text', 'reviewed_by', 'note',
                               'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part',
-                              'split', 'withheld_original') if k in record}
+                              'split', 'withheld_original', 'adopted') if k in record}
                 normalized['image_file'] = (Path('reviewed-page-images') / item_id /
                     (record['image_sha256'] + image.suffix.lower())).as_posix()
                 key = (item_id, record['locator'])
@@ -137,7 +141,7 @@ def collect_reviews(out: Path, patches: list[Path], *, apply: bool = False,
         if prior:
             # Image paths may differ before this collector made them portable.
             same = all(prior[0].get(k, '') == record.get(k, '') for k in
-                       ('text', 'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part'))
+                       ('text', 'source_sha256', 'image_sha256', 'exclude_kind', 'excluded_reason', 'part', 'adopted'))
             if same:
                 unchanged += 1
             elif not replace_reviewed:

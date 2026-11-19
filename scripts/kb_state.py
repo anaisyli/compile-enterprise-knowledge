@@ -59,7 +59,13 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
         for root in (build / directory, vault / target):
             for item in root.glob("*.json") if root.is_dir() else []:
                 found.append((build / directory / item.name, vault / target / item.name))
+    # Original HTML is local evidence too: offline imports/reparses must remain reproducible
+    # after the expendable run directory is removed.
+    for root in (build / "website" / "raw", vault / WEBSITE / "raw"):
+        for item in root.glob("*.html") if root.is_dir() else []:
+            found.append((build / "website" / "raw" / item.name, vault / WEBSITE / "raw" / item.name))
     found.append((build / "website" / "fetch-report.json", vault / WEBSITE / "fetch-report.json"))
+    found.append((build / "website" / "parse-report.json", vault / WEBSITE / "parse-report.json"))
     found.append((build / "website" / "pictures.json", vault / WEBSITE / "pictures.json"))
     return sorted(set(found))
 
