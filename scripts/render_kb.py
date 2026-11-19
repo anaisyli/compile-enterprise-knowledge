@@ -857,6 +857,16 @@ def write_exports(build: Path, visible: list[dict[str, Any]], docs: dict[str, di
                             + ["是" if entry["conflict"] else "", len(entry["sources"]), " ".join(PICTURE_FILES[i] for i in entry["images"] if i in PICTURE_FILES)])
 
 
+def is_sensitive_removal(block: dict[str, Any]) -> bool:
+    """Whether a removed block hides sensitive page content (and thus must withhold the page picture)."""
+    if block.get("status") != "removed":
+        return False
+    # Discarding AI-generated Reducto figure descriptions via drop_blocks does not remove sensitive page content.
+    if block.get("figure_description") and block.get("hold_reasons") == ["reviewer_dropped"] and not block.get("reviewed_removal"):
+        return False
+    return True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render the source layer, ledgers, register, and exports.")
     parser.add_argument("--out", required=True, help="Run directory")
@@ -962,7 +972,7 @@ def main() -> int:
     checks = page_check_notes(build, gov)
     published, statuses = {}, {}
     # A page picture shows the whole page, so pages where sensitive content was removed do not get one.
-    unsafe = {(b["doc_id"], b["group"]) for b in blocks if b["status"] == "removed"}
+    unsafe = {(b["doc_id"], b["group"]) for b in blocks if is_sensitive_removal(b)}
     package_read_only = bool(config.get("package_read_only"))
     originals = make_aliases(routes, docs, order, package_read_only)
     twins = twin_links(routes, docs, order, package_read_only)

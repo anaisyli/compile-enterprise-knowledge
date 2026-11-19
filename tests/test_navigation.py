@@ -568,6 +568,26 @@ class NavigationTests(unittest.TestCase):
         self.assertIsNotNone(HARD_PATTERNS["price"].search("Price is 3500 CNY/t"))
         self.assertIsNotNone(HARD_PATTERNS["price"].search("Cost 120 GBP"))
 
+    def test_is_sensitive_removal_excludes_pure_figure_description_drops(self):
+        from render_kb import is_sensitive_removal
+        self.assertFalse(is_sensitive_removal({
+            "status": "removed", "figure_description": True, "hold_reasons": ["reviewer_dropped"],
+        }))
+        self.assertTrue(is_sensitive_removal({
+            "status": "removed", "figure_description": True, "hold_reasons": ["price"],
+        }))
+        self.assertTrue(is_sensitive_removal({
+            "status": "removed", "figure_description": True,
+            "hold_reasons": ["reviewer_dropped", "customer_reference"],
+            "reviewed_removal": {"reason": "customer_reference"},
+        }))
+        self.assertTrue(is_sensitive_removal({
+            "status": "removed", "hold_reasons": ["reviewer_dropped"],
+        }))
+        self.assertFalse(is_sensitive_removal({
+            "status": "kept", "figure_description": True, "hold_reasons": [],
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()
