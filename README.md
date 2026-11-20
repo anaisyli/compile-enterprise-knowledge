@@ -76,18 +76,17 @@
 5. 想单独确认链接都能用：`python scripts/kb_relink.py --vault "<知识库项目文件夹>" --check`，会数出“打开原件 / 打开文件夹”链接和 `[[…]]` 链接各有几个打不开。
 6. 对方以后要重建，用 `run_pipeline.py --vault <知识库> --package <初筛包>`；跑过 `kb_relink.py` 之后可以不写 `--package`。
 
-**交给 Codex 做的话**，把下面这段发给它，三个尖括号换成对方电脑上的实际位置（只有一个初筛包就删掉“初筛包 2”那行和命令里的第二个 `--package`）：
+**交给 Codex / AI 工具做的话**，把下面这段发给它，把尖括号换成对方电脑上的实际位置（有几个初筛包就每行填一个，不用自己改命令参数）：
 
 ```text
 用 compile-enterprise-knowledge 这个 skill（先 git pull 到最新版）帮我把一个从别的电脑拷过来的知识库修好链接。
 
 知识库：<知识库文件夹的完整路径>
-初筛包 1：<第一个初筛包的完整路径>
-初筛包 2：<第二个初筛包的完整路径>
+初筛包：<初筛包文件夹的完整路径；如有多个初筛包，每行填一个>
 
 只做下面三步，不要重建、不要提取、不要改别的文件：
-1. 先试运行（不改东西）：
-   python scripts/kb_relink.py --vault "<知识库>" --package "<初筛包 1>" --package "<初筛包 2>" --dry-run
+1. 先试运行（不改东西）：按我上面提供的全部初筛包路径（有几个就传几个 --package）运行：
+   python scripts/kb_relink.py --vault "<知识库>" --package "<初筛包路径>" ... --dry-run
    把输出里的 packages（新旧路径对应）、pages_relinked、originals_linked、problems 告诉我。如果新旧路径对错了，停下问我。
 2. 没问题再正式运行（同一条命令去掉 --dry-run）。它会改链接、重建“打开原件”用的硬链接，最后自动检查一遍。
 3. 再单独检查一次：
