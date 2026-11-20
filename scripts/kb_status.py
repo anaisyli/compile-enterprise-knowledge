@@ -35,6 +35,13 @@ def read(path: Path, default: Any) -> Any:
     return load_json(path) if path.is_file() else default
 
 
+def external_summary(vault: Path | None) -> dict[str, Any] | None:
+    if not vault:
+        return None
+    from research import status as research_status
+    return research_status(vault)
+
+
 def gather(run: Path, vault: Path | None) -> dict[str, Any]:
     build = run / BUILD_DIRECTORY
     docs = {d["doc_id"]: d for d in load_jsonl(build / "docs.jsonl")}
@@ -98,6 +105,9 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
         "topics_skipped": [(t["topic"], t["skipped"]) for t in topics if t.get("blocks") and t["slug"] not in written and t.get("skipped")],
         "warnings": read(build / "校验结果.json", {}).get("warnings", []),
         "sections": section_rows(run),
+        "ledger": read(build / "curation-ledger.json", {}),
+        # External research lives in the vault only; every writer of the overview reads it the same way.
+        "external": external_summary(vault),
         "build": str(build),
         "ledgers": read(build / "governance-summary.json", {}),
         "terms_to_review": len(load_jsonl(build / "review-queue.jsonl")),
@@ -136,6 +146,12 @@ def overview(state: dict[str, Any]) -> list[str]:
                      else "- 还没有整理页：运行 curate.py prepare，由 AI 写好后再重跑。")
     if state["topics_without_page"]:
         lines.append(f"- 预备整理主题：{len(state['topics_without_page'])} 个，详情见覆盖与缺口。")
+    lines.extend(["", "## 写文章用", "",
+                  "- 写作目录（每页的别名和小板块）：[[01_工作台/写作目录|写作目录]]；取资料用 `kb_lookup.py pack`。"])
+    external = state.get("external")
+    if external:
+        lines.append(f"- 外部公共知识：{external['pages']} 页，待抽检 {len(external['to_spot_check'])} 页，"
+                     f"过了复查日期 {len(external['overdue'])} 页；待调研缺口 {external['todo']} 个（`research.py status`）。")
 
     lines.extend(["", "## 来源层：净化后的原文", "", "位置：`02_源资料/10_净化原文`。原文只删不改，每份开头有来源卡片。", ""])
     folders = Counter(docs[d]["folder"].split("/")[0] for d in published)
@@ -163,6 +179,9 @@ def overview(state: dict[str, Any]) -> list[str]:
     counts = section_counts(state["sections"])
     if counts:
         gaps.append("- 小板块：" + "，".join(f"{status} {counts[status]}" for status in STATUS_ORDER if counts[status]))
+    left = state.get("ledger", {}).get("total", {}).get("未处理", 0)
+    if left:
+        gaps.append(f"- 整理覆盖：还有 {left} 段原文在整理页里没有去处，见覆盖与缺口的“整理覆盖账本”")
     if state["ocr"]:
         gaps.append(f"- 已入库资料中尚无可检索文字的图片页：{len(state['ocr'])} 份资料，共 {sum(n for _, n in state['ocr'])} 页；是否需要识别见源资料处理台账。")
     cells = state["cells"]
@@ -202,7 +221,7 @@ def section_rows(run: Path) -> list[dict[str, Any]]:
     text = {slug: path.read_text(encoding="utf-8") if path.is_file() else None for slug, path in pages.items()}
     rows: list[dict[str, Any]] = []
     for key in MODULES:
-        own = [t for t in topics if t["module"] == key and not t.get("parent")]
+        own = [t for t in topics if t["module"] == key and not t.get("parent") and not t.get("brief")]
         if not own and table.get(key):
             own = [{"slug": None, "topic": "", "sections": {s["name"]: {"available": 0, "documents": 0} for s in table[key]}, "split": {}}]
         hints = {s["name"]: s.get("how", "") for s in table.get(key, [])}
@@ -224,7 +243,7 @@ def section_rows(run: Path) -> list[dict[str, Any]]:
                 else:
                     written = page is not None and name in page_sections(page)
                 # One catalog is one product line: a single source is what such a section always has.
-                single_ok = topic.get("by_line")
+                single_ok = topic.get("by_line") or topic.get("by_doc")
                 if not info["available"]:
                     status, how = "缺", hints.get(name, "补这方面的资料")
                 elif not written:
@@ -237,6 +256,27 @@ def section_rows(run: Path) -> list[dict[str, Any]]:
                              "available": info["available"], "documents": info["documents"],
                              "page": child or topic["slug"], "status": status, "how": how})
     return rows
+
+
+LEDGER_ORDER = ("写进", "原样表", "指针", "重复", "不需要写", "已归类", "决定不写", "未处理")
+
+
+def ledger_section(ledger: dict[str, Any]) -> list[str]:
+    """Every source passage and where it went: the check that nothing was left out of the pages."""
+    total = ledger.get("total") or {}
+    if not any(total.values()):
+        return []
+    auto = ledger.get("auto", {})
+    lines = ["## 整理覆盖账本", "",
+             f"可用原文 {sum(total.values())} 段要在整理页里有去处：" + "，".join(f"{k} {total.get(k, 0)}" for k in LEDGER_ORDER if total.get(k)) + "。"
+             f"另有脚本自动处理的：明显噪音 {auto.get('noise', 0)} 段、重复 {auto.get('repeats', 0)} 段（由第一次出现的那段代表）。",
+             "“写进”= 写成要点；“原样表”= 原表放进整理页；“指针”= 一句话说明加原文位置；“重复”“不需要写”= AI 在 ledger.jsonl 里登记，"
+             "含型号、数字、标准号的段不能标不需要写；“未处理”不是 0 时校验不通过（kb-config.json 写 `\"curation\": {\"ledger\": \"warn\"}` 时只提醒）。", "",
+             "| 主题 | " + " | ".join(LEDGER_ORDER) + " |", "| --- |" + " ---: |" * len(LEDGER_ORDER)]
+    for slug, row in ledger.get("topics", {}).items():
+        lines.append(f"| {row.get('title', slug)}（`{slug}`） | " + " | ".join(str(row.get(k, 0)) for k in LEDGER_ORDER) + " |")
+    lines.append("")
+    return lines
 
 
 def coverage(state: dict[str, Any], run: Path) -> list[str]:
@@ -252,6 +292,7 @@ def coverage(state: dict[str, Any], run: Path) -> list[str]:
              "“缺”= 一段原文也没有。分类按关键词自动做，分错了改 kb-config.json 的 sections。", ""]
     if state.get("build_stage") == "sources_only":
         lines.extend(["当前仅构建来源层（sources_only）；整理页需获批准后再编写。“有原文没整理”属于当前阶段的正常状态。", ""])
+    lines.extend(ledger_section(state.get("ledger", {})))
     for key, module in MODULES.items():
         name = module.split("/")[0]
         pages = [title for title, page in usage.items() if page["module"] == module]
@@ -342,7 +383,9 @@ def main() -> int:
                       "- 有新资料：用 prepare-seo-knowledge-materials 生成小初筛包，加进 --package 重跑",
                       "- 客户回复了确认表：apply_answers.py 读回，再重跑和发布",
                       "- 官网超过一个月没读：fetch_website.py 重读，变了的页才会更新",
-                      "- 抽查：让独立 Agent 通读本月新增或变化的文档和整理页"]
+                      "- 抽查：让独立 Agent 通读本月新增或变化的文档和整理页",
+                      "- 外部公共知识：抽检“待抽检”的页、重查过了复查日期的页，结果用 research.py mark 记下；"
+                      "缺口可以运行 research.py plan --from-gaps 再补一轮"]
             write_text(vault / f"05_数据与审核/40_月度与交接/知识库体检_{month}.md", "\n".join(report) + "\n")
     summary = {key: state[key] for key in ("verified", "ledgers", "terms_to_review", "cells", "t3", "token", "last_publish")}
     print(json.dumps({**summary, "knowledge_pages": len(state["knowledge"]), "source_docs": len(state["published"])}, ensure_ascii=False, indent=2))

@@ -1,0 +1,27 @@
+{
+  "_说明": "外部调研和写作取资料共用的规则。client_terms：命中就算客户专属，不外部调研（问客户、登记 CUS）；public_sections：覆盖与缺口里可以外部调研的小板块；client_modules：这些模块的缺口一律是客户自己的事（某个产品的参数、特性只能看客户资料）；industry：客户所在行业的一句话（如“工业阀门”），写进调研问题；budget：每个缺口的上限；source_types：允许的来源类型和优先顺序；excluded_publishers：不能用的发布方类型。客户自己的调整写在 kb-config.json 的 research 里，同名键整体替换。",
+  "client_terms": [
+    "产能", "产量", "年产", "厂房", "占地", "面积", "员工", "工人", "工程师", "团队", "证书", "资质", "获得认证", "通过认证",
+    "案例", "客户", "合作伙伴", "项目业绩", "交期", "交货", "发货", "起订", "最小订单", "价格", "报价", "折扣", "保修", "质保",
+    "售后", "工厂", "车间", "生产线", "设备清单", "检测设备", "成立", "历史", "我们", "本公司", "贵司", "样品", "打样", "定制周期",
+    "capacity", "output", "factory", "workshop", "plant area", "square meters", "employees", "staff", "engineers", "our team",
+    "certificate", "certified", "our certification", "case study", "our project", "references", "our client", "lead time",
+    "delivery time", "shipping time", "moq", "minimum order", "price", "pricing", "quotation", "discount", "warranty",
+    "after-sales", "after sales", "founded", "history", "our ", "we ", "us ", "sample", "samples"
+  ],
+  "public_sections": ["行业介绍", "产业链", "专业术语", "技术知识", "市场趋势", "应用场景", "行业解决方案"],
+  "client_modules": ["company", "product", "case"],
+  "industry": "",
+  "budget": {"searches_per_gap": 3, "pages_per_gap": 5, "gaps_per_article": 2, "review_days": 180},
+  "source_types": {
+    "standard": "标准组织（ISO、API、ASME、EN、GB 等）的标准页或公开摘要",
+    "association": "行业协会、学会",
+    "government": "政府、监管机构",
+    "academic": "学术论文、高校、研究机构",
+    "media": "专业技术媒体、工程手册",
+    "reference": "百科类参考资料（只作辅助，不能单独支撑数字）"
+  },
+  "number_sources": 2,
+  "excluded_publishers": ["manufacturer", "brand", "distributor", "marketplace", "forum", "ai"],
+  "_excluded_说明": "manufacturer/brand/distributor：同行业其他制造商、品牌商、经销商的网站（竞品宣传）；marketplace：电商平台；forum：论坛问答；ai：AI 生成的内容。kb-config.json 的 deny_terms（竞品和第三方名称）出现在来源或正文里也不能用。"
+}

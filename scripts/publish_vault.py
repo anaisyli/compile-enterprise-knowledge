@@ -26,7 +26,7 @@ from typing import Any
 
 from governance import merge_ledger
 from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, SKILL_VERSION, frontmatter, load_json,
-                       parse_frontmatter, run_lock, site_view_enabled, site_view_unset, write_json, write_text)
+                       parse_frontmatter, run_lock, site_view_enabled, site_view_unset, vault_lock, write_json, write_text)
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
 from pictures import LAYOUT as PICTURE_LAYOUT, STATE as PICTURE_NAMES, UNSEEN_FOLDER
@@ -348,6 +348,9 @@ def main() -> int:
         return 3
     run, vault = Path(args.out).resolve(), Path(args.vault).resolve()
     build = run / BUILD_DIRECTORY
+    # External research writes into the same vault from other computers; one writer at a time.
+    if not args.dry_run and (vault / "01_工作台").is_dir() and not vault_lock(vault, "publish_vault.py"):
+        return 3
     report = load_json(build / "校验结果.json")
     if report.get("verified") is not True:
         raise SystemExit("这次构建没有通过校验。先运行 verify_kb.py 并修好报告的问题。")
@@ -576,6 +579,9 @@ def main() -> int:
     write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
                               "hash_mode": HASH_MODE, "files": written})
     index = build_index(vault)
+    # The writing skills' entry page: every knowledge page, customer and external, with its sections.
+    from kb_lookup import write_catalog
+    write_catalog(vault)
     entry = {"published_at": stamp, "version": SKILL_VERSION, "documents": report.get("documents"),
              "blocks": report.get("blocks_kept"), "withdrawn": withdrawn, "renamed": len(renamed), "files": len(written),
              "archived": len(set(archived)), "state_saved": state["saved"], "pictures_renamed": len(moved),

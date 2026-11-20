@@ -449,12 +449,15 @@ def main() -> int:
     picture_warnings: list[str] = []
     errors.extend(page_picture_errors(build, clean, docs, published, blocks, routes, picture_warnings))
     curation = build / "curation-report.json"
+    curation_warnings: list[str] = []
     for slug, result in (load_json(curation).items() if curation.is_file() else []):
         if not result["ok"]:
             errors.append(f"整理页没通过核对，未发布：{result['title']}（{'；'.join(result['errors'][:2])}）")
+        # "curation": {"ledger": "warn"} turns passages without a place into reminders.
+        curation_warnings.extend(f"整理覆盖：{result['title']}：{w}" for w in result.get("warnings", [])[:2])
 
     # A knowledge layer left half written must not look finished.
-    warnings: list[str] = list(picture_warnings)
+    warnings: list[str] = list(picture_warnings) + curation_warnings
     d_path = build / "review-decisions.json"
     # Report the status actually rendered: reference drafts are not pending originals.
     statuses = load_json(build / "statuses.json")

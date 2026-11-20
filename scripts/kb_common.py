@@ -258,6 +258,59 @@ def run_lock(run: Path, what: str) -> bool:
     return True
 
 
+VAULT_LOCK = "05_数据与审核/70_构建状态/.vault.lock"
+# A lock older than this is a crashed run: a publish or a research collect takes minutes, not hours.
+VAULT_LOCK_HOURS = 2
+
+
+def vault_lock(vault: Path, what: str) -> bool:
+    """One writer at a time per vault, across computers: the vault often sits on a shared drive.
+
+    The lock file holds "<pid>\\t<host>\\t<time>\\t<what>". A process id means nothing on another
+    computer, so a lock from another host is honoured until it is VAULT_LOCK_HOURS old; one from
+    this host is honoured while its process lives. Released at exit, only while still ours."""
+    import socket
+    from datetime import timedelta
+    lock = vault / VAULT_LOCK
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    host, mine = socket.gethostname(), str(os.getpid())
+    for _ in range(2):
+        try:
+            handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                pid, other, when, holder = (lock.read_text(encoding="utf-8").split("\t") + ["", "", "", ""])[:4]
+                started = datetime.fromisoformat(when)
+            except (OSError, ValueError):
+                pid, other, started, holder = "", "", datetime.min, ""
+            fresh = datetime.now() - started < timedelta(hours=VAULT_LOCK_HOURS)
+            if pid == mine and other == host:
+                return True
+            held = fresh and (other != host or (pid.isdigit() and alive(int(pid))))
+            if held:
+                print(f"知识库正在被 {other or '另一台电脑'} 上的 {holder.strip() or '另一个任务'} 使用（{started:%Y-%m-%d %H:%M} 开始）。"
+                      f"等它结束再来；确定它已经停了，删掉 {lock} 再重跑。")
+                return False
+            try:
+                lock.unlink()  # Left by a run that crashed or by a process that is gone.
+            except OSError:
+                return False
+            continue
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(f"{mine}\t{host}\t{datetime.now().isoformat(timespec='seconds')}\t{what}\n")
+
+        def release() -> None:
+            try:
+                if lock.is_file() and lock.read_text(encoding="utf-8").split("\t")[:2] == [mine, host]:
+                    lock.unlink()
+            except OSError:
+                pass
+
+        atexit.register(release)
+        return True
+    return False
+
+
 SITE_VIEW_ROOT = "03_正式知识/80_建站资料"
 
 

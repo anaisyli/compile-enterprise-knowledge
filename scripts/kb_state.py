@@ -53,9 +53,11 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
                     relative = item.relative_to(root)
                     found.append((build / directory / relative, vault / STATE / directory / relative))
     for root in (build / "curation", vault / STATE / "curation"):
-        for page in root.glob("*/page.md") if root.is_dir() else []:
-            slug = page.parent.name
-            found.append((build / "curation" / slug / "page.md", vault / STATE / "curation" / slug / "page.md"))
+        # The page and its coverage ledger are the model's work; both are kept.
+        for name in ("page.md", "ledger.jsonl"):
+            for page in root.glob(f"*/{name}") if root.is_dir() else []:
+                slug = page.parent.name
+                found.append((build / "curation" / slug / name, vault / STATE / "curation" / slug / name))
     for directory, target in (("mineru-units", MINERU), ("reducto-units", REDUCTO), ("website/units", f"{WEBSITE}/units")):
         for root in (build / directory, vault / target):
             for item in root.glob("*.json") if root.is_dir() else []:
