@@ -16,6 +16,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from kb_common import BUILD_DIRECTORY, load_json, write_text
 from legacy_migrations import move_legacy_vault_dirs
@@ -74,11 +75,26 @@ def merge_pages(source: Path, target: Path) -> bool:
     """The website snapshot only grows: a failed or partial crawl must not wipe pages read before."""
     if not source.is_file():
         return False
+    source_pages = load_json(source)
+    source_ids = {page["page_id"] for page in source_pages}
     pages = {p["page_id"]: p for p in (load_json(target) if target.is_file() else [])}
-    for page in load_json(source):
+    for page in source_pages:
         known = pages.get(page["page_id"])
         if not known or page.get("fetched_at", "") >= known.get("fetched_at", ""):
             pages[page["page_id"]] = page
+    # Older crawls assigned separate ids to slash aliases. Keep the newest identity
+    # (breaking ties in favour of source so merged ids beat stale target aliases).
+    by_url: dict[str, dict[str, Any]] = {}
+    for page in pages.values():
+        parsed = urlsplit(page["url"])
+        key = urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(),
+                         parsed.path.rstrip("/") or "/", parsed.query, ""))
+        known = by_url.get(key)
+        rank = (page.get("fetched_at", ""), page["page_id"] in source_ids)
+        known_rank = (known.get("fetched_at", ""), known["page_id"] in source_ids) if known else None
+        if not known or rank > known_rank:
+            by_url[key] = page
+    pages = {page["page_id"]: page for page in by_url.values()}
     merged = json.dumps(sorted(pages.values(), key=lambda p: p["url"]), ensure_ascii=False, indent=2) + "\n"
     if target.is_file() and target.read_text(encoding="utf-8") == merged:
         return False

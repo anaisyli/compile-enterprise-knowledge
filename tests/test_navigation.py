@@ -613,6 +613,24 @@ class NavigationTests(unittest.TestCase):
         self.assertNotIn("\n\n\n", merged1)
         self.assertIn("- 2026-11-19：已核对。\n\n### P-002-MAT-002｜事项二", merged1)
 
+    def test_render_ledger_prepends_single_text_cus_prompt_and_tolerates_missing_key(self):
+        from governance import render_ledger
+        rendered = render_ledger("CUS", "待客户补充事项", "用途", "P-002", "2026-11-20", [
+            {
+                "id": "P-002-CUS-001", "key": "review:item1",
+                "row": ["概述标题", "1 项", "等待客户回复", "内容运营 → 客户"],
+                "updated": "2026-11-20", "details": ["- 原始详情"],
+                "items": [{"answer_type": "text", "question": "请确认具体型号归属", "location": "第 3 页"}],
+            },
+            {
+                "id": "P-002-CUS-002",
+                "row": ["无 key 记录", "1 项", "等待客户回复", "内容运营 → 客户"],
+                "updated": "2026-11-20", "details": ["- 详情二"],
+            },
+        ])
+        self.assertIn("- 具体要确认：请确认具体型号归属\n- 原件位置：第 3 页\n\n- 原始详情", rendered)
+        self.assertIn("### P-002-CUS-002｜无 key 记录", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

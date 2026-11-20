@@ -116,6 +116,12 @@ class PageParser(HTMLParser):
                 self.table_parts.append(f"<{tag}{spans}>")
             elif tag == "br":
                 self.table_parts.append("<br>")
+            if tag not in VOID_TAGS:
+                for attr in COUNTER_ATTRS:
+                    raw_val = (values.get(attr) or "").strip()
+                    if COUNTER_VALUE.fullmatch(raw_val):
+                        self.counter_stack.append((len(self.stack), raw_val, []))
+                        break
             return
         if tag == "title":
             self.in_title = True

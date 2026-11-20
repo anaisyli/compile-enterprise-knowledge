@@ -327,9 +327,10 @@ def main() -> int:
         item_id = doc["item_id"]
         if item_id not in units_by_item:
             dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
-            units = reviewed_units(build, item_id, doc['source_sha256'], load_units(dirs, item_id))
+            raw_units = load_units(dirs, item_id)
             if doc.get("origin") != "website":
-                units.extend(reducto_figure_units(build, item_id, doc.get("original_name") or ""))
+                raw_units.extend(reducto_figure_units(build, item_id, doc.get("original_name") or ""))
+            units = reviewed_units(build, item_id, doc['source_sha256'], raw_units)
             units_by_item[item_id] = squeeze(" ".join(u["text"] for u in units))
         source = units_by_item[item_id]
         # Non-product workbook sheets are rendered as Markdown tables.  The pipes,
@@ -374,9 +375,10 @@ def main() -> int:
         accounted = squeeze("".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]).replace("<br>", ""))
         accounted_ocr = ocr_format_key("\n".join(b["text"] for b in blocks if b["doc_id"] == doc["doc_id"]))
         dirs = [website / "units"] if doc.get("origin") == "website" else text_dirs
-        units = reviewed_units(build, doc['item_id'], doc['source_sha256'], load_units(dirs, doc['item_id']))
+        raw_units = load_units(dirs, doc['item_id'])
         if doc.get("origin") != "website":
-            units.extend(reducto_figure_units(build, doc['item_id'], doc.get("original_name") or ""))
+            raw_units.extend(reducto_figure_units(build, doc['item_id'], doc.get("original_name") or ""))
+        units = reviewed_units(build, doc['item_id'], doc['source_sha256'], raw_units)
         units = preferred_page_units(units)
         units = suppress_drawing_dimensions(units)
         for unit in units:

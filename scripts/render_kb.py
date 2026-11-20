@@ -690,11 +690,14 @@ def write_register(build: Path, routes: dict[str, Any], docs: dict[str, dict[str
     write_text(build / "vault" / REGISTER, "\n".join(lines) + "\n")
 
 
-def page_check_notes(build: Path, gov: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+def page_check_notes(build: Path, gov: dict[str, Any],
+                     excluded_locations: set[str] | None = None) -> dict[str, dict[str, list[str]]]:
     """item -> page heading -> notes from looking at the page next to its extracted text."""
     path = build / "page-check" / "results.json"
     notes: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-    for result in (load_json(path).values() if path.is_file() else []):
+    for key, result in (load_json(path).items() if path.is_file() else []):
+        if key in (excluded_locations or ()):
+            continue
         page = notes[result["item_id"]][check_group(result)]
         if result.get("dimension_drawing") and result.get("non_drawing_review"):
             supplemental = result["non_drawing_review"]
@@ -969,7 +972,7 @@ def main() -> int:
         if record_id not in issues[item_key.split(":")[0]]:
             issues[item_key.split(":")[0]].append(record_id)
     ensure_dimension_previews(build, routes, status_info)
-    checks = page_check_notes(build, gov)
+    checks = page_check_notes(build, gov, set((config.get("client_confirmation") or {}).get("excluded_locations", [])))
     published, statuses = {}, {}
     # A page picture shows the whole page, so pages where sensitive content was removed do not get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if is_sensitive_removal(b)}

@@ -196,6 +196,7 @@ class OfflineSnapshotTests(unittest.TestCase):
             '<h3><span class="odometer" data-count="98">00</span>%</h3><p>Retention</p>'
             '<p>Clients: <span class="purecounter" data-purecounter-end="232"></span></p>'
             '<div class="elementor-counter-number" data-to-value="1,200">0</div>'
+            '<table><tr><th>Capacity</th><td><span data-count="500">0</span> units</td></tr></table>'
             '<button data-count="3">Comments</button>'
             "</body></html>"
         )
@@ -207,8 +208,24 @@ class OfflineSnapshotTests(unittest.TestCase):
         self.assertIn("98%", texts)
         self.assertIn("Clients: 232", texts)
         self.assertIn("1,200", texts)
+        self.assertTrue(any("<td>500 units</td>" in t for tag, t in parser.blocks if tag == "table"))
         self.assertNotIn("00+", texts)
         self.assertNotIn("00%", texts)
+
+    def test_merge_pages_deduplicates_slash_aliases_and_prefers_source_on_tie(self) -> None:
+        from kb_state import merge_pages
+        target = self.root / "vault-pages.json"
+        source = self.root / "build-pages.json"
+        target.write_text(json.dumps([
+            {"page_id": "web-2222222222222222", "url": "https://www.example.com/about", "fetched_at": "2026-11-20T10:00:00+08:00"},
+            {"page_id": "web-1111111111111111", "url": "https://www.example.com/about/", "fetched_at": "2026-11-19T10:00:00+08:00"},
+        ]), encoding="utf-8")
+        source.write_text(json.dumps([
+            {"page_id": "web-1111111111111111", "url": "https://www.example.com/about/", "fetched_at": "2026-11-20T10:00:00+08:00"},
+        ]), encoding="utf-8")
+        self.assertTrue(merge_pages(source, target))
+        merged = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual([p["page_id"] for p in merged], ["web-1111111111111111"])
 
 
 if __name__ == "__main__":

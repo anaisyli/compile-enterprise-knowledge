@@ -29,7 +29,7 @@ from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_
                        parse_frontmatter, run_lock, site_view_enabled, site_view_unset, write_json, write_text)
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
-from pictures import LAYOUT as PICTURE_LAYOUT, UNSEEN_FOLDER
+from pictures import LAYOUT as PICTURE_LAYOUT, STATE as PICTURE_NAMES, UNSEEN_FOLDER
 from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUCTURE_PREFIX, TYPES, load_decisions, parse_method, save_decisions
 
 
@@ -385,6 +385,11 @@ def main() -> int:
     # The site view is made only when switched on. Pages published before and not made now leave
     # for the archive, said out loud; with no setting at all, nothing is decided for the person.
     build_config = load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}
+    known_pictures = load_json(build / PICTURE_NAMES) if (build / PICTURE_NAMES).is_file() else {}
+    excluded_pictures = {
+        (ASSETS / known_pictures[image_id]["file"]).as_posix()
+        for image_id in build_config.get("excluded_image_ids", []) if image_id in known_pictures
+    }
     site_leaving = sorted(k for k in previous if k.startswith(SITE_VIEW_ROOT + "/") and k not in planned)
     if site_leaving and site_view_unset(build_config):
         raise SystemExit(f"知识库里有 {SITE_VIEW_ROOT}（{len(site_leaving)} 个页面），这次构建的配置没写 site_view，所以没生成它。"
@@ -431,6 +436,7 @@ def main() -> int:
         print(json.dumps({**dry_run_report(vault, planned, previous, new_paths, material, leaving, live, args.allow_withdraw),
                           "site_view_archived": len(site_closing), "site_view_files": site_closing,
                           "pictures_moved": len(moves),
+                          "excluded_pictures_to_archive": sorted(excluded_pictures & (previous.keys() - planned.keys())),
                           "pictures_to_old_folder": len(unseen_pictures(vault, staying, planned)) if pending else 0,
                           "picture_layout_migration": bool(pending)},
                          ensure_ascii=False, indent=2))
@@ -508,6 +514,9 @@ def main() -> int:
     for key in sorted(set(previous) - set(planned)):
         target = vault / key
         if not target.is_file():
+            continue
+        if key in excluded_pictures and key.startswith(ASSETS.as_posix() + "/") and target.resolve().is_relative_to((vault / ASSETS).resolve()):
+            archive(vault, key, stamp, archived, move=True)
             continue
         if key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT) or key in STATUS_PAGES:
             # Pictures and ledgers are never removed; kb_status rewrites the overview pages right after.

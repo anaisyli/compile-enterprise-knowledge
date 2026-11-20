@@ -158,6 +158,8 @@ def build(
 
     def add(kind: str, key: str, title: str, count: str, stage: str, owner: str, details: list[str],
             items: list[dict[str, str]] | None = None) -> str:
+        if kind == "CUS":
+            title = client_confirmation.get("titles", {}).get(key, title)
         record_id = registry.id_for(kind, key)
         for item in items or []:
             item["sub_id"] = f"{record_id}.{registry.number(f'sub:{key}', item['key'])}"
@@ -347,7 +349,9 @@ def build(
         "处", "待知识库专员判断", "在产品表模板判断里改正款号列", "表格更新时")
     # What looking at the pages found: broken text to re-read, and pairings only the client can settle.
     checks_path = build_dir / "page-check" / "results.json"
-    checks = list(load_json(checks_path).values()) if checks_path.is_file() else []
+    excluded_checks = set(client_confirmation.get("excluded_locations", []))
+    checks = [record for key, record in load_json(checks_path).items() if key not in excluded_checks
+              ] if checks_path.is_file() else []
     heading = lambda r: {"slide": f"第 {r['page']} 张幻灯片", "image": f"图片 {r['page']}"}.get(r["unit"], f"第 {r['page']} 页")
     unknown_drawings = [
         f"{link(by_item[r['item_id']], heading(r))}：尺寸图型号待确认"
@@ -424,7 +428,11 @@ def build(
                      for r in unclear]
         cus_ids["pairing"] = add("CUS", "pairing", title, f"{len(unclear)} 页", "等待客户回复",
                                  "内容运营 → 客户", [instruction, ""]
-                                 + [f"- {link(by_item[r['item_id']], heading(r))}" for r in unclear], items)
+                                 + [f"- {link(by_item[r['item_id']], heading(r))}"
+                                    + (f"。{question}" if question else "")
+                                    for r in unclear
+                                    for question in [client_confirmation.get("questions", {}).get(
+                                        f"{r['item_id']}|{r['unit']} {r['page']}")]], items)
     # Rules that remove a fifth of a brochure have probably removed something they should not.
     shares: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for block in blocks:
@@ -531,6 +539,15 @@ def render_ledger(kind: str, title: str, purpose: str, project_id: str, today: s
     lines.extend(["", "## 事项详情", ""])
     for record in sorted(records, key=lambda r: r["id"]):
         details = strip_fingerprints(record["details"])
+        items = record.get("items", [])
+        if kind == "CUS" and record.get("key", "").startswith(("review:", "pending:")) and len(items) == 1:
+            item = items[0]
+            question = item.get("question")
+            if item.get("answer_type") == "text" and question and question != record["row"][0]:
+                prompt = [f"- 具体要确认：{question}"]
+                if item.get("location"):
+                    prompt.append(f"- 原件位置：{item['location']}")
+                details = [*prompt, "", *details]
         fp = hashlib.sha256("\n".join(details).encode("utf-8")).hexdigest()[:12]
         lines.extend([f"### {record['id']}｜{record['row'][0]}", f"<!-- fingerprint: {fp} -->", "", *details, ""])
     return "\n".join(lines) + "\n"

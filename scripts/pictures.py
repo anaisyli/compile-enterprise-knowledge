@@ -239,7 +239,8 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
                statuses: dict[str, str], unsafe: set[tuple[str, str]], status_info: dict[str, Any], namer: Namer,
                max_row_images: int, held: set[tuple[str, str]], places: dict[str, Any] | None = None,
                match: Callable[..., dict[str, Any] | None] | None = None,
-               doc_places: dict[str, tuple[str, str] | None] | None = None) -> list[dict[str, Any]]:
+               doc_places: dict[str, tuple[str, str] | None] | None = None,
+               excluded_images: set[str] | None = None) -> list[dict[str, Any]]:
     """Every picture the vault will show or keep, with the words that can name it. held: (doc, locator)
     of every passage removed or waiting for the client. doc_places: doc_id -> (大类, 产品) by
     curate.place_docs, for the index's 按产品 section."""
@@ -261,7 +262,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
             pages_of[picture["id"]].add(page_id)
 
     def add(name: str, doc_id: str, group: str, **fields: Any) -> None:
-        if (assets / name).is_file():
+        if name not in (excluded_images or ()) and (assets / name).is_file():
             found.append({"id": name, "doc_id": doc_id, "group": group, **fields})
 
     for doc_id in order:
@@ -718,7 +719,7 @@ def build_pictures(build: Path, config: dict[str, Any], docs: dict[str, dict[str
     from curate import place_docs
     doc_places = place_docs({d: docs[d] for d in order}, [p for p in products or [] if p.get("kind") in {"product", "solution", None}])
     found = candidates(build, docs, by_doc, order, statuses, unsafe, status_info, namer, max_row_images, held, places, match,
-                       doc_places)
+                       doc_places, set(config.get("excluded_image_ids", [])))
     saved = load_json(build / STATE) if (build / STATE).is_file() else {}
     answers = load_json(build / AI_ANSWERS) if (build / AI_ANSWERS).is_file() else {}
     layout = layout_of(build, saved).get("layout", 1)
