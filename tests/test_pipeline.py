@@ -226,7 +226,7 @@ class PipelineTests(unittest.TestCase):
         text = self.published_text()
         self.assertIn("AB-100", text)
         self.assertIn("100% POLYESTER 350GSM SHERPA", text)
-        for secret in ("USD7.30", "Bigbuyer", "ZZ9", "Acme", "Prepared for", "SECRET-1", "工作表"):
+        for secret in ("USD7.30", "Bigbuyer", "ZZ9", "Acme", "Prepared for", "SECRET-1", "隐藏"):
             self.assertNotIn(secret, text)
 
     def test_b_file_name_does_not_name_the_customer(self) -> None:

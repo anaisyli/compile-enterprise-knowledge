@@ -92,8 +92,8 @@ class RunLockTests(unittest.TestCase):
         self.assertNotIn("这个运行目录正在运行", result.stdout + result.stderr)
 
     def test_every_run_folder_script_takes_the_lock(self) -> None:
-        # mineru_client / reducto_client write --out files, not run folders; the rest must lock.
-        excluded = {"mineru_client.py", "reducto_client.py"}
+        # mineru_client / reducto_client write --out files, legacy_migrations is read-only status; the rest must lock.
+        excluded = {"mineru_client.py", "reducto_client.py", "legacy_migrations.py"}
         checked = 0
         for path in sorted(SCRIPTS.glob("*.py")):
             source = path.read_text(encoding="utf-8")

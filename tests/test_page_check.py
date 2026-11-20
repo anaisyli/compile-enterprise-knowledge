@@ -190,7 +190,7 @@ class PageCheckTests(Base):
         built = self.pipeline()
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         page = next(self.clean.rglob("*Catalog.md")).read_text(encoding="utf-8")
-        self.assertIn("⚠ 型号待确认 的安装尺寸图，尺寸见原图", page)
+        self.assertIn("⚠ Catalog（型号来自文件名，待核对） 的安装尺寸图，尺寸见原图", page)
         ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
         self.assertIn("尺寸图型号待确认", ledger)
         self.assertIn("第 1 页", ledger)

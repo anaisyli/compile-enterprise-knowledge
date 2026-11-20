@@ -174,7 +174,7 @@ class PictureTests(unittest.TestCase):
         self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "产品/工厂/尺寸图/工厂-尺寸图-cccccccc.jpg")
         self.assertNotIn("资料包素材", named["img-cccccccccccccccc.jpg"]["file"])
         self.assertEqual(named["img-9999999999999999.jpg"]["file"],
-                         "产品/型号待确认/尺寸图/型号待确认-尺寸图-99999999.jpg")
+                         "产品/2026格子系列/尺寸图/2026格子系列-尺寸图-99999999.jpg")
 
     def test_single_image_dimension_drawing_files_under_its_model(self) -> None:
         media = [{"item_id": "m1", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
