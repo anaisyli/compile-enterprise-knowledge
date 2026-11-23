@@ -88,18 +88,20 @@
 **把下面这段发给负责写作的那个 Skill 的维护 Agent**（Writer 或写作编排 Skill，不要发给审核、打包、发布这类辅助 Skill）。首次接入和以后需要重新同步都用这同一段：
 
 ```text
-请给本写作 Skill 加上（或更新）“企业知识库接入（compile-enterprise-knowledge）”一节。只改这一节，不要删改、缩写或重写本 Skill 原有的选题、排重、大纲、写作、SEO/GEO、文风、图片、表格、DOCX、QA、发布和交付流程。
+请给本写作 Skill 加上（或更新）“企业知识库接入（compile-enterprise-knowledge）”一节。只改接入节及下面第 2 条明确指出的两处冲突声明，不要删改、缩写或重写本 Skill 原有的选题、排重、大纲、写作、SEO/GEO、文风、图片、表格、DOCX、QA、发布和交付流程。
 
 1. 先定位本机已安装的 compile-enterprise-knowledge Skill（不要写死版本号或绝对路径），读它的 references/writer-guide.md。
 2. 接入一节只写这几条，不要把 writer-guide 的内容抄进来：
    - 什么时候用：本次客户的知识库里有 01_工作台/写作目录.md 时，每次写文章都先读当前已安装 compile-enterprise-knowledge 的 references/writer-guide.md，按它执行大纲落盘、取资料包、写作、标引用与核对；没有写作目录时按本 Skill 原来的方式读资料。
-   - 范围锁：只用当前请求指定的那一个客户知识库，不读别的客户的知识库或旧对话里的路径；除按 writer-guide 在 04_文章任务/10_写作记录/<task_key>/ 保存本篇过程记录及运行 research.py 外，知识库只读；过程文件不混进最终文章交付包。
-   - 替换一个步骤：本 Skill 原流程里“先读取知识库文档、盘点产品与公司事实”的步骤，在有写作目录时改成“按 writer-guide 先定大纲并落盘锁定，再按大纲取资料包，事实只从资料包里来”。这是唯一的替换，原流程其他步骤原样保留。
+   - 范围锁与写入例外：只用当前请求指定的那一个客户知识库，不读别的客户的知识库或旧对话里的路径；**允许**按 writer-guide 写入 `<知识库>/04_文章任务/10_写作记录/<task_key>/`、更新 `04_文章任务/00_文章台账.md` 以及运行 `research.py`，知识库其余目录严格只读；过程文件不混进最终文章交付包。
+   - 解除原文两处冲突：
+     a) 本 Skill 原流程里“先读取知识库文档、盘点产品与公司事实”的步骤，在有写作目录时改为“按 writer-guide 先定大纲并落盘锁定，再按大纲取资料包，事实只从资料包里来”；
+     b) 如果本 Skill 原文里有“所有输入目录/知识库一律只读、禁止写入任何文件”的规则，明确补充例外：接入 `compile-enterprise-knowledge` 时，上述 `04_文章任务/10_写作记录/<task_key>/`、`04_文章任务/00_文章台账.md` 和 `research.py` 为允许写入位置，不视为违反只读规则。
    - 交付前多一步：按 writer-guide 写极简引用表并运行 check_article.py --citations 生成引用追溯表，按提示改，剩下的写进交付说明。
-3. 如果本 Skill 已经有旧的 manage-article-knowledge 接入一节（例如 Enterprise knowledge-base adapter）：直接删掉，统一替换为本节，不再默认使用 manage-article-knowledge。
-4. 改完自检：接入一节只有一份；旧的 manage-article-knowledge 接入一节已删除；里面没有抄 writer-guide 的规则细节；原流程的章节都还在；“先读知识库”的步骤已按第 2 条改写。
+3. 如果本 Skill 已经有旧的 manage-article-knowledge 接入一节（例如 Enterprise knowledge-base adapter / Strict-mode adapter）：直接删掉，统一替换为本节，不再默认使用 manage-article-knowledge。
+4. 改完自检：接入一节只有一份；旧的 manage-article-knowledge 接入一节已删除；里面没有抄 writer-guide 的规则细节；原流程的章节都还在；“先读知识库”和“知识库绝对只读”两处冲突已解除。
 
-完成后告诉我：改了哪个文件、新增还是替换了哪一节、是否已删除旧的 manage-article-knowledge 接入节、原流程是否完整保留。不要执行真实写作任务。
+完成后告诉我：改了哪个文件、新增还是替换了哪一节、是否已删除旧的 manage-article-knowledge 接入节、是否已解除原文的只读冲突、原流程是否完整保留。不要执行真实写作任务。
 ```
 
 接入后用一篇测试题验证：让写作 Skill 给某个客户写一篇，看它是否先定大纲、读写作目录、生成了资料包、跑了 check_article，交付说明里有没有列用了哪些小板块和核对提示。通过后日常写作不用再发这段。
