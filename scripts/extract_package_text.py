@@ -554,6 +554,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract text from the files inside preparation packages.")
     parser.add_argument("--package", action="append", required=True, help="Preparation package; repeat")
     parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--re-extract", action="append", default=[],
+                        help="Item IDs to force re-extract even when a frozen cached extraction exists; repeat")
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=120, help="Seconds per old-format conversion; a hang is killed after this")
     return parser.parse_args()
@@ -568,6 +570,7 @@ def main() -> int:
     text_dir.mkdir(parents=True, exist_ok=True)
     status_path = text_dir / "extract-status.json"
     statuses: dict[str, Any] = load_json(status_path).get("items", {}) if status_path.is_file() else {}
+    re_extract = set(args.re_extract or [])
 
     # Kinds of file nobody has confirmed yet are read on their sample only (sample_gate.py).
     gate_path = build / "sample-gate.json"
@@ -598,11 +601,10 @@ def main() -> int:
                 }
                 continue
             previous = statuses.get(asset["item_id"], {})
-            needed = reader_version(asset.get("display_name") or asset["path"])
-            done = previous.get("source_hash") == asset["source_hash"] and int(previous.get("extractor") or 1) >= needed \
+            done = asset["item_id"] not in re_extract and previous.get("source_hash") == asset["source_hash"] \
                 and previous.get("status") in {"read_ok", "partial", "needs_ocr", "unsupported"}
             if done and (previous.get("status") == "unsupported" or (text_dir / f"{asset['item_id']}.json").is_file()):
-                continue  # Same bytes, read the same way as last time: nothing to redo.
+                continue  # Frozen extraction for identical file bytes: keep it untouched unless --re-extract is given.
             jobs.append((asset, path))
 
     # Try LibreOffice once on a tiny file before old Office files wait on it one by one.
@@ -661,6 +663,13 @@ def main() -> int:
             ):
                 # Sandbox blocked LibreOffice, but a valid extraction for the same file bytes already exists.
                 continue
+            # Never drop existing PPT slide screenshots / page images when LibreOffice is unavailable on a re-extract.
+            if old_status.get("source_hash") == status.get("source_hash") and not status.get("page_images") and old_status.get("page_images"):
+                assets_dir = build / ASSETS_DIRECTORY
+                if any((assets_dir / name).is_file() for name in old_status["page_images"].values()):
+                    for key in ("page_images", "page_pictures", "page_unit"):
+                        if old_status.get(key) and not status.get(key):
+                            status[key] = old_status[key]
             statuses[item_id] = status
             if status["status"] not in {"read_ok", "partial", "needs_ocr", "needs_libreoffice"}:
                 unit_file.unlink(missing_ok=True)

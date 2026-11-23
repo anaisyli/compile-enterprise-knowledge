@@ -189,7 +189,11 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 ## 日常维护
 
-- **新资料：** 先筛成小初筛包，再叠加 `--package` 重跑。
+- **新资料：** 先筛成小初筛包，再叠加 `--package` 重跑。已发布过的旧文件提取稿和 PPT 截图按原件哈希冻结在 `05_数据与审核/70_构建状态/package-text/` 和 `extracted-assets/`，原件没变时自动跳过不重提；只有确实要重提某份文件时加 `--re-extract <item_id>`。
+- **增量重跑（不碰旧提取稿和 PPT 截图）：**
+  - 回填 CUS 客户回复、批准 D 类或放行词表后，加 `--from guard`（跳过提取和抽块，只重跑筛查、来源渲染、整理和校验）；
+  - 只改了整理页、别名、账本或速查卡时，加 `--from curate`（直接跳过提取和筛查，只重跑整理和校验）；
+  - 带 `--vault` 重跑时默认沿用上次发布时的 `--images`、`--tiers` 和 `--max-image-mb`。
 - **官网：** 每月重读一次，没变的页不会更新。
 - **体检：** 运行 `kb_status.py --out <运行目录> --vault <项目目录> --monthly`，更新总览，并写本月体检报告。外部公共知识看 `research.py status`：抽检“待抽检”的页，重查过了复查日期的页；新出现的缺口可以 `research.py plan --from-gaps` 再补一轮。
 - **导航与素材记录维护：** `refresh_navigation.py --out <运行目录> --vault <项目目录>` 只预览要更新的总览、台账、素材索引和清单；加 `--apply` 才写入，旧版自动备份。它明确链接到当前库内路径，不重新提取或发布；有人改过的非台账生成页拒绝覆盖。旧版本误丢失已解决台账历史时，可加 `--recover-ledger-history` 从归档恢复为已解决历史，不重新向客户提问。

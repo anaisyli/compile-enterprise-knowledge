@@ -1183,7 +1183,13 @@ def main() -> int:
             )
 
     write_jsonl(build / "docs.jsonl", docs)
-    write_json(build / "run-info.json", {"packages": [str(Path(p).resolve()) for p in args.package]})
+    existing_info = load_json(build / "run-info.json") if (build / "run-info.json").is_file() else {}
+    write_json(build / "run-info.json", {
+        **existing_info,
+        "packages": [str(Path(p).resolve()) for p in args.package],
+        "images": args.images,
+        "max_image_mb": str(args.max_image_mb),
+    })
     write_jsonl(build / "blocks-raw.jsonl", blocks)
     write_jsonl(build / "removed-terms.jsonl", terms)
     write_json(

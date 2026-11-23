@@ -126,9 +126,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True, help="Run directory outside the packages and the vault")
     parser.add_argument("--config", help="kb-config.json; with --vault, defaults to the copy kept in the vault")
     parser.add_argument("--vault", help="Published project: restore config, decisions, pages, MinerU text and the website snapshot first")
-    parser.add_argument("--images", choices=["none", "xlsx", "all"], default="xlsx")
-    parser.add_argument("--max-image-mb", default="5")
-    parser.add_argument("--tiers", default="T1,T2", help="Tiers to publish; the rest stay in 待审内容")
+    parser.add_argument("--from", dest="start_from", choices=["extract", "guard", "curate"], default="extract",
+                        help="Incremental start stage: extract (default, reuses frozen extractions), guard (after CUS/D-review/terms), or curate (formal knowledge pages only)")
+    parser.add_argument("--re-extract", action="append", default=[],
+                        help="Item IDs to force re-extract even when frozen cached extractions exist; repeat")
+    parser.add_argument("--images", choices=["none", "xlsx", "all"], default=None,
+                        help="Image extraction mode (with --vault, defaults to the last published setting; otherwise xlsx)")
+    parser.add_argument("--max-image-mb", default=None)
+    parser.add_argument("--tiers", default=None, help="Tiers to publish; with --vault defaults to last published setting, otherwise T1,T2")
     parser.add_argument("--skip-t3-gate", action="store_true", help="Tests only")
     return parser.parse_args()
 
@@ -137,10 +142,11 @@ def main() -> int:
     args = parse_args()
     if not run_lock(Path(args.out).resolve(), "run_pipeline.py"):
         return 3
+    out = Path(args.out).resolve()
+    build = out / BUILD_DIRECTORY
     if args.vault:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
-        out, vault = Path(args.out).resolve(), Path(args.vault).resolve()
-        build = out / BUILD_DIRECTORY
+        vault = Path(args.vault).resolve()
         restored = sync_config(out, vault, Path(args.config).resolve() if args.config else None)
         print(f"== 从知识库恢复构建状态：{restored['restored']} 个文件", flush=True)
         report_kept(restored["kept_newer_in_run"])
@@ -150,14 +156,25 @@ def main() -> int:
             args.config = str(build / "kb-config.json")
         if args.config:
             keep_site_view_open(Path(args.config).resolve(), vault)
-        if not args.package and (build / "run-info.json").is_file():
-            args.package = load_json(build / "run-info.json")["packages"]
-            missing = [p for p in args.package if not Path(p).is_dir()]
-            if missing:
-                # The vault came from another computer: the package is somewhere else here.
-                print(f"上次用的初筛包不在这台电脑的原位置：{'；'.join(missing)}。用 --package 指定它现在的位置重建；"
-                      "只想让知识库里“打开原件”的链接能点开，运行 kb_relink.py --vault <知识库> --package <初筛包>。")
-                return 2
+        if (build / "run-info.json").is_file():
+            info = load_json(build / "run-info.json")
+            if not args.package and info.get("packages"):
+                args.package = info["packages"]
+                missing = [p for p in args.package if not Path(p).is_dir()]
+                if missing:
+                    # The vault came from another computer: the package is somewhere else here.
+                    print(f"上次用的初筛包不在这台电脑的原位置：{'；'.join(missing)}。用 --package 指定它现在的位置重建；"
+                          "只想让知识库里“打开原件”的链接能点开，运行 kb_relink.py --vault <知识库> --package <初筛包>。")
+                    return 2
+            if args.images is None and info.get("images"):
+                args.images = info["images"]
+            if args.max_image_mb is None and info.get("max_image_mb"):
+                args.max_image_mb = str(info["max_image_mb"])
+            if args.tiers is None and info.get("tiers"):
+                args.tiers = str(info["tiers"])
+    args.images = args.images or "xlsx"
+    args.max_image_mb = args.max_image_mb or "5"
+    args.tiers = args.tiers or "T1,T2"
     if not args.package:
         print("要指定 --package，或者用 --vault 从知识库读取上次用的初筛包。")
         return 2
@@ -185,36 +202,56 @@ def main() -> int:
         print(f"kb-config.json 在建库过程中被改过（{script} 之后发现）：这次结果混用了改动前后的配置，已停下。改完后重跑一次。")
         return True
 
-    # Before anything is read: one sample of each kind of file nobody has confirmed yet.
-    gate = ["--out", args.out, *repeat("--package", args.package), *(["--config", args.config] if args.config else [])]
-    code = step("sample_gate.py", *gate)
-    if config_changed("sample_gate.py"):
-        return 5
-    if code:
-        return 1
-    if not args.text_dir:
-        # Colleagues hand over the package, not the screening work folder, so read it again.
-        code = step("extract_package_text.py", *repeat("--package", args.package), "--out", args.out)
-        if config_changed("extract_package_text.py"):
+    text_dir = build / "package-text"
+    if args.start_from == "extract":
+        # Before anything is read: one sample of each kind of file nobody has confirmed yet.
+        gate = ["--out", args.out, *repeat("--package", args.package), *(["--config", args.config] if args.config else [])]
+        code = step("sample_gate.py", *gate)
+        if config_changed("sample_gate.py"):
             return 5
         if code:
-            return code
-        text_dir = Path(args.out).resolve() / "04_知识库构建" / "package-text"
-        args.text_dir = [str(text_dir)]
-        args.extract_status = args.extract_status or [str(text_dir / "extract-status.json")]
+            return 1
+        if not args.text_dir:
+            # Colleagues hand over the package, not the screening work folder; unchanged items reuse frozen cache.
+            re_ext = repeat("--re-extract", args.re_extract)
+            code = step("extract_package_text.py", *repeat("--package", args.package), "--out", args.out, *re_ext)
+            if config_changed("extract_package_text.py"):
+                return 5
+            if code:
+                return code
+            args.text_dir = [str(text_dir)]
+            args.extract_status = args.extract_status or [str(text_dir / "extract-status.json")]
+    else:
+        required = ["docs.jsonl", "blocks-raw.jsonl"] if args.start_from == "guard" else ["docs.jsonl", "blocks.jsonl", "statuses.json"]
+        missing_cache = [name for name in required if not (build / name).is_file()]
+        if missing_cache:
+            print(f"--from {args.start_from} 需要已冻结的来源层数据，但缺少：{'、'.join(missing_cache)}。请先去掉 --from 完整跑一次。")
+            return 2
+        if not args.text_dir and text_dir.is_dir():
+            args.text_dir = [str(text_dir)]
+            args.extract_status = args.extract_status or ([str(text_dir / "extract-status.json")] if (text_dir / "extract-status.json").is_file() else [])
+
     common = ["--out", args.out, *(["--config", args.config] if args.config else [])]
     ocr = ["--ocr-text-dir", args.ocr_text_dir] if args.ocr_text_dir else []
     sources = [*repeat("--package", args.package), *repeat("--text-dir", args.text_dir)]
     extract = [*sources, *repeat("--extract-status", args.extract_status), *ocr, *common,
                "--images", args.images, "--max-image-mb", args.max_image_mb]
     render = [*common, "--tiers", args.tiers, *(["--skip-t3-gate"] if args.skip_t3_gate else [])]
-    stages = [
-        ("extract_blocks.py", extract),
-        # Pick the pages to look at beside their text; the model's answers come in on the next run.
-        ("page_check.py", ["plan", *sources, *common]),
-        ("guard_blocks.py", [*repeat("--text-dir", args.text_dir), *common]),
-        ("render_kb.py", render),
-    ]
+    stages: list[tuple[str, list[str]]] = []
+    if args.start_from == "extract":
+        stages.extend([
+            ("extract_blocks.py", extract),
+            # Pick the pages to look at beside their text; the model's answers come in on the next run.
+            ("page_check.py", ["plan", *sources, *common]),
+        ])
+    if args.start_from in {"extract", "guard"}:
+        stages.extend([
+            ("guard_blocks.py", [*repeat("--text-dir", args.text_dir), *common]),
+            ("render_kb.py", render),
+        ])
+    elif not (build / "vault" / "02_源资料").is_dir():
+        # Fresh run folder with --from curate: render the frozen source layer once so verify_kb / publish_vault have it.
+        stages.append(("render_kb.py", render))
     config = load_json(Path(args.config)) if args.config else {}
     if config.get("build_stage") != "sources_only":
         stages.extend([("curate.py", ["prepare", *common]), ("curate.py", ["build", *common])])
@@ -225,6 +262,10 @@ def main() -> int:
             return 5
         if code:
             return code
+    if (build / "run-info.json").is_file():
+        info = load_json(build / "run-info.json")
+        info.update({"images": args.images, "max_image_mb": args.max_image_mb, "tiers": args.tiers})
+        write_json(build / "run-info.json", info)
     return 0
 
 

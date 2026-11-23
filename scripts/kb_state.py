@@ -39,12 +39,63 @@ FILES = [
     "picture-layout.json",
     # Home-page candidates the model picked, and which ones a person confirmed.
     "site-home.json",
+    # Frozen source-layer tables so --from guard / --from curate work even in a fresh run folder.
+    "docs.jsonl", "blocks-raw.jsonl", "blocks.jsonl", "removed-terms.jsonl", "routes.json",
+    "sheet-report.json", "extract-status.json", "media.json", "guard-terms.json", "review-queue.jsonl",
+    "statuses.json", "published.json",
 ]
+
+
+def referenced_assets(text_dir: Path) -> set[str]:
+    """Image filenames in 04_知识库构建/assets/ referenced by package-text (PPT slides, PDF thumbs, Word images)."""
+    names: set[str] = set()
+    status_path = text_dir / "extract-status.json"
+    if status_path.is_file():
+        items = load_json(status_path).get("items", {})
+        if isinstance(items, dict):
+            for info in items.values():
+                if not isinstance(info, dict):
+                    continue
+                for key in ("page_images", "page_pictures", "embedded_images"):
+                    val = info.get(key)
+                    if isinstance(val, dict):
+                        for item in val.values():
+                            if isinstance(item, str):
+                                names.add(item)
+                            elif isinstance(item, list):
+                                names.update(str(x) for x in item if x)
+                    elif isinstance(val, list):
+                        names.update(str(x) for x in val if x)
+    for unit_file in text_dir.glob("*.json") if text_dir.is_dir() else []:
+        if unit_file.name == "extract-status.json":
+            continue
+        try:
+            data = load_json(unit_file)
+        except (ValueError, OSError):
+            continue
+        for unit in data.get("units", []) if isinstance(data, dict) else []:
+            for img in unit.get("images") or []:
+                if img:
+                    names.add(str(img))
+    return names
 
 
 def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
     """(file in the run folder, file in the vault) for every piece of state that exists on either side."""
     found = [(build / name, vault / STATE / name) for name in FILES]
+    # Frozen extracted text per item (extract-status.json is merged per item separately).
+    for root in (build / "package-text", vault / STATE / "package-text"):
+        for item in root.glob("*.json") if root.is_dir() else []:
+            if item.name != "extract-status.json":
+                found.append((build / "package-text" / item.name, vault / STATE / "package-text" / item.name))
+    # Frozen PPT slide screenshots, PDF thumbnails and embedded images referenced by package-text.
+    asset_names = referenced_assets(build / "package-text") | referenced_assets(vault / STATE / "package-text")
+    vault_assets = vault / STATE / "extracted-assets"
+    if vault_assets.is_dir():
+        asset_names |= {p.name for p in vault_assets.iterdir() if p.is_file()}
+    for name in asset_names:
+        if (build / "assets" / name).is_file() or (vault_assets / name).is_file():
+            found.append((build / "assets" / name, vault_assets / name))
     # The checked transcript, its exact page image and the machine draft travel together.
     for directory in ("reviewed-page-images", "mineru-drafts"):
         for root in (build / directory, vault / STATE / directory):
@@ -250,6 +301,37 @@ def migrate_legacy(vault: Path) -> None:
     move_legacy_vault_dirs(vault, LEGACY)
 
 
+def merge_extract_status(source: Path, target: Path) -> bool:
+    """Merge package-text/extract-status.json per item_id, preserving PPT slide screenshots when hashes match."""
+    if not source.is_file():
+        return False
+    left = (load_json(source) or {}).get("items", {})
+    right = (load_json(target) or {}).get("items", {}) if target.is_file() else {}
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    source_newer = not target.is_file() or source.stat().st_mtime >= target.stat().st_mtime
+    merged: dict[str, Any] = {}
+    for item_id in sorted(set(left) | set(right)):
+        a, b = left.get(item_id), right.get(item_id)
+        if a is None:
+            merged[item_id] = b
+        elif b is None:
+            merged[item_id] = a
+        else:
+            winner, other = (dict(a), b) if source_newer else (dict(b), a)
+            # Never lose PPT slide screenshots / page images for the same file bytes.
+            if winner.get("source_hash") == other.get("source_hash"):
+                for key in ("page_images", "page_pictures", "page_unit"):
+                    if not winner.get(key) and other.get(key):
+                        winner[key] = other[key]
+            merged[item_id] = winner
+    text = json.dumps({"items": merged}, ensure_ascii=False, indent=2) + "\n"
+    if target.is_file() and target.read_text(encoding="utf-8") == text:
+        return False
+    write_text(target, text)
+    return True
+
+
 def save(run: Path, vault: Path) -> dict[str, Any]:
     """Copy build state into the vault at publish.
 
@@ -263,6 +345,7 @@ def save(run: Path, vault: Path) -> dict[str, Any]:
     removed: list[str] = []
     copied = sum(copy_newer(b, v, kept, removed, run_is_source=True) for b, v in pairs(build, vault))
     copied += merge_pages(build / "website" / "pages.json", vault / WEBSITE / "pages.json")
+    copied += merge_extract_status(build / "package-text" / "extract-status.json", vault / STATE / "package-text" / "extract-status.json")
     base = config_base(build)
     run_config = json_object(build / "kb-config.json")
     if run_config is not None:
@@ -282,6 +365,7 @@ def restore(run: Path, vault: Path) -> dict[str, Any]:
     removed: list[str] = []
     copied = sum(copy_newer(v, b, kept, removed) for b, v in pairs(build, vault))
     copied += merge_pages(vault / WEBSITE / "pages.json", build / "website" / "pages.json")
+    copied += merge_extract_status(vault / STATE / "package-text" / "extract-status.json", build / "package-text" / "extract-status.json")
     vault_config = json_object(vault / STATE / "kb-config.json")
     run_config_after = json_object(build / "kb-config.json")
     if vault_config is not None and run_config_after is not None:
