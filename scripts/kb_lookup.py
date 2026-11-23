@@ -217,11 +217,12 @@ def catalog(vault: Path) -> str:
     pages = load_pages(vault)
     lines = ["# 写作目录", "", MARKER,
              "> **写作 Agent 先看这里**：完整规则在 compile-enterprise-knowledge 的 `references/writer-guide.md`，写之前读一遍。要点：",
-             "> 1. 大纲按读者需要先定好，再对着下面的目录挑要用的“页名#小板块”（或“页名#小板块 > 子节”），不要整页读、不要读 `02_源资料`。",
-             "> 2. 运行 `kb_lookup.py pack --vault <知识库> --sections \"页名#小板块;…\" --gaps \"目录里没有的大纲节;…\" --output <本篇工作目录>/资料包.md`。",
-             "> 3. 客户专属事实可以代表公司写；外部公共知识只作背景和论据；口径避坑里的说法不要写成确定的事实；资料包里没有的公司事实不要编。",
-             "> 4. 写完运行 `check_article.py --article <终稿> --pack <资料包> --vault <知识库>`，按提示改。",
-             "> 知识库只读：不要在这里新建或修改文件（外部调研用 `research.py`）。括号里是大约字数。", ""]
+             "> 1. 先按读者需要独立定大纲（不看知识库），落盘到 `04_文章任务/10_写作记录/<task_key>/大纲.md` 并标 `outline_status: 已确认`。",
+             "> 2. 再对照下面的目录给 `大纲.md` 填好 `## 资料对应`（页名#小板块 或 页名#小板块 > 子节）和 `## 缺口`，不要整页读、不要读 `02_源资料`。",
+             "> 3. 运行 `kb_lookup.py pack --task \"<大纲.md 路径>\"` 在同目录生成带 `[K#]` 编号的 `资料包.md` 和 `资料包.json`（也可直传 `--vault` + `--sections`）。",
+             "> 4. 客户专属事实可以代表公司写；外部公共知识只作背景和论据；口径避坑里的说法不要写成确定的事实；资料包里没有的公司事实不要编。",
+             "> 5. 写完在同目录交极简 `引用表.md`，运行 `check_article.py --article <终稿> --pack <资料包> --citations <引用表> --vault <知识库>` 生成 `引用追溯.md` 并按提示改。",
+             "> 除 `04_文章任务/10_写作记录/<task_key>/` 和 `research.py` 外，知识库只读。括号里是大约字数。", ""]
     sizes = {id(s): len(slim(s.text, False, False, "", {})) for p in pages for s in p.sections}
     for layer in ("客户知识", "外部公共知识"):
         mine = [p for p in pages if p.layer == layer]
