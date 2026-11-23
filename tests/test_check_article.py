@@ -112,7 +112,8 @@ class CheckTests(unittest.TestCase):
             vault = Path(folder)
             page = vault / "03_正式知识/10_客户知识/20_产品介绍/产品系列-YFD.md"
             page.parent.mkdir(parents=True)
-            page.write_text("DN50-DN300, PN16, API 609, WRAS certified.", encoding="utf-8")
+            # EN and IEC are in common (and also listed under display); they must not pull display into a valve vault.
+            page.write_text("DN50-DN300, PN16, API 609, WRAS certified, EN 1092 flanges, IEC 60534 control.", encoding="utf-8")
             rules = check_article.load_rules({}, vault)
             found = {t for _, t in check_article.facts("DN100, 280 GSM, 700 nits, P2.", [], rules)}
             self.assertIn("DN100", found)

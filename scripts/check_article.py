@@ -63,22 +63,31 @@ def vault_body(vault: Path) -> str:
     return "\n".join(text)
 
 
-def detect_industries(body: str, table: dict[str, dict[str, Any]]) -> list[str]:
-    """Pick the industry groups whose distinctive markers appear in this vault (at least 2)."""
+def detect_industries(body: str, industries: dict[str, dict[str, Any]], common: dict[str, Any] | None = None) -> list[str]:
+    """Pick the industry groups whose own exclusive markers appear in this vault (at least 2)."""
+    common = common or {}
+    fields = ("ratings", "standards", "certificates", "units")
+    shared = {k: {str(x).casefold() for x in common.get(k) or []} for k in fields}
+    seen: dict[tuple[str, str], int] = {}
+    for group in industries.values():
+        for kind in fields:
+            for item in {str(x).casefold() for x in group.get(kind) or []}:
+                seen[(kind, item)] = seen.get((kind, item), 0) + 1
+    exclusive = lambda kind, item: item.casefold() not in shared[kind] and seen.get((kind, item.casefold())) == 1
     matched = []
-    for name, group in table.items():
+    for name, group in industries.items():
         hits = 0
         for rating in group.get("ratings") or []:
-            if re.search(rf"(?i)\b{fragment(rating)}\s?\d", body):
+            if exclusive("ratings", rating) and re.search(rf"(?i)\b{fragment(rating)}\s?\d", body):
                 hits += 1
         for std in group.get("standards") or []:
-            if re.search(rf"\b{fragment(std)}\s?-?\s?[A-Z]{{0,2}}\d", body):
+            if exclusive("standards", std) and re.search(rf"\b{fragment(std)}\s?-?\s?[A-Z]{{0,2}}\d", body):
                 hits += 1
         for cert in group.get("certificates") or []:
-            if re.search(rf"(?<![A-Za-z])(?:{fragment(cert)})(?![A-Za-z])", body):
+            if exclusive("certificates", cert) and re.search(rf"(?<![A-Za-z])(?:{fragment(cert)})(?![A-Za-z])", body):
                 hits += 1
         for unit in group.get("units") or []:
-            if len(unit) >= 2 and re.search(rf"(?i)(?<![\w.])\d+(?:[.,]\d+)?\s?{fragment(unit)}(?![A-Za-z])", body):
+            if len(unit) >= 2 and exclusive("units", unit) and re.search(rf"(?i)(?<![\w.])\d+(?:[.,]\d+)?\s?{fragment(unit)}(?![A-Za-z])", body):
                 hits += 1
         if hits >= 2:
             matched.append(name)
@@ -93,7 +102,7 @@ def load_rules(config: dict[str, Any] | None = None, vault: Path | None = None) 
     named = {str(v) for v in [*(config.get("vocabularies") or []), *(own.get("industries") or [])]}
     body = vault_body(vault) if vault else ""
     if not named and body:
-        named = set(detect_industries(body, table["industries"]))
+        named = set(detect_industries(body, table["industries"], table["common"]))
     industries = [v for k, v in table["industries"].items() if k in named] or list(table["industries"].values())
     rules = {kind: list(dict.fromkeys([*table["common"].get(kind, []), *(i for group in industries for i in group.get(kind, [])),
                                        *own.get(kind, [])])) for kind in KINDS}
