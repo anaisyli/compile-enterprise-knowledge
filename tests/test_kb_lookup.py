@@ -216,6 +216,36 @@ class LookupTests(unittest.TestCase):
                                  capture_output=True, text=True, encoding="utf-8")
         self.assertNotEqual(blocked.returncode, 0)
 
+    def test_multi_section_page_filters_pitfalls_of_unpicked_items_only(self) -> None:
+        catalog_page = self.vault / "03_正式知识/10_客户知识/20_产品介绍/产品大类-产品中心.md"
+        catalog_page.write_text(
+            "---\n"
+            'doc_id: "KNOW-cat"\n'
+            'title: "产品大类-产品中心"\n'
+            'layer: "整理层"\n'
+            'status: "有效"\n'
+            "---\n\n"
+            "# 产品大类-产品中心\n\n"
+            "## 产品介绍\n\n"
+            "### 卫衣\n\n"
+            "- HD-201 重磅卫衣，克重 GSM300。\n\n"
+            "### 夹克\n\n"
+            "- JK-305 冲锋衣，克重 GSM300。\n\n"
+            "## 需核实\n\n"
+            "- HD-201 尺码表与吊牌标注有差异，需核实。\n"
+            "- JK-305 克重 GSM300 与画册不符，需核实。\n"
+            "- HD-201 与 JK-305 的面料编号混用，需核实。\n"
+            "- 全目录洗涤说明口径不统一，需核实。\n",
+            encoding="utf-8",
+        )
+        partial = kb_lookup.pack(self.vault, ["产品大类-产品中心#产品介绍 > 卫衣"], [], None, False, False)["text"]
+        self.assertIn("HD-201 尺码表", partial)
+        self.assertNotIn("JK-305 克重 GSM300", partial)
+        self.assertIn("HD-201 与 JK-305 的面料编号混用", partial)
+        self.assertIn("全目录洗涤说明口径不统一", partial)
+        whole = kb_lookup.pack(self.vault, ["产品大类-产品中心#产品介绍"], [], None, False, False)["text"]
+        self.assertIn("JK-305 克重 GSM300", whole)
+
 
 if __name__ == "__main__":
     unittest.main()

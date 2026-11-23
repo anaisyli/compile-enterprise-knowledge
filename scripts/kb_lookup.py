@@ -44,6 +44,34 @@ BUDGET_ROWS = 10
 FALLBACK_HITS = 3
 MARKER = "<!-- compile-enterprise-knowledge -->"
 CONFIRMED_OUTLINE = {"已确认", "locked", "confirmed"}
+ITEM_CODE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,}(?:-[A-Z]{1,4})?-?[0-9][A-Z0-9-]{0,18}(?![A-Za-z0-9])")
+
+
+def item_codes(text: str) -> set[str]:
+    return {m.group(0).upper() for m in ITEM_CODE_RE.finditer(text)}
+
+
+def filter_page_checks(page: Page, picked_on_page: list[Section], all_picked_codes: set[str], lines: list[str]) -> list[str]:
+    """On a multi-section page where only some sections were picked, drop 需核实 lines
+    that exclusively name item/model codes belonging to unpicked sections of that page."""
+    picked_ids = {id(s) for s in picked_on_page}
+    unpicked = [s for s in page.sections if s.h2 != CHECK_HEADING and s.text and id(s) not in picked_ids]
+    if not unpicked:
+        return lines
+    unpicked_codes: set[str] = set()
+    for s in unpicked:
+        unpicked_codes |= item_codes(f"{s.name}\n{s.text}")
+    exclusive_unpicked = unpicked_codes - all_picked_codes
+    if not exclusive_unpicked:
+        return lines
+    exclusive_picked = all_picked_codes - unpicked_codes
+    kept = []
+    for line in lines:
+        codes = item_codes(line)
+        if (codes & exclusive_unpicked) and not (codes & exclusive_picked):
+            continue
+        kept.append(line)
+    return kept
 
 
 @dataclass(eq=False)
@@ -640,12 +668,19 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
 
             zone("一、客户专属事实（可以代表公司写）", "客户知识")
             zone("二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", "外部公共知识")
+        all_picked_codes: set[str] = set()
+        for s in chosen:
+            all_picked_codes |= item_codes(f"{s.page.stem}\n{s.name}\n{s.text}")
         checks = []
         for page in [*([brief_page] if brief and brief_page else []), *used_pages]:
+            picked_on_page = [s for s in chosen if s.page is page]
             for section in page.sections:
                 if section.h2 == CHECK_HEADING and section.text:
                     body = slim(section.text, False, True, page.stem, {})
-                    checks.extend(f"- 〔{page.stem}〕{line.lstrip('- ').strip()}" for line in body.splitlines() if line.strip())
+                    raw_lines = [line.lstrip("- ").strip() for line in body.splitlines() if line.strip()]
+                    if page is not brief_page:
+                        raw_lines = filter_page_checks(page, picked_on_page, all_picked_codes, raw_lines)
+                    checks.extend(f"- 〔{page.stem}〕{line}" for line in raw_lines)
         if checks:
             lines.extend(["## 三、口径避坑（下面的说法有冲突或待核实：不要写成确定的事实，不写具体数字）", "", *dict.fromkeys(checks), ""])
         if gap_rows or problems:
@@ -690,7 +725,8 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
         applied.append(rows)
     limit = budget or WARN_CHARS
     head = ["# 写作资料包", "",
-            "> 客户专属事实可以代表公司写；行业公共知识只作背景和论据，不能写成客户的能力、承诺或认证；"
+            "> 客户专属事实可以代表公司写，其中无 ⚠ 且不与口径避坑冲突的明确型号、规格、材质、标准和场景贴合大纲时应优先具体写入正文；"
+            "行业公共知识只作背景和论据，不能写成客户的能力、承诺或认证；"
             "口径避坑里的说法不要写成确定的事实。资料包里没有的公司事实不要编。",
             f"> 每条事实前带 `[{id_prefix}1]`、`[{id_prefix}2]` 编号；写完后在 `引用表.md` 标明每句引用的编号，由 `check_article.py --citations` 核对并生成 `引用追溯.md`。"]
     if budget and applied:
