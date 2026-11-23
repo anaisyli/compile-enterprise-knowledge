@@ -177,6 +177,45 @@ class LookupTests(unittest.TestCase):
         chunk = kb_index.search(self.vault, "扭矩", 5, None, None, ["客户知识"])[0]
         self.assertEqual(chunk["section"], "参数 > 扭矩")
 
+    def test_task_file_packs_by_outline_numbers_facts_and_updates_ledger(self) -> None:
+        (self.vault / "01_工作台").mkdir(parents=True, exist_ok=True)
+        task_dir = self.vault / "04_文章任务/10_写作记录/2026-11-23-ptfe-valve"
+        task_dir.mkdir(parents=True)
+        task = task_dir / "大纲.md"
+        task.write_text(
+            "---\n"
+            "task_key: 2026-11-23-ptfe-valve\n"
+            "writing_skill: b2b-eeat-seo-publisher-initial\n"
+            "outline_status: 已确认\n"
+            "title_or_topic: How to Choose a PTFE Lined Butterfly Valve\n"
+            "---\n\n"
+            "## 大纲\n- What a PTFE valve is\n- Sizing parameters\n\n"
+            "## 资料对应\n"
+            "- What a PTFE valve is -> 产品系列-YFD71F#一句话说明\n"
+            "- Sizing parameters -> 产品系列-YFD71F#参数 > 基本技术数据\n\n"
+            "## 缺口\n- PTFE 阀座 耐受 酸碱\n",
+            encoding="utf-8",
+        )
+        import subprocess
+        run = subprocess.run([sys.executable, str(ROOT / "scripts/kb_lookup.py"), "pack", "--task", str(task)],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        pack_md = (task_dir / "资料包.md").read_text(encoding="utf-8")
+        pack_json = json.loads((task_dir / "资料包.json").read_text(encoding="utf-8"))
+        self.assertIn("### 大纲节：What a PTFE valve is", pack_md)
+        self.assertIn("[K1]", pack_md)
+        self.assertIn("| [K2] | Size range | DN50-DN300 |", pack_md)
+        self.assertEqual(pack_json["facts"][0]["page"], "产品系列-YFD71F")
+        self.assertIn("产品画册-YFD71F#第 1 页", pack_json["facts"][0]["sources"])
+        ledger = (self.vault / kb_lookup.TASK_LEDGER).read_text(encoding="utf-8")
+        self.assertIn("2026-11-23-ptfe-valve", ledger)
+        self.assertIn("写作中", ledger)
+        # Unconfirmed outline is refused.
+        task.write_text(task.read_text(encoding="utf-8").replace("outline_status: 已确认", "outline_status: 草稿"), encoding="utf-8")
+        blocked = subprocess.run([sys.executable, str(ROOT / "scripts/kb_lookup.py"), "pack", "--task", str(task)],
+                                 capture_output=True, text=True, encoding="utf-8")
+        self.assertNotEqual(blocked.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

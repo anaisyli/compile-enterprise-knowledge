@@ -19,10 +19,11 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from kb_common import parse_frontmatter, write_text
+from kb_common import parse_frontmatter, vault_lock, write_json, write_text
 from kb_index import aliases_of, search, tokens
 from sections import keyword_pattern
 
@@ -31,6 +32,7 @@ CUSTOMER = Path("03_正式知识/10_客户知识")
 EXTERNAL = Path("03_正式知识/20_外部公共知识")
 CATALOG = Path("01_工作台/写作目录.md")
 STATE = Path("05_数据与审核/70_构建状态")
+TASK_LEDGER = Path("04_文章任务/00_文章台账.md")
 RULES = Path(__file__).resolve().parents[1] / "assets" / "research-rules.json"
 BRIEF_STEM = "公司-速查卡"
 CHECK_HEADING = "需核实"
@@ -41,6 +43,7 @@ WARN_CHARS = 15000
 BUDGET_ROWS = 10
 FALLBACK_HITS = 3
 MARKER = "<!-- compile-enterprise-knowledge -->"
+CONFIRMED_OUTLINE = {"已确认", "locked", "confirmed"}
 
 
 @dataclass(eq=False)
@@ -184,7 +187,7 @@ def drop_empty_columns(text: str) -> str:
 def refetch(where: str) -> str:
     """The command that brings one folded table back whole, ready to copy."""
     return (f"要写表里的具体数值时，先补读整张表：`kb_lookup.py pack --vault <知识库> --sections \"{where}\" --full-tables "
-            f"--no-brief --output <本篇工作目录>/资料包-补读.md`，只写表里有的数")
+            f"--no-brief --id-prefix R --output <本篇工作目录>/资料包-补读.md`，只写表里有的数")
 
 
 def fold_tables(text: str, where: str, limit: int = TABLE_ROWS) -> str:
@@ -298,12 +301,253 @@ def classify(gap: str, rules: dict[str, Any]) -> str:
     return "客户专属" if pattern and pattern.search(padded) else "公共知识"
 
 
+def line_sources(raw: str) -> list[str]:
+    """Source file#section references extracted from Obsidian links on one raw line."""
+    found = []
+    for match in LINK.finditer(raw):
+        if match.group(0).startswith("!"):
+            continue
+        target = re.split(r"\\?\|", match.group(1), maxsplit=1)[0].strip()
+        src = Path(target.split("#", 1)[0]).name + ("#" + target.split("#", 1)[1] if "#" in target else "")
+        if src and src not in found:
+            found.append(src)
+    return found
+
+
+def source_map(raw_text: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Map stripped line text -> its source refs, plus all unique sources in the section."""
+    by_line: dict[str, list[str]] = {}
+    all_sources: list[str] = []
+    pending_table_rows: list[str] = []
+    for raw in raw_text.splitlines():
+        srcs = line_sources(raw)
+        for s in srcs:
+            if s not in all_sources:
+                all_sources.append(s)
+        stripped = LINK.sub("", raw).strip()
+        if raw.lstrip().startswith("|"):
+            key = squeeze(stripped)
+            if key:
+                by_line[key] = srcs
+                if not srcs:
+                    pending_table_rows.append(key)
+        elif raw.strip().startswith("表格出处：") and srcs and pending_table_rows:
+            for key in pending_table_rows:
+                by_line[key] = list(srcs)
+            pending_table_rows = []
+        else:
+            pending_table_rows = []
+            key = squeeze(stripped)
+            if key and srcs:
+                by_line[key] = srcs
+    return by_line, all_sources
+
+
+def number_block(raw_text: str, slimmed: str, layer: str, page: str, section: str,
+                 counter: list[int], prefix: str, facts: list[dict[str, Any]],
+                 outline: str = "") -> str:
+    """Prefix each fact bullet, paragraph, or table row with [K1], [K2]… and record it for 资料包.json."""
+    by_line, fallback = source_map(raw_text)
+
+    def next_id() -> str:
+        counter[0] += 1
+        return f"{prefix}{counter[0]}"
+
+    def lookup_src(line: str) -> list[str]:
+        return by_line.get(squeeze(line)) or fallback[:3]
+
+    out: list[str] = []
+    lines = slimmed.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped:
+            out.append(line)
+            i += 1
+            continue
+        # Markdown table block
+        if line.lstrip().startswith("|"):
+            run = []
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                run.append(lines[i])
+                i += 1
+            if len(run) >= 3 and re.match(r"^\s*\|?\s*:?-{3,}", run[1]):
+                out.append("| 编号 " + run[0].lstrip())
+                out.append("| --- " + run[1].lstrip())
+                for row in run[2:]:
+                    if row.strip().startswith("（表格共"):
+                        out.append(row)
+                        continue
+                    fid = next_id()
+                    out.append(f"| [{fid}] " + row.lstrip())
+                    facts.append({"id": fid, "text": row.strip(), "layer": layer, "page": page, "section": section,
+                                  "sources": lookup_src(row), "risky": ("⚠" in row or "需核实" in row), "outline": outline})
+            else:
+                out.extend(run)
+            continue
+        # HTML table block
+        if stripped.lower().startswith("<table"):
+            html_lines = [line]
+            i += 1
+            while i < len(lines) and "</table>" not in html_lines[-1].lower():
+                html_lines.append(lines[i])
+                i += 1
+            block = "\n".join(html_lines)
+            fid = next_id()
+            out.append(f"[{fid}]")
+            out.append(block)
+            facts.append({"id": fid, "text": re.sub(r"(?s)<[^>]+>", " ", block).strip(), "layer": layer, "page": page,
+                          "section": section, "sources": fallback[:3], "risky": ("⚠" in block or "需核实" in block),
+                          "outline": outline})
+            continue
+        # Notices / headings / quotes are not numbered as facts
+        if stripped.startswith(("#", ">", "（表格共", "（为了控制")):
+            out.append(line)
+            i += 1
+            continue
+        fid = next_id()
+        bullet = re.match(r"^(\s*(?:[-*+]|\d+\.)\s+)(.*)$", line)
+        if bullet:
+            out.append(f"{bullet.group(1)}[{fid}] {bullet.group(2)}")
+            body_text = bullet.group(2).strip()
+        else:
+            out.append(f"[{fid}] {line}")
+            body_text = stripped
+        facts.append({"id": fid, "text": body_text, "layer": layer, "page": page, "section": section,
+                      "sources": lookup_src(body_text), "risky": ("⚠" in body_text or "需核实" in body_text),
+                      "outline": outline})
+        i += 1
+    return "\n".join(out)
+
+
+def parse_task(path: Path) -> dict[str, Any]:
+    """Read an outline task file (大纲.md): frontmatter, outline headings, 资料对应, and 缺口."""
+    text = path.read_text(encoding="utf-8")
+    fields = parse_frontmatter(text)
+    body = text.split("\n---\n", 1)[-1] if text.startswith("---\n") else text
+    buckets: dict[str, list[str]] = {}
+    current = ""
+    for line in body.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            buckets.setdefault(current, [])
+        elif current:
+            buckets[current].append(line)
+    outline = [re.sub(r"^\s*[-*+]\s+", "", line).strip()
+               for line in buckets.get("大纲", []) if re.match(r"^\s*[-*+]\s+", line)]
+    mapping: list[tuple[str, list[str]]] = []
+    for raw in buckets.get("资料对应", []):
+        line = raw.strip()
+        if not line or line.startswith("<!--"):
+            continue
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 2 and cells[0] not in {"大纲节", "大纲", "章节"} and not set(cells[0]) <= set("-: "):
+                specs = split_list([cells[1]])
+                if specs:
+                    mapping.append((cells[0], specs))
+            continue
+        item = re.sub(r"^\s*[-*+]\s+", "", line).strip()
+        if not item:
+            continue
+        parts = re.split(r"\s*(?:->|→|=>)\s*", item, maxsplit=1)
+        if len(parts) == 2:
+            heading, right = parts[0].strip(), parts[1].strip()
+        elif "：" in item and "#" in item.split("：", 1)[1]:
+            heading, right = (p.strip() for p in item.split("：", 1))
+        elif ": " in item and "#" in item.split(": ", 1)[1]:
+            heading, right = (p.strip() for p in item.split(": ", 1))
+        else:
+            heading, right = "", item
+        specs = split_list([right])
+        if specs:
+            mapping.append((heading, specs))
+    gaps = [re.sub(r"^\s*[-*+]\s+", "", line).strip()
+            for line in buckets.get("缺口", [])
+            if line.strip() and not line.strip().startswith(("<!--", "|"))]
+    return {"fields": fields, "outline": outline, "mapping": mapping, "gaps": [g for g in gaps if g]}
+
+
+def resolve_vault(vault_arg: str | None, task_path: Path | None, fields: dict[str, str]) -> Path:
+    if vault_arg:
+        return Path(vault_arg).resolve()
+    if fields.get("vault"):
+        return Path(fields["vault"]).resolve()
+    if task_path:
+        for parent in task_path.resolve().parents:
+            if (parent / "01_工作台").is_dir():
+                return parent
+    raise SystemExit("请传 --vault，或在 大纲.md 的 vault 字段里写明知识库路径。")
+
+
+def update_article_ledger(vault: Path, task_key: str, title: str, writing_skill: str, status: str,
+                          coverage: str = "-", task_path: Path | None = None) -> Path | None:
+    """Upsert one row in 04_文章任务/00_文章台账.md under the vault lock; never fails a read-only lookup."""
+    if not task_key or not (vault / "01_工作台").is_dir():
+        return None
+    if not vault_lock(vault, "article-ledger"):
+        return None
+    ledger = vault / TASK_LEDGER
+    rows: dict[str, list[str]] = {}
+    order: list[str] = []
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("|"):
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(cells) >= 7 and cells[0] != "任务编号" and not set(cells[0]) <= set("-: "):
+                    rows[cells[0]] = cells[:7]
+                    if cells[0] not in order:
+                        order.append(cells[0])
+    rel = ""
+    if task_path:
+        try:
+            rel = task_path.resolve().relative_to(vault.resolve()).as_posix().removesuffix(".md")
+        except ValueError:
+            rel = str(task_path)
+    link = f"[[{rel}\\|大纲]]" if rel and not Path(rel).is_absolute() else (rel or "-")
+    existing = rows.get(task_key)
+    when = existing[1] if existing else date.today().isoformat()
+    safe = lambda s: str(s or "-").replace("|", "｜").replace("\n", " ").strip() or "-"
+    rows[task_key] = [
+        safe(task_key), when, safe(title or (existing[2] if existing else "-")),
+        safe(writing_skill or (existing[3] if existing else "-")),
+        safe(status),
+        safe(coverage if coverage != "-" else (existing[5] if existing else "-")),
+        link if task_path else (existing[6] if existing else "-"),
+    ]
+    if task_key not in order:
+        order.append(task_key)
+    lines = ["# 文章写作台账", "", MARKER, "",
+             "| 任务编号 | 日期 | 标题 | 写作 Skill | 状态 | 引用覆盖率 | 记录目录 |",
+             "| --- | --- | --- | --- | --- | --- | --- |",
+             *("| " + " | ".join(rows[k]) + " |" for k in order), ""]
+    write_text(ledger, "\n".join(lines))
+    return ledger
+
+
 def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with_sources: bool, full_tables: bool,
-         brief: bool = True, budget: int | None = None) -> dict[str, Any]:
+         brief: bool = True, budget: int | None = None, task_groups: list[tuple[str, list[str]]] | None = None,
+         id_prefix: str = "K") -> dict[str, Any]:
     pages = load_pages(vault)
     rules = load_rules(vault)
     chosen: list[Section] = []
     problems: list[str] = []
+    grouped: list[tuple[str, list[Section]]] = []
+    if task_groups:
+        for heading, group_specs in task_groups:
+            group_sections: list[Section] = []
+            for spec in group_specs:
+                found, problem = pick(pages, spec)
+                if problem:
+                    problems.append(problem)
+                for s in found:
+                    if s not in group_sections:
+                        group_sections.append(s)
+                    if s not in chosen:
+                        chosen.append(s)
+            if group_sections:
+                grouped.append((heading or "未命名章节", group_sections))
     for spec in specs:
         found, problem = pick(pages, spec)
         if problem:
@@ -315,12 +559,17 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
                         key=lambda s: score(s, wanted), reverse=True)
         chosen.extend(s for s in ranked[:8] if score(s, wanted) >= 0.2 and s not in chosen)
     gap_rows = []
+    reused_sections: list[Section] = []
     for gap in gaps:
         wanted = set(tokens(gap).split())
         external = sorted((s for p in pages if p.layer == "外部公共知识" for s in p.sections if s.h2 != CHECK_HEADING and s.text),
                           key=lambda s: score(s, wanted), reverse=True)
         reuse = [s for s in external[:2] if score(s, wanted) >= 0.35]
-        chosen.extend(s for s in reuse if s not in chosen)
+        for s in reuse:
+            if s not in chosen:
+                chosen.append(s)
+            if s not in reused_sections:
+                reused_sections.append(s)
         kind = classify(gap, rules)
         hits = []
         if not reuse and (vault / "02_源资料/knowledge-index.sqlite").is_file():
@@ -331,36 +580,65 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
     used_pages = list(dict.fromkeys(s.page for s in chosen))
     brief_page = next((p for p in pages if p.stem == BRIEF_STEM), None)
 
-    def render(rows: int, with_hits: bool) -> str:
+    def render(rows: int, with_hits: bool) -> tuple[str, list[dict[str, Any]]]:
         notes: dict[str, dict[str, str]] = {}
+        facts: list[dict[str, Any]] = []
+        counter = [0]
         lines = []
         if brief and brief_page:
             page_notes: dict[str, str] = {}
-            text = "\n\n".join(f"### {s.name}\n\n{slim(s.text, with_sources, full_tables, f'{brief_page.stem}#{s.name}', page_notes, rows)}"
-                               for s in brief_page.sections if s.h2 != CHECK_HEADING)
-            lines.extend(["## 速查卡", "", text, ""])
+            parts = []
+            for s in brief_page.sections:
+                if s.h2 == CHECK_HEADING:
+                    continue
+                slimmed = slim(s.text, with_sources, full_tables, f"{brief_page.stem}#{s.name}", page_notes, rows)
+                numbered = number_block(s.text, slimmed, "速查卡", brief_page.stem, s.name, counter, id_prefix, facts)
+                parts.append(f"### {s.name}\n\n{numbered}")
+            lines.extend(["## 速查卡", "", "\n\n".join(parts), ""])
             if page_notes:
                 notes[brief_page.stem] = page_notes
 
-        def zone(title: str, layer: str) -> None:
-            mine = [s for s in chosen if s.page.layer == layer and s.page is not brief_page]
-            if not mine:
-                return
-            lines.extend([f"## {title}", ""])
-            for page in dict.fromkeys(s.page for s in mine):
-                meta = ""
-                if layer == "外部公共知识":
-                    meta = f"（{page.fields.get('status', '待抽检')}；复查日期 {page.fields.get('review_due', '未写')}）"
-                page_notes = notes.setdefault(page.stem, {})
-                for section in [s for s in mine if s.page is page]:
-                    where = f"{page.stem}#{section.name}"
-                    lines.extend([f"### {page.stem} · {section.name}{meta}", "",
-                                  slim(section.text, with_sources, full_tables, where, page_notes, rows), ""])
-                if not page_notes:
-                    notes.pop(page.stem, None)
+        def emit_section(section: Section, outline: str = "") -> None:
+            page = section.page
+            meta = ""
+            if page.layer == "外部公共知识":
+                meta = f"（{page.fields.get('status', '待抽检')}；复查日期 {page.fields.get('review_due', '未写')}）"
+            tag = "【行业公共知识：只作背景和论据，不能写成客户能力】" if page.layer == "外部公共知识" else ""
+            page_notes = notes.setdefault(page.stem, {})
+            where = f"{page.stem}#{section.name}"
+            slimmed = slim(section.text, with_sources, full_tables, where, page_notes, rows)
+            numbered = number_block(section.text, slimmed, page.layer, page.stem, section.name, counter, id_prefix, facts, outline)
+            heading_prefix = "####" if outline else "###"
+            lines.extend([f"{heading_prefix} {page.stem} · {section.name}{meta}{tag}", "", numbered, ""])
+            if not page_notes:
+                notes.pop(page.stem, None)
 
-        zone("一、客户专属事实（可以代表公司写）", "客户知识")
-        zone("二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", "外部公共知识")
+        if grouped:
+            lines.extend(["## 一、按大纲组织的资料", ""])
+            shown: set[int] = set()
+            for heading, group_sections in grouped:
+                used_labels = "、".join(f"{s.page.stem}#{s.name}" for s in group_sections)
+                lines.extend([f"### 大纲节：{heading}（用了：{used_labels}）", ""])
+                for s in group_sections:
+                    emit_section(s, outline=heading)
+                    shown.add(id(s))
+            extra_external = [s for s in reused_sections if id(s) not in shown and s.page is not brief_page]
+            if extra_external:
+                lines.extend(["## 二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", ""])
+                for s in extra_external:
+                    emit_section(s)
+        else:
+            def zone(title: str, layer: str) -> None:
+                mine = [s for s in chosen if s.page.layer == layer and s.page is not brief_page]
+                if not mine:
+                    return
+                lines.extend([f"## {title}", ""])
+                for page in dict.fromkeys(s.page for s in mine):
+                    for section in [s for s in mine if s.page is page]:
+                        emit_section(section)
+
+            zone("一、客户专属事实（可以代表公司写）", "客户知识")
+            zone("二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", "外部公共知识")
         checks = []
         for page in [*([brief_page] if brief and brief_page else []), *used_pages]:
             for section in page.sections:
@@ -398,20 +676,22 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
             for stem, page_notes in notes.items():
                 lines.append(f"- {stem}：" + "；".join(f"〔{n}〕{s}" for n, s in sorted(page_notes.items(), key=lambda x: int(x[0]))))
             lines.append("")
-        return "\n".join(lines).strip() + "\n"
+        return "\n".join(lines).strip() + "\n", facts
 
     # A budget only takes away what loses no fact: long tables fold sooner, uncurated leads drop.
     steps = [(TABLE_ROWS, True)] + ([(BUDGET_ROWS, True), (BUDGET_ROWS, False)] if budget else [])
     applied = []
+    body, facts = "", []
     for rows, with_hits in steps:
-        body = render(rows, with_hits)
+        body, facts = render(rows, with_hits)
         if not budget or len(body) <= budget:
             break
         applied.append(rows)
     limit = budget or WARN_CHARS
     head = ["# 写作资料包", "",
             "> 客户专属事实可以代表公司写；行业公共知识只作背景和论据，不能写成客户的能力、承诺或认证；"
-            "口径避坑里的说法不要写成确定的事实。资料包里没有的公司事实不要编。"]
+            "口径避坑里的说法不要写成确定的事实。资料包里没有的公司事实不要编。",
+            f"> 每条事实前带 `[{id_prefix}1]`、`[{id_prefix}2]` 编号；写完后在 `引用表.md` 标明每句引用的编号，由 `check_article.py --citations` 核对并生成 `引用追溯.md`。"]
     if budget and applied:
         head.append(f"> 为了控制在 {budget} 字以内：超过 {BUDGET_ROWS} 行的表已折叠（附补读命令）"
                     + ("，原文里搜到的线索已去掉" if len(applied) > 1 else "") + "。客户事实、外部知识和口径避坑一条没删。")
@@ -419,7 +699,7 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
         sizes = "、".join(f"{p.stem} {sum(len(s.text) for s in chosen if s.page is p)}" for p in used_pages)
         head.append(f"> ⚠ 资料包约 {len(body)} 字，超过 {limit} 字（各页约：{sizes}）。内容照常全给；需要时少挑几个小板块。")
     return {"text": "\n".join(head) + "\n\n" + body, "sections": [f"{s.page.stem}#{s.name}" for s in chosen],
-            "gaps": gap_rows, "problems": problems, "characters": len(body)}
+            "gaps": gap_rows, "problems": problems, "characters": len(body), "facts": facts}
 
 
 def split_list(values: list[str]) -> list[str]:
@@ -432,36 +712,63 @@ def main() -> int:
     one = sub.add_parser("catalog", help="Print the writing catalog")
     one.add_argument("--vault", required=True)
     one.add_argument("--write", action="store_true", help="Also refresh 01_工作台/写作目录.md")
-    two = sub.add_parser("pack", help="Print the material pack for the picked sections")
-    two.add_argument("--vault", required=True)
+    two = sub.add_parser("pack", help="Print the material pack for the picked sections or an outline task file")
+    two.add_argument("--vault", help="Knowledge base folder (optional when --task gives vault or lives inside the vault)")
+    two.add_argument("--task", help="Outline task file (大纲.md): reads 资料对应 and 缺口, groups by outline, writes 资料包.md + 资料包.json alongside it")
     two.add_argument("--sections", action="append", default=[], help='"页名#小板块;页名#小板块 > 子节"; repeat or separate with ;')
     two.add_argument("--gaps", action="append", default=[], help="Outline sections the catalog has nothing for; ; separated")
     two.add_argument("--query", help="Free keywords, when no section was picked")
     two.add_argument("--with-sources", action="store_true", help="Keep the 〔n〕 marks and list where each came from")
     two.add_argument("--full-tables", action="store_true", help="Do not fold tables longer than 25 rows")
     two.add_argument("--no-brief", action="store_true")
+    two.add_argument("--id-prefix", default="K", help="Prefix for fact IDs (default K; use R for 补读 packs)")
     two.add_argument("--budget", type=int, help="Aim for this many characters: fold tables over 10 rows, then drop "
                                                 "uncurated source hits; never drop a fact")
     two.add_argument("--json", action="store_true")
     two.add_argument("--output", help="Write the pack to this file instead of printing it")
     args = parser.parse_args()
-    vault = Path(args.vault).resolve()
     if args.command == "catalog":
+        vault = Path(args.vault).resolve()
         text = catalog(vault)
         if args.write:
             write_catalog(vault)
         print(text)
         return 0
-    result = pack(vault, split_list(args.sections), split_list(args.gaps), args.query, args.with_sources, args.full_tables,
-                  brief=not args.no_brief, budget=args.budget)
-    if args.output:
-        write_text(Path(args.output), result["text"])
+    task_path = Path(args.task).resolve() if args.task else None
+    task = parse_task(task_path) if task_path else None
+    if task:
+        status = task["fields"].get("outline_status", "").strip()
+        if status and status not in CONFIRMED_OUTLINE:
+            raise SystemExit(f"大纲尚未确认（outline_status={status}），请先确认大纲并标为“已确认”再取资料。")
+    vault = resolve_vault(args.vault, task_path, task["fields"] if task else {})
+    gaps = [*(task["gaps"] if task else []), *split_list(args.gaps)]
+    result = pack(vault, split_list(args.sections), gaps, args.query, args.with_sources, args.full_tables,
+                  brief=not args.no_brief, budget=args.budget,
+                  task_groups=task["mapping"] if task else None, id_prefix=args.id_prefix)
+    output_path = Path(args.output).resolve() if args.output else (task_path.parent / "资料包.md" if task_path else None)
+    meta_path = None
+    if output_path:
+        write_text(output_path, result["text"])
+        meta_path = output_path.with_suffix(".json")
+        write_json(meta_path, {
+            "vault": str(vault),
+            "task": str(task_path) if task_path else "",
+            "task_key": task["fields"].get("task_key", "") if task else "",
+            "id_prefix": args.id_prefix,
+            "sections": result["sections"],
+            "facts": result["facts"],
+        })
+    if task and task_path:
+        task_key = task["fields"].get("task_key") or task_path.parent.name
+        update_article_ledger(vault, task_key, task["fields"].get("title_or_topic", ""),
+                              task["fields"].get("writing_skill", ""), "写作中", task_path=task_path)
     if args.json:
-        print(json.dumps({k: v for k, v in result.items() if k != "text" or not args.output}, ensure_ascii=False, indent=2))
-    elif not args.output:
+        print(json.dumps({k: v for k, v in result.items() if k not in {"text", "facts"} or not output_path}, ensure_ascii=False, indent=2))
+    elif not output_path:
         print(result["text"])
     else:
-        print(json.dumps({"output": args.output, "characters": result["characters"], "problems": result["problems"],
+        print(json.dumps({"output": str(output_path), "facts_json": str(meta_path), "facts": len(result["facts"]),
+                          "characters": result["characters"], "problems": result["problems"],
                           "gaps": [{k: v for k, v in g.items() if k != "source_hits"} for g in result["gaps"]]},
                          ensure_ascii=False, indent=2))
     return 0

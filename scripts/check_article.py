@@ -280,10 +280,138 @@ def check(article: str, pack: str | list[str], prefixes: list[str], deny: list[s
             "uncurated": uncurated, "competitors": competitors}
 
 
+def parse_citations(text: str) -> list[tuple[str, list[str]]]:
+    """Read 引用表.md: Markdown table rows (文章原文 | 引用) -> [(quote, ['K12', 'K15'])]."""
+    rows: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if len(cells) < 2:
+            continue
+        if cells[0] in {"文章原文", "原文", "文章原话", "句子"} or set(cells[0]) <= set("-: "):
+            continue
+        quote = cells[0].strip("` ")
+        ids = re.findall(r"\b[A-Za-z]+\d+\b", cells[1])
+        if quote:
+            rows.append((quote, list(dict.fromkeys(ids))))
+    return rows
+
+
+def load_pack_facts(pack_paths: list[Path]) -> dict[str, dict[str, Any]]:
+    """Load companion 资料包.json files next to each --pack file."""
+    index: dict[str, dict[str, Any]] = {}
+    for path in pack_paths:
+        meta = path.with_suffix(".json")
+        if meta.is_file():
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            for item in data.get("facts") or []:
+                if item.get("id"):
+                    index[str(item["id"])] = item
+    return index
+
+
+def check_citations(article: str, citation_rows: list[tuple[str, list[str]]], fact_index: dict[str, dict[str, Any]],
+                    prefixes: list[str], own_terms: list[str], rules: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Verify each row in 引用表.md against the article and its specific cited K# facts."""
+    article_norm = norm(article)
+    all_facts = facts(article, prefixes, rules)
+    own_patterns = [t.casefold() for t in own_terms if len(t) >= 2]
+    client_claim = re.compile(r"(?i)\b(?:we|our|us)\b|我们|本公司|我司")
+    checked_rows: list[dict[str, Any]] = []
+    covered_keys: set[str] = set()
+    verified_keys: set[str] = set()
+    for quote, ids in citation_rows:
+        issues: list[str] = []
+        warnings: list[str] = []
+        in_article = norm(quote) in article_norm
+        if not in_article:
+            issues.append("文章里找不到这段原话")
+        missing_ids = [cid for cid in ids if cid not in fact_index]
+        if not ids:
+            issues.append("没有填写引用编号")
+        elif missing_ids:
+            issues.append(f"资料包里没有编号：{'、'.join(missing_ids)}")
+        cited_items = [fact_index[cid] for cid in ids if cid in fact_index]
+        cited_zone = norm("\n".join(str(item.get("text", "")) for item in cited_items))
+        quote_facts = facts(quote, prefixes, rules)
+        unsupported = [text for _, text in quote_facts if cited_items and not present(text, cited_zone)]
+        if unsupported:
+            issues.append(f"所引编号里找不到：{'、'.join(unsupported[:5])}")
+        if cited_items and all(item.get("layer") == "外部公共知识" for item in cited_items):
+            folded = quote.casefold()
+            if client_claim.search(quote) or any(t in folded for t in own_patterns):
+                warnings.append("引用了外部公共知识但句子像在写客户自身能力，请确认")
+        if any(item.get("risky") for item in cited_items):
+            warnings.append("所引条目含 ⚠ 或需核实，请确认表述为中性")
+        for _, ftext in quote_facts:
+            fkey = norm(ftext)
+            covered_keys.add(fkey)
+            if not issues and not unsupported:
+                verified_keys.add(fkey)
+        checked_rows.append({
+            "quote": quote,
+            "ids": ids,
+            "ok": not issues,
+            "issues": issues,
+            "warnings": warnings,
+            "kb_refs": list(dict.fromkeys(f"{i['page']}#{i['section']}（{i['layer']}）" for i in cited_items)),
+            "sources": list(dict.fromkeys(s for i in cited_items for s in (i.get("sources") or []))),
+        })
+    uncovered = [{"kind": kind, "text": text} for kind, text in all_facts if norm(text) not in covered_keys]
+    total = len(all_facts)
+    cited_count = sum(1 for _, text in all_facts if norm(text) in covered_keys)
+    verified_count = sum(1 for _, text in all_facts if norm(text) in verified_keys)
+    rate = f"{round(verified_count / total * 100)}%" if total else "100%"
+    return {
+        "rows": checked_rows,
+        "total_facts": total,
+        "cited_facts": cited_count,
+        "verified_facts": verified_count,
+        "coverage_rate": rate,
+        "uncovered": uncovered,
+        "failed_rows": sum(1 for r in checked_rows if not r["ok"]),
+        "warning_rows": sum(1 for r in checked_rows if r["warnings"]),
+    }
+
+
+def trace_report(citations: dict[str, Any], title: str = "") -> str:
+    """Human-readable 引用追溯.md: 文章原话 -> 知识库哪一节 -> 原始资料哪一页."""
+    lines = ["# 引用追溯" + (f"：{title}" if title else ""), "",
+             f"硬事实共 {citations['total_facts']} 处，已标引用 {citations['cited_facts']} 处，"
+             f"核对通过 {citations['verified_facts']} 处（{citations['coverage_rate']}）。", ""]
+    if citations["rows"]:
+        lines.extend(["| 文章原话 | 引用编号 | 对应知识库 | 原始资料出处 | 核对结果 |",
+                      "| --- | --- | --- | --- | --- |"])
+        for row in citations["rows"]:
+            status = "通过" if row["ok"] else "不通过：" + "；".join(row["issues"])
+            if row["warnings"]:
+                status += ("；⚠ " if row["ok"] else "；⚠ ") + "；".join(row["warnings"])
+            safe = lambda s: s.replace("|", "｜").replace("\n", " ")
+            lines.append("| " + " | ".join([
+                safe(row["quote"]),
+                ", ".join(row["ids"]) or "-",
+                "；".join(row["kb_refs"]) or "-",
+                "；".join(row["sources"]) or "-",
+                safe(status),
+            ]) + " |")
+        lines.append("")
+    if citations["uncovered"]:
+        lines.extend(["## 未标引用的硬事实（请确认是否需要补标或属于通用常识）", ""])
+        lines.extend(f"- {item['kind']}：{item['text']}" for item in citations["uncovered"])
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def report(result: dict[str, Any]) -> str:
     lines = ["# 文章硬事实核对", "",
              f"核对了 {result['checked']} 处型号、标准、认证、规格和数字：资料包里有 {result['in_pack']} 处。"]
-    if not (result["missing"] or result["risky"] or result["uncurated"] or result["competitors"]):
+    citations = result.get("citations")
+    if citations:
+        lines.append(f"引用表核对：共 {len(citations['rows'])} 条引用，通过 {len(citations['rows']) - citations['failed_rows']} 条；"
+                     f"硬事实引用覆盖率 {citations['verified_facts']}/{citations['total_facts']}（{citations['coverage_rate']}）。")
+    has_cit_issue = bool(citations and (citations["failed_rows"] or citations["warning_rows"]))
+    if not (result["missing"] or result["risky"] or result["uncurated"] or result["competitors"] or has_cit_issue):
         return "\n".join(lines + ["没有发现问题。"]) + "\n"
     lines.append("下面的请写作方确认：改成资料包里的说法、改写成通用表述，或删掉。这只是提醒，不挡交付。")
     if result["missing"]:
@@ -300,6 +428,12 @@ def report(result: dict[str, Any]) -> str:
         lines.extend(f"- {item['kind']}：{item['text']}" for item in result["uncurated"])
     if result["competitors"]:
         lines.extend(["", "## 出现了竞品或第三方名称", f"- {'、'.join(result['competitors'])}"])
+    if has_cit_issue and citations:
+        lines.extend(["", "## 引用表核对提醒"])
+        for row in citations["rows"]:
+            if not row["ok"] or row["warnings"]:
+                detail = "；".join([*row["issues"], *(f"⚠ {w}" for w in row["warnings"])])
+                lines.append(f"- `{row['quote']}`（{', '.join(row['ids']) or '无编号'}）：{detail}")
     return "\n".join(lines) + "\n"
 
 
@@ -313,21 +447,57 @@ def main() -> int:
     parser.add_argument("--article", required=True, help="The article: .md, .txt or .docx")
     parser.add_argument("--pack", required=True, action="append",
                         help="The material pack kb_lookup.py pack wrote for this article; repeat for its 补读 packs")
+    parser.add_argument("--citations", help="引用表.md: check each quote against its cited K# facts and write 引用追溯.md")
+    parser.add_argument("--task", help="Optional 大纲.md to update 04_文章任务/00_文章台账.md")
     parser.add_argument("--vault", help="The knowledge base: model prefixes, competitor names, and where a missing fact is")
     parser.add_argument("--output", help="Write the reminders to this file")
+    parser.add_argument("--trace-output", help="Where to write 引用追溯.md (defaults to same folder as --citations)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--strict", action="store_true", help="Exit 1 when something is not in the pack")
     args = parser.parse_args()
+    pack_paths = [Path(p).resolve() for p in args.pack]
+    task_path = Path(args.task).resolve() if args.task else None
+    if not task_path and args.citations:
+        sibling = Path(args.citations).resolve().parent / "大纲.md"
+        if sibling.is_file():
+            task_path = sibling
     vault = Path(args.vault).resolve() if args.vault else None
+    if not vault and task_path:
+        from kb_lookup import parse_task, resolve_vault
+        t = parse_task(task_path)
+        if t["fields"].get("vault") or any((p / "01_工作台").is_dir() for p in task_path.parents):
+            vault = resolve_vault(None, task_path, t["fields"])
     config = vault_config(vault)
-    result = check(read_article(Path(args.article)), [Path(p).read_text(encoding="utf-8") for p in args.pack],
-                   list(config.get("style_prefixes") or []), list(config.get("deny_terms") or []), vault,
-                   load_rules(config, vault))
+    article_text = read_article(Path(args.article))
+    rules = load_rules(config, vault)
+    prefixes = list(config.get("style_prefixes") or [])
+    result = check(article_text, [p.read_text(encoding="utf-8") for p in pack_paths],
+                   prefixes, list(config.get("deny_terms") or []), vault, rules)
+    trace_path = None
+    if args.citations:
+        cit_path = Path(args.citations).resolve()
+        fact_index = load_pack_facts(pack_paths)
+        cit_result = check_citations(article_text, parse_citations(cit_path.read_text(encoding="utf-8")),
+                                     fact_index, prefixes, list(config.get("own_terms") or []), rules)
+        result["citations"] = cit_result
+        trace_path = Path(args.trace_output).resolve() if args.trace_output else (cit_path.parent / "引用追溯.md")
+        title = ""
+        if task_path and task_path.is_file():
+            from kb_lookup import parse_task
+            title = parse_task(task_path)["fields"].get("title_or_topic", "")
+        write_text(trace_path, trace_report(cit_result, title))
+        if vault and task_path and task_path.is_file():
+            from kb_lookup import parse_task, update_article_ledger
+            fields = parse_task(task_path)["fields"]
+            task_key = fields.get("task_key") or task_path.parent.name
+            cov = f"{cit_result['verified_facts']}/{cit_result['total_facts']}（{cit_result['coverage_rate']}）"
+            update_article_ledger(vault, task_key, fields.get("title_or_topic", ""),
+                                  fields.get("writing_skill", ""), "已核对", coverage=cov, task_path=task_path)
     text = report(result)
     if args.output:
         write_text(Path(args.output), text)
     print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else text)
-    flagged = result["missing"] or result["risky"] or result["competitors"]
+    flagged = result["missing"] or result["risky"] or result["competitors"] or (result.get("citations", {}).get("failed_rows", 0) > 0)
     return 1 if args.strict and flagged else 0
 
 

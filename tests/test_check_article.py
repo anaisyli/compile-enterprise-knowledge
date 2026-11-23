@@ -131,6 +131,39 @@ class CheckTests(unittest.TestCase):
         # 2020 is the year extracted from "2020s" (not "2020s" as seconds); "3 in", "5 a", '150"' are not flagged.
         self.assertEqual(missing, {"2020"}, result)
 
+    def test_citations_verify_per_id_and_generate_human_trace(self) -> None:
+        article = ("YFD71F covers DN50 to DN300 and API 609. Wrong rating PN40 here. "
+                   "Our company PTFE seats resist acids up to 180 °C. Founded in 2009.")
+        fact_index = {
+            "K1": {"id": "K1", "text": "YFD71F size DN50-DN300, design API 609", "layer": "客户知识",
+                   "page": "产品系列-YFD71F", "section": "参数 > 基本技术数据",
+                   "sources": ["产品画册-YFD71F#第 1 页"], "risky": False},
+            "K2": {"id": "K2", "text": "PTFE seats resist most acids up to 180 °C", "layer": "外部公共知识",
+                   "page": "外部-阀座材料耐化学性", "section": "技术知识",
+                   "sources": ["s1.example.org"], "risky": False},
+        }
+        citations_md = (
+            "| 文章原文 | 引用 |\n| --- | --- |\n"
+            "| YFD71F covers DN50 to DN300 and API 609 | K1 |\n"
+            "| Wrong rating PN40 here | K1 |\n"
+            "| Our company PTFE seats resist acids up to 180 °C | K2 |\n"
+            "| Not in the article | K99 |\n"
+        )
+        res = check_article.check_citations(article, check_article.parse_citations(citations_md),
+                                            fact_index, ["YFD"], ["YIFA"])
+        self.assertEqual(res["failed_rows"], 2)
+        self.assertEqual(res["warning_rows"], 1)
+        self.assertTrue(res["rows"][0]["ok"])
+        self.assertIn("PN40", " ".join(res["rows"][1]["issues"]))
+        self.assertTrue(res["rows"][2]["warnings"])
+        self.assertIn("文章里找不到这段原话", " ".join(res["rows"][3]["issues"]))
+        self.assertIn("K99", " ".join(res["rows"][3]["issues"]))
+        self.assertEqual([u["text"] for u in res["uncovered"]], ["2009"])
+        trace = check_article.trace_report(res, "PTFE Valve Guide")
+        self.assertIn("产品系列-YFD71F#参数 > 基本技术数据（客户知识）", trace)
+        self.assertIn("产品画册-YFD71F#第 1 页", trace)
+        self.assertIn("硬事实共", trace)
+
 
 if __name__ == "__main__":
     unittest.main()
