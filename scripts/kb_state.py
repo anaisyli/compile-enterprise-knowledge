@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from kb_common import BUILD_DIRECTORY, load_json, write_text
+from kb_common import BUILD_DIRECTORY, load_json, write_json, write_text
 from legacy_migrations import move_legacy_vault_dirs
 
 
@@ -332,6 +332,38 @@ def merge_extract_status(source: Path, target: Path) -> bool:
     return True
 
 
+def freeze_recovered_page_images(build: Path, target: Path) -> int:
+    """Carry validated overlay page images into the durable native extraction cache.
+
+    Keep the run's raw extraction status untouched. Only fill missing image metadata
+    for identical source bytes, and only when every referenced image exists locally.
+    """
+    merged_path = build / "extract-status.json"
+    if not merged_path.is_file() or not target.is_file():
+        return 0
+    merged = load_json(merged_path).get("items", {})
+    frozen = load_json(target)
+    changed = False
+    for item_id, record in frozen.get("items", {}).items():
+        supplement = merged.get(item_id, {})
+        images = supplement.get("page_images")
+        if (record.get("page_images") or not images or not isinstance(images, dict)
+                or not record.get("source_hash") or record["source_hash"] != supplement.get("source_hash")):
+            continue
+        if not all(isinstance(name, str) and Path(name).name == name
+                   and (build / "assets" / name).is_file() for name in images.values()):
+            continue
+        record["page_images"] = images
+        for key in ("page_unit", "page_images_recovered_from"):
+            if supplement.get(key):
+                record[key] = supplement[key]
+        record.pop("page_images_skipped", None)
+        changed = True
+    if changed:
+        write_json(target, frozen)
+    return int(changed)
+
+
 def save(run: Path, vault: Path) -> dict[str, Any]:
     """Copy build state into the vault at publish.
 
@@ -343,9 +375,13 @@ def save(run: Path, vault: Path) -> dict[str, Any]:
     build = run / BUILD_DIRECTORY
     kept: list[str] = []
     removed: list[str] = []
-    copied = sum(copy_newer(b, v, kept, removed, run_is_source=True) for b, v in pairs(build, vault))
+    frozen_status = vault / STATE / "package-text" / "extract-status.json"
+    copied = merge_extract_status(build / "package-text" / "extract-status.json", frozen_status)
+    copied += freeze_recovered_page_images(build, frozen_status)
+    # pairs() now sees recovered screenshots in the frozen status and saves their
+    # exact assets too, so a fresh default rebuild needs no extra overlay argument.
+    copied += sum(copy_newer(b, v, kept, removed, run_is_source=True) for b, v in pairs(build, vault))
     copied += merge_pages(build / "website" / "pages.json", vault / WEBSITE / "pages.json")
-    copied += merge_extract_status(build / "package-text" / "extract-status.json", vault / STATE / "package-text" / "extract-status.json")
     base = config_base(build)
     run_config = json_object(build / "kb-config.json")
     if run_config is not None:

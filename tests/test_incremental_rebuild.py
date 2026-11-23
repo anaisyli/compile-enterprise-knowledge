@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import kb_state  # noqa: E402
-from kb_common import BUILD_DIRECTORY  # noqa: E402
+from kb_common import BUILD_DIRECTORY, write_json  # noqa: E402
 from test_package_only import PackageOnlyTests  # noqa: E402
 
 
@@ -23,6 +24,45 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, str(ROOT / "scripts" / name), *args],
         capture_output=True, text=True, encoding="utf-8",
     )
+
+
+class RecoveredPageCacheTests(unittest.TestCase):
+    def test_recovered_overlay_survives_save_restore_without_mutating_native_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run, vault = root / 'run', root / 'vault'
+            build = run / BUILD_DIRECTORY
+            raw = {'items': {'ppt': {'source_hash': 'same', 'status': 'read_ok',
+                                    'page_images_skipped': 'old timeout'}}}
+            write_json(build / 'package-text/extract-status.json', raw)
+            write_json(build / 'package-text/ppt.json', {'units': [{'locator': 'slide 1', 'text': 'Old reviewed words'}]})
+            write_json(build / 'extract-status.json', {'items': {'ppt': {'source_hash': 'same',
+                'page_images': {'1': 'img-recovered.png'}, 'page_unit': 'slide'}}})
+            image = build / 'assets/img-recovered.png'
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b'exact old screenshot')
+            kb_state.save(run, vault)
+            self.assertEqual(json.loads((build / 'package-text/extract-status.json').read_text(encoding='utf-8')), raw)
+            frozen = json.loads((vault / kb_state.STATE / 'package-text/extract-status.json').read_text(encoding='utf-8'))
+            self.assertEqual(frozen['items']['ppt']['page_images'], {'1': image.name})
+            self.assertNotIn('page_images_skipped', frozen['items']['ppt'])
+            fresh = root / 'fresh-run'
+            kb_state.restore(fresh, vault)
+            self.assertEqual((fresh / BUILD_DIRECTORY / 'assets' / image.name).read_bytes(), image.read_bytes())
+            self.assertEqual(json.loads((fresh / BUILD_DIRECTORY / 'package-text/ppt.json').read_text(encoding='utf-8')),
+                             {'units': [{'locator': 'slide 1', 'text': 'Old reviewed words'}]})
+
+    def test_recovered_images_require_matching_source_and_present_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'frozen.json'
+            original = {'items': {'ppt': {'source_hash': 'same', 'status': 'read_ok'}}}
+            for source_hash, image_name in [('other', 'img.png'), ('same', 'missing.png'), ('same', '../outside.png')]:
+                write_json(target, original)
+                write_json(root / 'extract-status.json', {'items': {'ppt': {'source_hash': source_hash,
+                    'page_images': {'1': image_name}}}})
+                self.assertEqual(kb_state.freeze_recovered_page_images(root, target), 0)
+                self.assertEqual(json.loads(target.read_text(encoding='utf-8')), original)
 
 
 class IncrementalRebuildTests(PackageOnlyTests):
