@@ -44,6 +44,7 @@ from kb_common import (
     remaining_ocr_pages,
     run_lock,
     safe_name,
+    sha256_file,
     write_json,
     write_jsonl,
     write_text,
@@ -730,7 +731,8 @@ def write_plan_page(build: Path, routes: dict[str, Any], docs: dict[str, dict[st
     return render_plan_page(build, routes, docs, published, statuses, originals, config, status_info, reason_label)
 
 
-def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False) -> dict[str, str]:
+def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False,
+                 alias_roots: list[str] | tuple[str, ...] = ()) -> dict[str, str]:
     """doc_id -> link that opens the original file, under a name without the customer in it.
 
     Each original gets a second name in the package, 审计记录/按知识库名字/<knowledge-base name>,
@@ -741,13 +743,14 @@ def make_aliases(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order:
     links: dict[str, str] = {}
     for doc_id in order:
         doc = docs[doc_id]
-        link = alias_link(routes.get(doc["item_id"], {}), Path(doc["file_name"]).stem, read_only)
+        link = alias_link(routes.get(doc["item_id"], {}), Path(doc["file_name"]).stem, read_only, alias_roots)
         if link:
             links[doc_id] = link
     return links
 
 
-def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str:
+def alias_link(route: dict[str, Any], stem: str, read_only: bool = False,
+               alias_roots: list[str] | tuple[str, ...] = ()) -> str:
     """The original's second name, <stem><its suffix>, in the package's alias folder; "" when none can be made."""
     if not route.get("package") or not route.get("path"):
         return ""
@@ -756,7 +759,14 @@ def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str
     is_legacy = source.suffix.casefold() in {".xls", ".doc", ".ppt"}
     try:
         if read_only:
-            return path_uri(alias) if alias.exists() and (is_legacy or alias.samefile(source)) else ""
+            # A copied read-only package may have no aliases of its own. Explicit
+            # old alias folders can supply the same sanitized name, but only when
+            # its bytes match this route's source hash, including legacy formats.
+            expected = route.get("source_hash") or sha256_file(source)
+            for candidate in [alias, *(Path(root) / alias.name for root in alias_roots)]:
+                if candidate.is_file() and sha256_file(candidate) == expected:
+                    return path_uri(candidate)
+            return ""
         if alias.exists() and not is_legacy and not alias.samefile(source):
             alias.unlink()  # The name now belongs to another file, or the original was replaced.
         if not alias.exists():
@@ -771,7 +781,8 @@ def alias_link(route: dict[str, Any], stem: str, read_only: bool = False) -> str
         return ""
 
 
-def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False) -> dict[str, str]:
+def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: list[str], read_only: bool = False,
+               alias_roots: list[str] | tuple[str, ...] = ()) -> dict[str, str]:
     """doc_id -> link to the PDF of the same document ("" when the PDF has no alias), for pages kept from Word or PowerPoint."""
     page_of = {docs[d]["item_id"]: d for d in order}
     twins: dict[str, str] = {}
@@ -779,7 +790,7 @@ def twin_links(routes: dict[str, Any], docs: dict[str, dict[str, Any]], order: l
         doc_id = page_of.get(route.get("same_as") or "")
         if route.get("reason") == "other_format" and doc_id:
             # The PDF's alias takes the page's name, so the two originals sort side by side.
-            twins[doc_id] = alias_link(route, Path(docs[doc_id]["file_name"]).stem, read_only)
+            twins[doc_id] = alias_link(route, Path(docs[doc_id]["file_name"]).stem, read_only, alias_roots)
     return twins
 
 
@@ -977,8 +988,9 @@ def main() -> int:
     # A page picture shows the whole page, so pages where sensitive content was removed do not get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if is_sensitive_removal(b)}
     package_read_only = bool(config.get("package_read_only"))
-    originals = make_aliases(routes, docs, order, package_read_only)
-    twins = twin_links(routes, docs, order, package_read_only)
+    alias_roots = config.get("original_alias_roots", [])
+    originals = make_aliases(routes, docs, order, package_read_only, alias_roots)
+    twins = twin_links(routes, docs, order, package_read_only, alias_roots)
     # Pictures are named before pages are written, so every page links the same name.
     terms = load_json(build / "guard-terms.json") if (build / "guard-terms.json").is_file() else {}
     forbidden = compile_terms(terms.get("hard", []) + terms.get("soft", []))

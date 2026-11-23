@@ -125,6 +125,7 @@
 - `route_overrides`：`{"<item_id>": {"route": "kb|media|skip|hold", "reason": "…", "tier": "T2"}}`，单份资料的去向直接指定，优先于客户回答和 `d_keep` / `d_drop`（只排在 `excluded_items`、`ask_client` 之后）。只用于上面这些都表达不了的例外；常见情况用 `d_keep`、`d_drop`、`ask_client`，不然客户的回答会被它挡住。reason 用 `media_kept` 才会把图片复制进 90_素材。历史项目用待客户确认路由登记过的，本次客户明确回复后可用 `apply_answers.py --release-awaiting-overrides --answers <本次建库回复.csv>`，只解除该表实际回答条目的 awaiting_client / media_awaiting_client 覆盖，再写客户回答；不用于旧初筛 XLSX，不解除其他路由决定。
 - `build_stage`：`"sources_only"` 时只建来源层，不准备、不生成整理页（`curate.py` 两步都跳过）；要写整理页时改成 `"full"` 或删掉这一项。`stage_authorization` 记下是谁、什么时候、批准到哪一步：`{"approved_at": "…", "evidence": "用户原话", "scope": "…"}`，只做记录，不影响构建。
 - `package_read_only: true`：不向初筛包写入对照表，不新建或替换原件别名；仅复用已经存在且与原件对应的别名链接。用户要求初筛包也保持只读时使用。
+- `original_alias_roots`：只读初筛包缺少别名时，可指定已有的脱敏原件别名文件夹列表。按本页脱敏名称和原件扩展名查找，逐份校验 SHA256 与当前资料的 `source_hash` 完全一致后才恢复“打开原件”；不写入这些文件夹，也不链接已变化的旧副本。别名文件夹须与初筛包一起长期保留、移交；移动后更新配置并重新渲染。
 - `client_answers` 和 `client_answers_units` 一般由 `apply_answers.py` 写。它读建库的 `客户确认表.csv`，也读初筛包的 `客户确认表.xlsx`（`--answers` 给 .xlsx 路径，按表头找列，Excel 或 WPS 存过的都能读）。初筛表的编号这样对应：
   - `<item_id>#<n>`：位置是整份文件，或不在该文件的 `pending_units` 里，写 `client_answers[item_id]`；否则写 `client_answers_units[item_id][位置]`。
   - `folder:<文件夹>`：写给 manifest 里 `review_group` 是这个文件夹的每个文件。

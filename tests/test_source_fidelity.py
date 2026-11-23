@@ -17,6 +17,37 @@ from extract_blocks import configured_route  # noqa: E402
 
 
 class SourceFidelityTests(unittest.TestCase):
+    def test_markdown_short_labels_do_not_become_garbled(self):
+        from guard_blocks import garbled
+        for text in ('TIP:', '### TIP:', '（图一） （图二）', '- （图一） （图二）',
+                     '| A | B |\n| --- | --- |\n| 1 | 2 |'):
+            with self.subTest(text=text):
+                self.assertFalse(garbled(text))
+        for text in ('### @@@�@@', '- @@�@@', '### ', '| --- | --- |'):
+            with self.subTest(text=text):
+                self.assertTrue(garbled(text))
+
+    def test_read_only_aliases_use_only_hash_matched_sanitized_copies(self):
+        from render_kb import ALIAS_FOLDER, alias_link
+        from kb_common import path_uri
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, old = root / 'package', root / 'old-aliases'
+            package.mkdir()
+            old.mkdir()
+            for suffix in ('.pdf', '.docx', '.xls'):
+                source = package / ('sensitive-original' + suffix)
+                source.write_bytes(b'approved original bytes')
+                alias = old / ('clean' + suffix)
+                alias.write_bytes(source.read_bytes())
+                route = {'package': str(package), 'path': source.name, 'source_hash': sha256_file(source)}
+                self.assertEqual(alias_link(route, 'clean', True, [str(old)]), path_uri(alias))
+                alias.write_bytes(b'changed old copy')
+                self.assertEqual(alias_link(route, 'clean', True, [str(old)]), '')
+                self.assertEqual(alias.read_bytes(), b'changed old copy')
+                self.assertEqual(source.read_bytes(), b'approved original bytes')
+            self.assertFalse((package / ALIAS_FOLDER).exists())
+
     def test_read_only_package_never_creates_or_replaces_original_aliases(self):
         from render_kb import ALIAS_FOLDER, alias_link
         with tempfile.TemporaryDirectory() as tmp:

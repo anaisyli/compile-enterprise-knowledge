@@ -473,6 +473,9 @@ def strip_site_furniture(blocks: list[dict[str, Any]]) -> int:
 
 
 def garbled(text: str) -> bool:
+    # Generated Markdown is presentation, not evidence that short source labels
+    # ("TIP:" or "（图一）（图二）") contain unreadable characters.
+    text = re.sub(r"(?m)^\s*(?:#{1,6}\s+|[-*+]\s+)", "", text)
     # A Markdown table's bars and rules are layout, not unreadable characters.
     text = "\n".join(re.sub(r"[|:\-]", "", line) if line.lstrip().startswith("|") else line for line in text.splitlines())
     compact = re.sub(r"\s", "", text)
