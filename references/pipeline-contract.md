@@ -401,6 +401,14 @@
   - 瘦身：去掉图片嵌入、页首说明、“来源”“另见”，链接只留文字，〔n〕去掉（`--with-sources` 时保留，并在末尾列出处），指针写成“（见原文：文档#位置）”，链接去掉后空了的“出处”列删掉，超过 25 行的表只留表头和“完整表见：页名#小板块”（`--full-tables` 不折叠）。超过 1.5 万字时开头提示各页字数，内容不截断。
   - 缺口：每个大纲节按 `assets/research-rules.json` 的 `client_terms` 分“客户专属”（不外部调研，中性表述或不写，需要时登记 CUS）或“公共知识”（可以外部调研，给出 `research.py plan --from-outline` 命令）。`20_外部公共知识` 里已有相关小节的直接放进第二部分；没有的到索引的原文层搜 3 条，跳过待客户确认的资料，标“还没整理进知识页，用前核对”，待审资料另外注明。
   - `--output` 写文件并只打印字数、缺口；`--json` 打印结构化结果。
+- `pack --budget <字数>`：超过时先把超过 10 行的表也折叠，仍超过再去掉“原文里搜到的”线索；不删任何小板块、口径避坑或缺口判断，仍超过就照常提示。折叠的表都附一条只补读这张表的命令（`--sections "页名#小板块 > 子节" --full-tables --no-brief`）。
+- `check_article.py --article <.md/.txt/.docx> --pack <资料包> [--pack <补读包> …] [--vault <知识库>] [--output 文件] [--json] [--strict]`：写完后的硬事实核对，不用 AI。
+  - 认哪些写法由 `assets/check-rules.json` 决定：`common` 每个项目都用；`industries`（industrial、apparel、display）按 kb-config 的 `vocabularies` 或 `check.industries` 选，一个都没选中时全部使用；kb-config 的 `check`（`units`、`standards`、`certificates`、`ratings`、`patterns`、`codes`）追加；有 `--vault` 时再从 `10_客户知识`、`20_外部公共知识` 自动收集出现 3 次以上的单位（数字后面、不在已知单位里、不是全大写的词）和编号前缀（大写字母加数字，不是已知标准、规格或客户自有词，如 SS304 的 SS），后者显示为“编号”。
+  - 抽取：型号（`style_prefixes`）、标准号、认证名、规格、编号、带单位的数字、年份；同一处只算一次。几个资料包各自分区后合并。
+  - 查找时忽略空格和大小写，℃ 当 °C，“24-month”当“24 month”；DN/PN 落在资料包写的范围里（DN100 在 DN50-DN300 里）也算有。
+  - 分四类报告：资料包里没有（有 `--vault` 时再到索引里找，找到的注明“知识库别处出现过”，提醒先确认是不是同一产品）；只出现在“口径避坑”；只出现在“原文里搜到的”；`deny_terms` 里的名称。
+  - 退出码 0；`--strict` 时有“没有 / 口径避坑 / 竞品”就是 1。
+- 写作方的完整规则在 `references/writer-guide.md`，写作目录页开头也写了要点。各写作 Skill 只加一小段指向 writer-guide 的接入说明（README“写作 Skill 怎么接入”），每次写文章现读。
 - `kb_index.py`：索引客户知识、外部公共知识、净化原文、外部证据四层，按 `###` 切块（块名“小板块 > 子节”），标题和别名一起参与检索；查询按命中多少排序（BM25），不要求每个词都命中；可以用 `--layer` 只查某几层。索引先写到临时文件再替换（被占用时重试），查询时先复制到本机临时目录，读者不会占住共享盘上的文件。
 
 ## 外部调研
@@ -417,7 +425,7 @@
 - `plan --from-gaps`：读覆盖与缺口页里“缺”“薄弱”的行（只读 `| 小板块 |` 开头的表），属于 `public_sections` 且不是客户专属的进《建议外部调研清单》（`plan.md`、`plan.json`），其余列在“客户自己的事”。已经调研过或在待办里的不再列。重跑保留人写的“要调研”和改过的“调研问题”。
 - `approve [--gaps 编号,…] [--all]`：不带参数时读 `plan.md` 里“要调研”写了“是”的行，写进 `todo.jsonl`，同时写 `README.md`（调研规则和回答格式）。
 - `plan --from-outline "节;…" [--article 标题]`：客户专属的返回 `client_only`；`20_外部公共知识` 里已有相关小节的返回 `reused`；已在待办或已调研的返回 `already`；其余直接进待办（编号 `OL-<哈希>`），超过每篇上限的返回 `over_budget`。
-- **回答**（`answer-*.jsonl`，一行一个缺口）：`gap_key`、`status`（done / not_found）、`searches`、`sources`（`id`、`url`、`title`、`publisher`、`publisher_type`、`fetched_at`、`excerpts` 逐字摘录，每段不超过 1500 字）、`page`（`title`、`module`、`aliases`、`markdown`）。页面每条要点、表格行标 `{{ext:来源编号-摘录序号}}`。
+- **回答**（`answer-*.jsonl`，一行一个缺口）：`gap_key`、`status`（done / not_found）、`searches`、`sources`（`id`、`url`、`title`、`publisher`、`publisher_type`、`fetched_at`、`excerpts` 逐字摘录，每段不超过 1500 字）、`page`（`title`、`module`、`aliases`（必须同时有中文和英文叫法）、`markdown`）。页面每条要点、表格行标 `{{ext:来源编号-摘录序号}}`。
 - `collect` 逐条核对，过不了的列原因并留在 answer 文件里：搜索次数、网页数超上限；来源类型不在允许范围或属于排除类；出现竞品名或客户自己的网站；没有摘录或日期格式错；页面没有“## 一句话说明”；行没有出处或引用的摘录不存在；数字、标准号不在引用的摘录里；有数字的行没有至少 2 个非百科来源同时支撑、又没写“需核实”；写到客户（`own_terms`、“我们”“本公司”）。
 - 通过的：
   - 每个来源一份证据 `02_源资料/50_外部调研证据/<缺口编号>/证据-<发布方>-<网址哈希>.md`：来源卡片（网址、发布方、类型、抓取日期、调研问题）和“## 摘录 n”。

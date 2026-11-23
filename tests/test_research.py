@@ -55,7 +55,7 @@ def answer(**page) -> dict:
                 "- PTFE 阀座的工作温度可到 180 °C。{{ext:S1-2}}{{ext:S2-2}}\n")
     return {"gap_key": "GAP-industry-技术知识", "status": "done", "searches": ["ptfe seat chemical resistance"],
             "sources": [source("S1"), source("S2", "association")],
-            "page": {"title": "阀座材料的耐化学性", "module": "industry", "aliases": ["seat material chemical resistance"],
+            "page": {"title": "阀座材料的耐化学性", "module": "industry", "aliases": ["阀座材料耐化学性", "seat material chemical resistance"],
                      "markdown": markdown, **page}}
 
 
@@ -159,13 +159,13 @@ class ResearchTests(unittest.TestCase):
         errors = " ".join(research.collect(self.vault, self.rules)["failed"]["GAP-industry-技术知识"])
         self.assertIn("数字只有 1 个来源支撑", errors)
         self.assertTrue((self.vault / research.STATE / "answer-1.jsonl").is_file())
-        bad = answer(markdown="## 一句话说明\n\n- YIFA 的阀座耐酸碱。{{ext:S1-1}}\n- 没有出处的一句。\n")
+        bad = answer(markdown="## 一句话说明\n\n- YIFA 的阀座耐酸碱。{{ext:S1-1}}\n- 没有出处的一句。\n", aliases=["seat chemistry"])
         bad["sources"] = [source("S1", "manufacturer"), source("S2", excerpts=["RivalCo seats are best."]),
                           source("S3", url="https://www.yifavalve.com/x")]
         bad["searches"] = ["a", "b", "c", "d"]
         self.answer_file(bad)
         errors = " ".join(research.collect(self.vault, self.rules)["failed"]["GAP-industry-技术知识"])
-        for reason in ("超过上限 3 次", "manufacturer 类来源不能用", "竞品或第三方名称 rivalco", "客户自己的网站", "写到了客户自己", "没有标出处"):
+        for reason in ("aliases 要同时有中文和英文", "超过上限 3 次", "manufacturer 类来源不能用", "竞品或第三方名称 rivalco", "客户自己的网站", "写到了客户自己", "没有标出处"):
             self.assertIn(reason, errors)
         self.assertFalse((self.vault / research.PAGES).exists())
 

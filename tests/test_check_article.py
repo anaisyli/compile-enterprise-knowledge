@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""After writing, the article's hard facts are looked up in its material pack."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import check_article  # noqa: E402
+
+PACK = """# 写作资料包
+
+## 一、客户专属事实（可以代表公司写）
+
+### 产品系列-YFD71F · 参数 > 基本技术数据
+
+| Size range | DN50-DN300 |
+| Pressure range | PN 10-16/Class 150/JIS10K |
+| Temperature | PTFE :-10°C to + 180°C |
+| Design | API609 |
+| Certificates | ISO 9001, CE, WRAS |
+
+## 三、口径避坑（下面的说法有冲突或待核实）
+
+- 保修期：官网 FAQ 写 12 months，Company Profile 写 24 months。
+
+## 四、缺口
+
+### 原文里搜到的（还没整理进知识页，用前核对）
+
+- EPDM -20°C ~ 120°C
+"""
+
+
+class CheckTests(unittest.TestCase):
+    def run_check(self, article: str, deny: list[str] | None = None) -> dict:
+        return check_article.check(article, PACK, ["YFD"], deny or [], None)
+
+    def test_facts_in_the_pack_pass_even_inside_ranges(self) -> None:
+        result = self.run_check("YFD71F covers DN 100 to DN300, PN16 and Class 150, API 609. It runs from -10 ℃ to 180 °C. "
+                                "Certified ISO 9001, CE and WRAS; flanges to JIS 10K.")
+        self.assertEqual(result["missing"], [], result)
+        self.assertGreaterEqual(result["in_pack"], 9)
+
+    def test_invented_risky_and_uncurated_facts_are_named(self) -> None:
+        result = self.run_check("YFD71XH is certified to API 607 and ATEX, founded in 2009. A 24-month warranty applies. "
+                                "EPDM seats work up to 120 °C. Unlike Keystone valves.", deny=["Keystone"])
+        missing = {i["text"] for i in result["missing"]}
+        self.assertEqual(missing, {"YFD71XH", "API 607", "ATEX", "2009"})
+        self.assertEqual([i["text"] for i in result["risky"]], ["24-month"])
+        self.assertEqual([i["text"] for i in result["uncurated"]], ["120 °C"])
+        self.assertEqual(result["competitors"], ["Keystone"])
+        text = check_article.report(result)
+        self.assertIn("## 资料包里没有", text)
+        self.assertIn("口径避坑", text)
+        self.assertIn("不挡交付", text)
+
+    def test_a_clean_article_says_so(self) -> None:
+        self.assertIn("没有发现问题", check_article.report(self.run_check("YFD71F, DN50, API609.")))
+
+    def test_industry_rules_follow_the_vocabulary(self) -> None:
+        apparel = check_article.load_rules({"vocabularies": ["apparel"]})
+        display = check_article.load_rules({"vocabularies": ["display"]})
+        text = "Made of 280 GSM fleece, 95% cotton, OEKO-TEX certified. A 55 inch 3840×2160 panel at 700 nits, IP65."
+        found_apparel = {t for _, t in check_article.facts(text, [], apparel)}
+        found_display = {t for _, t in check_article.facts(text, [], display)}
+        self.assertTrue({"280 GSM", "OEKO-TEX", "95% cotton"} <= found_apparel, found_apparel)
+        self.assertNotIn("700 nits", found_apparel)
+        self.assertTrue({"3840×2160", "700 nits", "IP65", "55 inch"} <= found_display, found_display)
+        # No industry named: every group is used.
+        everything = {t for _, t in check_article.facts(text, [], check_article.load_rules({}))}
+        self.assertTrue({"280 GSM", "700 nits"} <= everything)
+        own = check_article.load_rules({"check": {"units": ["dtex"], "certificates": ["Woolmark"]}})
+        self.assertEqual({t for _, t in check_article.facts("150 dtex yarn, Woolmark", [], own)}, {"150 dtex", "Woolmark"})
+
+    def test_the_project_pages_teach_their_own_units_and_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            page = vault / "03_正式知识/10_客户知识/20_产品介绍/产品系列-X.md"
+            page.parent.mkdir(parents=True)
+            page.write_text("Body SS304, disc SS316, stem SS420. Yarn 30 tex, 40 tex, 50 tex. Since 2009 YIFA, 2010 YIFA, 2011 YIFA.",
+                            encoding="utf-8")
+            units, codes = check_article.harvest(vault, check_article.load_rules({}), {"own_terms": ["YIFA"]})
+            self.assertEqual((units, codes), (["tex"], ["SS"]))
+            rules = check_article.load_rules({"own_terms": ["YIFA"]}, vault)
+            self.assertIn(("编号", "SS410"), check_article.facts("stem SS410", [], rules))
+
+    def test_refetched_tables_count_as_part_of_the_pack(self) -> None:
+        extra = "# 写作资料包\n\n## 一、客户专属事实（可以代表公司写）\n\n| DN80 | 45 Nm |\n"
+        result = check_article.check("Torque at DN80 is 45 Nm.", [PACK, extra], ["YFD"], [], None)
+        self.assertEqual(result["missing"], [])
+
+    def test_a_docx_is_read_with_its_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "a.docx"
+            xml = ('<w:document><w:body><w:p><w:r><w:t>Size DN300</w:t></w:r></w:p>'
+                   '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>API 607</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>')
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", xml)
+            text = check_article.read_article(path)
+        self.assertIn("API 607", text)
+        self.assertEqual([i["text"] for i in self.run_check(text)["missing"]], ["API 607"])
+
+    def test_industry_is_auto_detected_from_vault_without_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            page = vault / "03_正式知识/10_客户知识/20_产品介绍/产品系列-YFD.md"
+            page.parent.mkdir(parents=True)
+            page.write_text("DN50-DN300, PN16, API 609, WRAS certified.", encoding="utf-8")
+            rules = check_article.load_rules({}, vault)
+            found = {t for _, t in check_article.facts("DN100, 280 GSM, 700 nits, P2.", [], rules)}
+            self.assertIn("DN100", found)
+            self.assertNotIn("280 GSM", found)
+            self.assertNotIn("700 nits", found)
+            self.assertNotIn("P2", found)
+
+    def test_chinese_pack_units_match_english_article_and_prose_is_not_flagged(self) -> None:
+        cn_pack = ("# 写作资料包\n\n## 一、客户专属事实\n\n"
+                   "- 口径 DN50 to DN300，最大起重 10 吨，阀体长度 2000 毫米，质保 12 个月，电流 10 A，公称 4\"。\n")
+        article = ('Covers DN150 with 10 tons crane capacity, 2000 mm length, 12 months warranty, 10 A motor and 4" port. '
+                   'Since the 2020s, 3 in 10 buyers check 5 a day for "150" rated parts.')
+        result = check_article.check(article, cn_pack, [], [], None)
+        missing = {i["text"] for i in result["missing"]}
+        # 2020 is the year extracted from "2020s" (not "2020s" as seconds); "3 in", "5 a", '150"' are not flagged.
+        self.assertEqual(missing, {"2020"}, result)
+
+
+if __name__ == "__main__":
+    unittest.main()

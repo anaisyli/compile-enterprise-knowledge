@@ -110,13 +110,37 @@ class LookupTests(unittest.TestCase):
         self.assertNotIn("整理页：", text)
         self.assertIn("| Size range | DN50-DN300 |", text)  # The emptied 出处 column is gone.
         self.assertNotIn("| 出处 |", text)
-        self.assertIn("（表格共 30 行，这里只列表头；完整表见：产品系列-YFD71F#参数）", text)
+        self.assertIn("（表格共 30 行，已折叠，这里只列表头。要写表里的具体数值时，先补读整张表：", text)
+        self.assertIn('--sections "产品系列-YFD71F#参数 > 扭矩" --full-tables --no-brief', text)
         self.assertIn("（见原文：产品画册-YFD71F#第 9 页）", text)
         self.assertIn("## 三、口径避坑", text)
         self.assertIn("温度上限有两种说法", text)
         full = kb_lookup.pack(self.vault, ["产品系列-YFD71F#参数 > 扭矩"], [], None, True, True)["text"]
         self.assertIn("| DN79 | 39 |", full)
         self.assertNotIn("基本技术数据", full)
+
+    def test_a_budget_folds_and_drops_leads_but_never_facts(self) -> None:
+        source = self.vault / "02_源资料/10_净化原文/产品画册/产品画册-YFD71F.md"
+        source.parent.mkdir(parents=True)
+        source.write_text('---\ndoc_id: "DOC-1"\ntitle: "产品画册-YFD71F"\nstatus: "有效"\n---\n\n## 第 3 页\n\n' + "PTFE seat note. " * 80,
+                          encoding="utf-8")
+        kb_index.build(self.vault)
+        product = self.vault / "03_正式知识/10_客户知识/20_产品介绍/产品系列-YFD71F.md"
+        text = product.read_text(encoding="utf-8").replace("### 扭矩", "### 选型\n\n| DN | Nm |\n| --- | --- |\n"
+                                                             + "".join(f"| DN{i} | {i} |\n" for i in range(12)) + "\n### 扭矩")
+        product.write_text(text, encoding="utf-8")
+        spec = ["产品系列-YFD71F#参数", "产品系列-YFD71F#一句话说明"]
+        full = kb_lookup.pack(self.vault, spec, ["PTFE seat note"], None, False, False)
+        self.assertIn("| DN11 | 11 |", full["text"])
+        self.assertIn("原文里搜到的", full["text"])
+        tight = kb_lookup.pack(self.vault, spec, ["PTFE seat note"], None, False, False, budget=200)
+        self.assertNotIn("| DN11 | 11 |", tight["text"])
+        self.assertIn("（表格共 12 行，已折叠", tight["text"])
+        self.assertNotIn("PTFE seat note. PTFE", tight["text"])
+        self.assertIn("YFD71F 是 PTFE 衬里蝶阀。", tight["text"])
+        self.assertIn("温度上限有两种说法", tight["text"])
+        self.assertIn("一条没删", tight["text"])
+        self.assertIn("超过 200 字", tight["text"])  # Still over: said so, nothing cut.
 
     def test_sources_can_be_kept_on_request(self) -> None:
         text = kb_lookup.pack(self.vault, ["产品系列-YFD71F#一句话说明"], [], None, True, False)["text"]

@@ -37,6 +37,8 @@ CHECK_HEADING = "需核实"
 SKIP = {"来源", "另见"}
 TABLE_ROWS = 25
 WARN_CHARS = 15000
+# With --budget, tables longer than this fold too.
+BUDGET_ROWS = 10
 FALLBACK_HITS = 3
 MARKER = "<!-- compile-enterprise-knowledge -->"
 
@@ -122,7 +124,8 @@ def load_pages(vault: Path) -> list[Page]:
 LINK = re.compile(r"!?\[\[([^\]]+?)\]\]")
 
 
-def slim(text: str, with_sources: bool, full_tables: bool, where: str, notes: dict[str, str]) -> str:
+def slim(text: str, with_sources: bool, full_tables: bool, where: str, notes: dict[str, str],
+         rows: int = TABLE_ROWS) -> str:
     """The text a writer needs: no picture embeds, no link syntax, the notice line gone, long tables folded."""
     def link(match: re.Match[str]) -> str:
         if match.group(0).startswith("!"):
@@ -150,7 +153,7 @@ def slim(text: str, with_sources: bool, full_tables: bool, where: str, notes: di
         lines.append(LINK.sub(link, line).rstrip())
     out = drop_empty_columns("\n".join(lines))
     if not full_tables:
-        out = fold_tables(out, where)
+        out = fold_tables(out, where, rows)
     out = re.sub(r"表格出处：\s*$", "", out, flags=re.M)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
@@ -178,13 +181,19 @@ def drop_empty_columns(text: str) -> str:
     return "\n".join(out[:-1])
 
 
-def fold_tables(text: str, where: str) -> str:
+def refetch(where: str) -> str:
+    """The command that brings one folded table back whole, ready to copy."""
+    return (f"要写表里的具体数值时，先补读整张表：`kb_lookup.py pack --vault <知识库> --sections \"{where}\" --full-tables "
+            f"--no-brief --output <本篇工作目录>/资料包-补读.md`，只写表里有的数")
+
+
+def fold_tables(text: str, where: str, limit: int = TABLE_ROWS) -> str:
     def html(match: re.Match[str]) -> str:
         rows = re.findall(r"(?is)<tr\b.*?</tr>", match.group(0))
-        if len(rows) - 1 <= TABLE_ROWS:
+        if len(rows) - 1 <= limit:
             return match.group(0)
         head = [re.sub(r"(?s)<[^>]+>", "", c).strip() for c in re.findall(r"(?is)<t[hd]\b[^>]*>(.*?)</t[hd]>", rows[0])]
-        return f"（表格共 {len(rows) - 1} 行；列：{' / '.join(h for h in head if h)[:200]}；完整表见：{where}）"
+        return f"（表格共 {len(rows) - 1} 行，已折叠；列：{' / '.join(h for h in head if h)[:200]}。{refetch(where)}）"
 
     text = re.sub(r"(?is)<table\b.*?</table>", html, text)
     out, run = [], []
@@ -192,8 +201,8 @@ def fold_tables(text: str, where: str) -> str:
         if line.lstrip().startswith("|"):
             run.append(line)
             continue
-        if len(run) - 2 > TABLE_ROWS:
-            out.extend([run[0], run[1], f"（表格共 {len(run) - 2} 行，这里只列表头；完整表见：{where}）"])
+        if len(run) - 2 > limit:
+            out.extend([run[0], run[1], f"（表格共 {len(run) - 2} 行，已折叠，这里只列表头。{refetch(where)}）"])
         else:
             out.extend(run)
         run = []
@@ -204,9 +213,12 @@ def fold_tables(text: str, where: str) -> str:
 def catalog(vault: Path) -> str:
     pages = load_pages(vault)
     lines = ["# 写作目录", "", MARKER,
-             "> 用法：写文章前先看这一页，挑出要用的“页名#小板块”（或“页名#小板块 > 子节”），再运行",
-             "> `kb_lookup.py pack --vault <知识库> --sections \"页名#小板块;…\" --gaps \"知识库里没有的大纲节;…\"`。",
-             "> 客户知识可以代表公司写；外部公共知识只作背景和论据。括号里是大约字数。", ""]
+             "> **写作 Agent 先看这里**：完整规则在 compile-enterprise-knowledge 的 `references/writer-guide.md`，写之前读一遍。要点：",
+             "> 1. 大纲按读者需要先定好，再对着下面的目录挑要用的“页名#小板块”（或“页名#小板块 > 子节”），不要整页读、不要读 `02_源资料`。",
+             "> 2. 运行 `kb_lookup.py pack --vault <知识库> --sections \"页名#小板块;…\" --gaps \"目录里没有的大纲节;…\" --output <本篇工作目录>/资料包.md`。",
+             "> 3. 客户专属事实可以代表公司写；外部公共知识只作背景和论据；口径避坑里的说法不要写成确定的事实；资料包里没有的公司事实不要编。",
+             "> 4. 写完运行 `check_article.py --article <终稿> --pack <资料包> --vault <知识库>`，按提示改。",
+             "> 知识库只读：不要在这里新建或修改文件（外部调研用 `research.py`）。括号里是大约字数。", ""]
     sizes = {id(s): len(slim(s.text, False, False, "", {})) for p in pages for s in p.sections}
     for layer in ("客户知识", "外部公共知识"):
         mine = [p for p in pages if p.layer == layer]
@@ -287,7 +299,7 @@ def classify(gap: str, rules: dict[str, Any]) -> str:
 
 
 def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with_sources: bool, full_tables: bool,
-         brief: bool = True) -> dict[str, Any]:
+         brief: bool = True, budget: int | None = None) -> dict[str, Any]:
     pages = load_pages(vault)
     rules = load_rules(vault)
     chosen: list[Section] = []
@@ -317,77 +329,95 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
                     if h["status"] not in {"待客户确认", "已失效"}][:FALLBACK_HITS]
         gap_rows.append({"gap": gap, "kind": kind, "reused": [f"{s.page.stem}#{s.name}" for s in reuse], "source_hits": hits})
     used_pages = list(dict.fromkeys(s.page for s in chosen))
-    notes: dict[str, dict[str, str]] = {}
-    lines = []
     brief_page = next((p for p in pages if p.stem == BRIEF_STEM), None)
-    if brief and brief_page:
-        page_notes: dict[str, str] = {}
-        text = "\n\n".join(f"### {s.name}\n\n{slim(s.text, with_sources, full_tables, brief_page.stem, page_notes)}"
-                           for s in brief_page.sections if s.h2 != CHECK_HEADING)
-        lines.extend(["## 速查卡", "", text, ""])
-        if page_notes:
-            notes[brief_page.stem] = page_notes
 
-    def zone(title: str, layer: str) -> None:
-        mine = [s for s in chosen if s.page.layer == layer and s.page is not brief_page]
-        if not mine:
-            return
-        lines.extend([f"## {title}", ""])
-        for page in dict.fromkeys(s.page for s in mine):
-            meta = ""
-            if layer == "外部公共知识":
-                meta = f"（{page.fields.get('status', '待抽检')}；复查日期 {page.fields.get('review_due', '未写')}）"
-            page_notes = notes.setdefault(page.stem, {})
-            for section in [s for s in mine if s.page is page]:
-                where = f"{page.stem}#{section.h2}"
-                lines.extend([f"### {page.stem} · {section.name}{meta}", "", slim(section.text, with_sources, full_tables, where, page_notes), ""])
-            if not page_notes:
-                notes.pop(page.stem, None)
+    def render(rows: int, with_hits: bool) -> str:
+        notes: dict[str, dict[str, str]] = {}
+        lines = []
+        if brief and brief_page:
+            page_notes: dict[str, str] = {}
+            text = "\n\n".join(f"### {s.name}\n\n{slim(s.text, with_sources, full_tables, f'{brief_page.stem}#{s.name}', page_notes, rows)}"
+                               for s in brief_page.sections if s.h2 != CHECK_HEADING)
+            lines.extend(["## 速查卡", "", text, ""])
+            if page_notes:
+                notes[brief_page.stem] = page_notes
 
-    zone("一、客户专属事实（可以代表公司写）", "客户知识")
-    zone("二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", "外部公共知识")
-    checks = []
-    for page in [*([brief_page] if brief and brief_page else []), *used_pages]:
-        for section in page.sections:
-            if section.h2 == CHECK_HEADING and section.text:
-                body = slim(section.text, False, True, page.stem, {})
-                checks.extend(f"- 〔{page.stem}〕{line.lstrip('- ').strip()}" for line in body.splitlines() if line.strip())
-    if checks:
-        lines.extend(["## 三、口径避坑（下面的说法有冲突或待核实：不要写成确定的事实，不写具体数字）", "", *dict.fromkeys(checks), ""])
-    if gap_rows or problems:
-        lines.extend(["## 四、缺口", ""])
-        for problem in problems:
-            lines.append(f"- {problem}（看写作目录核对页名和小板块名）")
-        if gap_rows:
-            lines.extend(["| 大纲节 | 判断 | 怎么办 |", "| --- | --- | --- |"])
-            for row in gap_rows:
-                if row["reused"]:
-                    advice = "外部公共知识里已有，已放进第二部分：" + "、".join(row["reused"])
-                elif row["kind"] == "客户专属":
-                    advice = "客户专属，不外部调研：文章里中性表述或不写；需要时登记 CUS 问客户"
-                else:
-                    advice = f"可以外部调研：`research.py plan --vault <知识库> --from-outline \"{row['gap']}\"`"
-                lines.append(f"| {row['gap']} | {row['kind']} | {advice} |")
+        def zone(title: str, layer: str) -> None:
+            mine = [s for s in chosen if s.page.layer == layer and s.page is not brief_page]
+            if not mine:
+                return
+            lines.extend([f"## {title}", ""])
+            for page in dict.fromkeys(s.page for s in mine):
+                meta = ""
+                if layer == "外部公共知识":
+                    meta = f"（{page.fields.get('status', '待抽检')}；复查日期 {page.fields.get('review_due', '未写')}）"
+                page_notes = notes.setdefault(page.stem, {})
+                for section in [s for s in mine if s.page is page]:
+                    where = f"{page.stem}#{section.name}"
+                    lines.extend([f"### {page.stem} · {section.name}{meta}", "",
+                                  slim(section.text, with_sources, full_tables, where, page_notes, rows), ""])
+                if not page_notes:
+                    notes.pop(page.stem, None)
+
+        zone("一、客户专属事实（可以代表公司写）", "客户知识")
+        zone("二、行业公共知识（只作背景和论据，不能写成客户的能力、承诺或认证）", "外部公共知识")
+        checks = []
+        for page in [*([brief_page] if brief and brief_page else []), *used_pages]:
+            for section in page.sections:
+                if section.h2 == CHECK_HEADING and section.text:
+                    body = slim(section.text, False, True, page.stem, {})
+                    checks.extend(f"- 〔{page.stem}〕{line.lstrip('- ').strip()}" for line in body.splitlines() if line.strip())
+        if checks:
+            lines.extend(["## 三、口径避坑（下面的说法有冲突或待核实：不要写成确定的事实，不写具体数字）", "", *dict.fromkeys(checks), ""])
+        if gap_rows or problems:
+            lines.extend(["## 四、缺口", ""])
+            for problem in problems:
+                lines.append(f"- {problem}（看写作目录核对页名和小板块名）")
+            if gap_rows:
+                lines.extend(["| 大纲节 | 判断 | 怎么办 |", "| --- | --- | --- |"])
+                for row in gap_rows:
+                    if row["reused"]:
+                        advice = "外部公共知识里已有，已放进第二部分：" + "、".join(row["reused"])
+                    elif row["kind"] == "客户专属":
+                        advice = "客户专属，不外部调研：文章里中性表述或不写；需要时登记 CUS 问客户"
+                    else:
+                        advice = f"可以外部调研：`research.py plan --vault <知识库> --from-outline \"{row['gap']}\"`"
+                    lines.append(f"| {row['gap']} | {row['kind']} | {advice} |")
+                lines.append("")
+                hits = [(row["gap"], h) for row in gap_rows for h in row["source_hits"]] if with_hits else []
+                if hits:
+                    lines.extend(["### 原文里搜到的（还没整理进知识页，用前核对，客户专属内容不要据此写成承诺）", ""])
+                    for gap, hit in hits:
+                        text = slim(hit["text"], False, False, Path(hit["path"]).stem, {})[:600]
+                        pending = "（待审资料，还没人看过）" if hit["status"] == "待审" else ""
+                        lines.extend([f"- 〔{gap}〕{Path(hit['path']).stem}{pending} · {hit['section']}：{text}", ""])
+                elif not with_hits and any(row["source_hits"] for row in gap_rows):
+                    lines.extend(["（为了控制篇幅，原文里搜到的线索没有放进来；需要时去掉 --budget 再取一次。）", ""])
+        if with_sources and notes:
+            lines.extend(["## 出处", ""])
+            for stem, page_notes in notes.items():
+                lines.append(f"- {stem}：" + "；".join(f"〔{n}〕{s}" for n, s in sorted(page_notes.items(), key=lambda x: int(x[0]))))
             lines.append("")
-            hits = [(row["gap"], h) for row in gap_rows for h in row["source_hits"]]
-            if hits:
-                lines.extend(["### 原文里搜到的（还没整理进知识页，用前核对，客户专属内容不要据此写成承诺）", ""])
-                for gap, hit in hits:
-                    text = slim(hit["text"], False, False, Path(hit["path"]).stem, {})[:600]
-                    pending = "（待审资料，还没人看过）" if hit["status"] == "待审" else ""
-                    lines.extend([f"- 〔{gap}〕{Path(hit['path']).stem}{pending} · {hit['section']}：{text}", ""])
-    if with_sources and notes:
-        lines.extend(["## 出处", ""])
-        for stem, page_notes in notes.items():
-            lines.append(f"- {stem}：" + "；".join(f"〔{n}〕{s}" for n, s in sorted(page_notes.items(), key=lambda x: int(x[0]))))
-        lines.append("")
-    body = "\n".join(lines).strip() + "\n"
+        return "\n".join(lines).strip() + "\n"
+
+    # A budget only takes away what loses no fact: long tables fold sooner, uncurated leads drop.
+    steps = [(TABLE_ROWS, True)] + ([(BUDGET_ROWS, True), (BUDGET_ROWS, False)] if budget else [])
+    applied = []
+    for rows, with_hits in steps:
+        body = render(rows, with_hits)
+        if not budget or len(body) <= budget:
+            break
+        applied.append(rows)
+    limit = budget or WARN_CHARS
     head = ["# 写作资料包", "",
             "> 客户专属事实可以代表公司写；行业公共知识只作背景和论据，不能写成客户的能力、承诺或认证；"
             "口径避坑里的说法不要写成确定的事实。资料包里没有的公司事实不要编。"]
-    if len(body) > WARN_CHARS:
+    if budget and applied:
+        head.append(f"> 为了控制在 {budget} 字以内：超过 {BUDGET_ROWS} 行的表已折叠（附补读命令）"
+                    + ("，原文里搜到的线索已去掉" if len(applied) > 1 else "") + "。客户事实、外部知识和口径避坑一条没删。")
+    if len(body) > limit:
         sizes = "、".join(f"{p.stem} {sum(len(s.text) for s in chosen if s.page is p)}" for p in used_pages)
-        head.append(f"> ⚠ 资料包约 {len(body)} 字，超过 {WARN_CHARS} 字（各页约：{sizes}）。内容照常全给；需要时少挑几个小板块。")
+        head.append(f"> ⚠ 资料包约 {len(body)} 字，超过 {limit} 字（各页约：{sizes}）。内容照常全给；需要时少挑几个小板块。")
     return {"text": "\n".join(head) + "\n\n" + body, "sections": [f"{s.page.stem}#{s.name}" for s in chosen],
             "gaps": gap_rows, "problems": problems, "characters": len(body)}
 
@@ -410,6 +440,8 @@ def main() -> int:
     two.add_argument("--with-sources", action="store_true", help="Keep the 〔n〕 marks and list where each came from")
     two.add_argument("--full-tables", action="store_true", help="Do not fold tables longer than 25 rows")
     two.add_argument("--no-brief", action="store_true")
+    two.add_argument("--budget", type=int, help="Aim for this many characters: fold tables over 10 rows, then drop "
+                                                "uncurated source hits; never drop a fact")
     two.add_argument("--json", action="store_true")
     two.add_argument("--output", help="Write the pack to this file instead of printing it")
     args = parser.parse_args()
@@ -421,7 +453,7 @@ def main() -> int:
         print(text)
         return 0
     result = pack(vault, split_list(args.sections), split_list(args.gaps), args.query, args.with_sources, args.full_tables,
-                  brief=not args.no_brief)
+                  brief=not args.no_brief, budget=args.budget)
     if args.output:
         write_text(Path(args.output), result["text"])
     if args.json:

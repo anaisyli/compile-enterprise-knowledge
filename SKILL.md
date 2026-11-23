@@ -164,6 +164,9 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 2. `kb_lookup.py pack --vault <知识库> --sections "…;…" --gaps "目录里找不到的大纲节;…" [--output 资料包.md]`。资料包分：速查卡、客户专属事实（可以代表公司写）、行业公共知识（只作背景和论据）、口径避坑（相关页的“需核实”）、缺口（标客户专属或公共知识，并到原文里搜一遍）。
 3. 公共知识缺口要补时走上面的“按文章”外部调研，collect 后再 pack 一次。
 4. 长表默认折叠，要整张加 `--full-tables`；要〔n〕出处加 `--with-sources`。
+5. 写完运行 `check_article.py --article <终稿> --pack <资料包> --vault <知识库>`，按“资料包里没有 / 只出现在口径避坑 / 只出现在未整理原文 / 竞品名称”改，剩下的写进交付说明；只提醒，不挡交付。
+
+写作方的完整规则在 [references/writer-guide.md](references/writer-guide.md)：各写作 Skill 只加一小段指向它（接入 Prompt 在 README“写作 Skill 怎么接入”），每次写文章现读。改写作方规则时只改 writer-guide，不要求各写作 Skill 重改。
 
 ## 发布后的知识库
 

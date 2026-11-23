@@ -76,11 +76,12 @@ README = """# 外部调研：怎么做
   "searches": ["butterfly valve seat material chemical resistance", "..."],
   "sources": [{{"id": "S1", "url": "https://...", "title": "网页标题", "publisher": "发布方",
                "publisher_type": "standard", "fetched_at": "{today}", "excerpts": ["原文摘录 1", "原文摘录 2"]}}],
-  "page": {{"title": "阀座材料的耐化学性", "module": "industry", "aliases": ["seat material chemical resistance"],
+  "page": {{"title": "阀座材料的耐化学性", "module": "industry", "aliases": ["阀座材料耐化学性", "seat material chemical resistance"],
            "markdown": "## 一句话说明\\n\\n- …… {{{{ext:S1-1}}}}\\n\\n## 技术知识\\n\\n- …… {{{{ext:S1-2}}}}{{{{ext:S2-1}}}}\\n\\n## 需核实\\n\\n- ……"}}}}
 ```
 - `publisher_type`：{types}。
 - `module`：industry（行业知识，最常用）、product、solution、faq、other。
+- `aliases`：**中文和英文叫法都要有**（写作大纲多是英文、页面是中文，靠别名互相找到）；可以再加缩写和常见别称。
 - 页面每条要点、每个表格行结尾都标 `{{{{ext:来源编号-摘录序号}}}}`；数字、标准号必须原样出现在引用的摘录里。
 - 实在查不到可靠来源：写 `{{"gap_key": "…", "status": "not_found", "note": "查了什么、为什么不能用"}}`。
 """
@@ -298,6 +299,10 @@ def check_answer(answer: dict[str, Any], item: dict[str, Any], rules: dict[str, 
         errors.append(f"module 只能是 {'、'.join(MODULES)}")
     if "## 一句话说明" not in markdown:
         errors.append("页面要有 ## 一句话说明")
+    # Writers search in English and the pages are written in Chinese; the aliases bridge the two.
+    aliases = [str(a) for a in page.get("aliases") or []]
+    if not any(re.search(r"[一-鿿]", a) for a in aliases) or not any(re.search(r"[A-Za-z]", a) for a in aliases):
+        errors.append("aliases 要同时有中文和英文叫法（比如 “阀座材料耐化学性”“seat material chemical resistance”），写作时才能用两种语言找到这一页")
     excerpts = {(s.get("id"), str(i)): str(e) for s in sources for i, e in enumerate(s.get("excerpts") or [], start=1)}
     kinds = {s.get("id"): s.get("publisher_type") for s in sources}
     own = [t.casefold() for t in rules.get("_own", []) if len(t) >= 2]

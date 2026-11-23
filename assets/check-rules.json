@@ -1,0 +1,39 @@
+{
+  "_说明": "check_article.py 用来认出文章里“硬事实”的规则，分三层：common 每个项目都用；industries 按 kb-config.json 的 vocabularies（或 check.industries）选，一个都没选中时全部使用；项目自己的写在 kb-config.json 的 check（units、standards、certificates、ratings、patterns），另外每次核对时还会从本项目知识页里自动收集常用单位和标准前缀。规则只用来认出要核对的写法，多认一种只多一条提醒。units：数字后面的单位；standards：标准号前缀（后面跟编号）；certificates：认证名（整词、区分大小写）；ratings：规格前缀（后面跟数字，如 DN50）；patterns：其他整条正则；codes：带编号的型号系列、材料牌号等前缀（如 SS 对应 SS304），核对时显示为“编号”，大多从知识页自动收集。",
+  "common": {
+    "units": ["%", "°C", "°F", "℃", "℉", "mm", "cm", "m", "km", "kg", "g", "t", "MPa", "kPa", "Pa", "bar", "psi", "N", "kN", "N·m", "Nm",
+              "in", "inch", "inches", "\"", "ft", "V", "kV", "A", "mA", "W", "kW", "Hz", "kHz", "m³/h", "m3/h", "L/min", "L", "ml",
+              "month", "months", "year", "years", "day", "days", "hour", "hours", "h", "min", "s", "pcs", "sets", "set", "tons", "ton",
+              "个月", "年", "天", "小时", "分钟", "件", "台", "套", "吨", "毫米", "厘米", "米", "公斤", "千克", "克", "伏", "瓦"],
+    "standards": ["ISO", "EN", "EN ISO", "IEC", "DIN", "BS", "BS EN", "ANSI", "ASTM", "GB", "GB/T", "JIS", "UL", "NSF", "SAE"],
+    "certificates": ["CE", "RoHS", "REACH", "FDA", "UL", "SGS", "TÜV", "TUV", "BV", "ISO 9001", "ISO 14001", "ISO 45001"],
+    "ratings": [],
+    "patterns": []
+  },
+  "industries": {
+    "industrial": {
+      "_说明": "阀门、管件、泵、工业设备",
+      "units": ["Cv", "Kv", "lbf·in", "lb", "lbs", "kgf/cm²", "kgf/cm2", "MPa(g)", "bar(g)"],
+      "standards": ["API", "ASME", "MSS", "MSS SP", "AWWA", "NACE", "EN 593", "BS EN", "GOST", "API 6D"],
+      "certificates": ["PED", "ATEX", "SIL ?\\d", "WRAS", "KTW", "ACS", "DVGW", "EAC", "CRN", "ABS", "DNV", "LR", "CCS", "API 6D", "API 607", "API 6FA"],
+      "ratings": ["DN", "PN", "NPS", "Class"],
+      "patterns": ["\\b\\d{1,3}\\s?K\\b(?=\\s|$|[,.;)])"]
+    },
+    "apparel": {
+      "_说明": "服装、面料、家纺",
+      "units": ["gsm", "GSM", "g/m²", "g/m2", "oz", "denier", "D", "dtex", "支", "针", "cm²"],
+      "standards": ["AATCC", "ASTM D", "GB 18401", "EN 14682"],
+      "certificates": ["OEKO-TEX", "OEKO-TEX STANDARD 100", "GOTS", "GRS", "RCS", "OCS", "BSCI", "amfori BSCI", "WRAP", "SEDEX", "SMETA", "bluesign", "Higg", "FSC", "BCI"],
+      "ratings": [],
+      "patterns": ["\\b\\d{1,3}\\s?%\\s?(?:cotton|polyester|nylon|spandex|elastane|wool|linen|viscose|rayon|acrylic|silk)\\b"]
+    },
+    "display": {
+      "_说明": "显示屏、广告机、自助机、LED 等电子设备",
+      "units": ["nits", "nit", "cd/m²", "cd/m2", "ms", "mAh", "Wh", "PPI", "ppi", "dpi", "GB", "TB", "MHz", "GHz", "lm", "K"],
+      "standards": ["IEC", "EN", "IEEE"],
+      "certificates": ["FCC", "CB", "CCC", "BIS", "KC", "PSE", "UKCA", "Energy Star", "ENERGY STAR", "EDLA", "GMS"],
+      "ratings": [],
+      "patterns": ["\\b\\d{3,4}\\s?[x×*]\\s?\\d{3,4}\\b", "\\b(?:4|8)K\\b", "\\bIP\\s?\\d{2}\\b", "\\bP\\d(?:\\.\\d{1,2})?\\b"]
+    }
+  }
+}
