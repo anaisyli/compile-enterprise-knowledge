@@ -92,14 +92,14 @@
 
 1. 先定位本机已安装的 compile-enterprise-knowledge Skill（不要写死版本号或绝对路径），读它的 references/writer-guide.md。
 2. 接入一节只写这几条，不要把 writer-guide 的内容抄进来：
-   - 什么时候用：本次客户的知识库里有 01_工作台/写作目录.md 时，每次写文章都先读当前已安装 compile-enterprise-knowledge 的 references/writer-guide.md，按它取资料、写作、核对；没有写作目录时按本 Skill 原来的方式读资料。用户明确要“严格模式/逐句核验/算引用率”时，按本 Skill 已有的 manage-article-knowledge 接入走（没有就告诉用户）。
-   - 范围锁：只用当前请求指定的那一个客户知识库，不读别的客户的知识库或旧对话里的路径；知识库只读，资料包、核对提示放在本篇自己的工作目录。
-   - 替换一个步骤：本 Skill 原流程里“先读取知识库文档、盘点产品与公司事实”的步骤，在有写作目录时改成“按 writer-guide 先定大纲，再取资料包，事实只从资料包里来”。这是唯一的替换，原流程其他步骤原样保留。
-   - 交付前多一步：按 writer-guide 运行 check_article.py，按提示改，剩下的写进交付说明。
-3. 如果本 Skill 已经有 manage-article-knowledge 的接入一节：保留它，但改成只在用户明确要严格模式时使用；日常写作走上面这一节。两节不要互相抄内容。
-4. 改完自检：接入一节只有一份；里面没有抄 writer-guide 的规则细节；原流程的章节都还在；“先读知识库”的步骤已按第 2 条改写。
+   - 什么时候用：本次客户的知识库里有 01_工作台/写作目录.md 时，每次写文章都先读当前已安装 compile-enterprise-knowledge 的 references/writer-guide.md，按它执行大纲落盘、取资料包、写作、标引用与核对；没有写作目录时按本 Skill 原来的方式读资料。
+   - 范围锁：只用当前请求指定的那一个客户知识库，不读别的客户的知识库或旧对话里的路径；除按 writer-guide 在 04_文章任务/10_写作记录/<task_key>/ 保存本篇过程记录及运行 research.py 外，知识库只读；过程文件不混进最终文章交付包。
+   - 替换一个步骤：本 Skill 原流程里“先读取知识库文档、盘点产品与公司事实”的步骤，在有写作目录时改成“按 writer-guide 先定大纲并落盘锁定，再按大纲取资料包，事实只从资料包里来”。这是唯一的替换，原流程其他步骤原样保留。
+   - 交付前多一步：按 writer-guide 写极简引用表并运行 check_article.py --citations 生成引用追溯表，按提示改，剩下的写进交付说明。
+3. 如果本 Skill 已经有旧的 manage-article-knowledge 接入一节（例如 Enterprise knowledge-base adapter）：直接删掉，统一替换为本节，不再默认使用 manage-article-knowledge。
+4. 改完自检：接入一节只有一份；旧的 manage-article-knowledge 接入一节已删除；里面没有抄 writer-guide 的规则细节；原流程的章节都还在；“先读知识库”的步骤已按第 2 条改写。
 
-完成后告诉我：改了哪个文件、新增还是替换了哪一节、原流程是否完整保留。不要执行真实写作任务。
+完成后告诉我：改了哪个文件、新增还是替换了哪一节、是否已删除旧的 manage-article-knowledge 接入节、原流程是否完整保留。不要执行真实写作任务。
 ```
 
 接入后用一篇测试题验证：让写作 Skill 给某个客户写一篇，看它是否先定大纲、读写作目录、生成了资料包、跑了 check_article，交付说明里有没有列用了哪些小板块和核对提示。通过后日常写作不用再发这段。
