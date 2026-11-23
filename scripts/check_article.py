@@ -198,6 +198,72 @@ def norm(text: str) -> str:
     return text
 
 
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’.-][A-Za-z0-9]+)*|[\u4e00-\u9fff]")
+_BODY_TRANS = str.maketrans({"℃": "°c", "℉": "°f", "–": "-", "—": "-", "−": "-", "～": "~", "×": "x", "“": '"', "”": '"', "’": "'", "‘": "'"})
+
+
+def clean_body_text(article: str) -> str:
+    """Strip frontmatter, Markdown headings/links/formatting for body word counts."""
+    text = re.sub(r"\A---\s*\n.*?\n---\s*(?:\n|$)", "", article, flags=re.S)
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or re.match(r"^#{1,6}\s+", line):
+            continue
+        if line.startswith("|") and set(line.replace("|", "").strip()) <= set("-: "):
+            continue
+        line = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
+        line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)
+        line = re.sub(r"[`*_~]+", "", line)
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|") if c.strip()]
+            line = " ".join(cells)
+        else:
+            line = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", line)
+        line = line.strip()
+        if line:
+            out.append(line)
+    return "\n".join(out)
+
+
+def count_words(text: str) -> int:
+    return len(WORD_RE.findall(text))
+
+
+def body_word_citation_stats(article: str, verified_quotes: list[str]) -> dict[str, Any]:
+    """Compute non-overlapping word-level citation ratio against the cleaned article body."""
+    cleaned = clean_body_text(article)
+    total_words = count_words(cleaned)
+    norm_chars: list[str] = []
+    pos_map: list[int] = []
+    for idx, ch in enumerate(cleaned):
+        for mch in ch.translate(_BODY_TRANS).casefold():
+            if not mch.isspace():
+                norm_chars.append(mch)
+                pos_map.append(idx)
+    body_compact = "".join(norm_chars)
+
+    spans: list[tuple[int, int]] = []
+    for quote in verified_quotes:
+        q_compact = re.sub(r"\s+", "", quote.translate(_BODY_TRANS).casefold())
+        if not q_compact:
+            continue
+        pos = body_compact.find(q_compact)
+        if pos != -1:
+            spans.append((pos_map[pos], pos_map[pos + len(q_compact) - 1] + 1))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    cited_words = min(total_words, sum(count_words(cleaned[a:b]) for a, b in merged))
+    word_rate = f"{round(cited_words / total_words * 100)}%" if total_words else "0%"
+    return {"total_words": total_words, "cited_words": cited_words, "word_rate": word_rate}
+
+
 def split_zones(pack: str) -> dict[str, str]:
     """The pack's facts, and the two zones the writer must not lean on."""
     zones = {"资料": [], "需核实": [], "未整理": []}
@@ -363,12 +429,17 @@ def check_citations(article: str, citation_rows: list[tuple[str, list[str]]], fa
     cited_count = sum(1 for _, text in all_facts if norm(text) in covered_keys)
     verified_count = sum(1 for _, text in all_facts if norm(text) in verified_keys)
     rate = f"{round(verified_count / total * 100)}%" if total else "100%"
+    verified_quotes = [r["quote"] for r in checked_rows if r["ok"]]
+    body_stats = body_word_citation_stats(article, verified_quotes)
     return {
         "rows": checked_rows,
         "total_facts": total,
         "cited_facts": cited_count,
         "verified_facts": verified_count,
         "coverage_rate": rate,
+        "total_words": body_stats["total_words"],
+        "cited_words": body_stats["cited_words"],
+        "word_rate": body_stats["word_rate"],
         "uncovered": uncovered,
         "failed_rows": sum(1 for r in checked_rows if not r["ok"]),
         "warning_rows": sum(1 for r in checked_rows if r["warnings"]),
@@ -379,7 +450,8 @@ def trace_report(citations: dict[str, Any], title: str = "") -> str:
     """Human-readable 引用追溯.md: 文章原话 -> 知识库哪一节 -> 原始资料哪一页."""
     lines = ["# 引用追溯" + (f"：{title}" if title else ""), "",
              f"硬事实共 {citations['total_facts']} 处，已标引用 {citations['cited_facts']} 处，"
-             f"核对通过 {citations['verified_facts']} 处（{citations['coverage_rate']}）。", ""]
+             f"核对通过 {citations['verified_facts']} 处（{citations['coverage_rate']}）。",
+             f"正文引用占比：{citations['cited_words']}/{citations['total_words']} 词（{citations['word_rate']}）。", ""]
     if citations["rows"]:
         lines.extend(["| 文章原话 | 引用编号 | 对应知识库 | 原始资料出处 | 核对结果 |",
                       "| --- | --- | --- | --- | --- |"])
@@ -409,7 +481,8 @@ def report(result: dict[str, Any]) -> str:
     citations = result.get("citations")
     if citations:
         lines.append(f"引用表核对：共 {len(citations['rows'])} 条引用，通过 {len(citations['rows']) - citations['failed_rows']} 条；"
-                     f"硬事实引用覆盖率 {citations['verified_facts']}/{citations['total_facts']}（{citations['coverage_rate']}）。")
+                     f"硬事实引用覆盖率 {citations['verified_facts']}/{citations['total_facts']}（{citations['coverage_rate']}）；"
+                     f"正文引用占比 {citations['cited_words']}/{citations['total_words']} 词（{citations['word_rate']}）。")
     has_cit_issue = bool(citations and (citations["failed_rows"] or citations["warning_rows"]))
     if not (result["missing"] or result["risky"] or result["uncurated"] or result["competitors"] or has_cit_issue):
         return "\n".join(lines + ["没有发现问题。"]) + "\n"
@@ -490,9 +563,11 @@ def main() -> int:
             from kb_lookup import parse_task, update_article_ledger
             fields = parse_task(task_path)["fields"]
             task_key = fields.get("task_key") or task_path.parent.name
-            cov = f"{cit_result['verified_facts']}/{cit_result['total_facts']}（{cit_result['coverage_rate']}）"
+            cov = (f"硬事实 {cit_result['verified_facts']}/{cit_result['total_facts']}（{cit_result['coverage_rate']}）；"
+                   f"正文 {cit_result['cited_words']}/{cit_result['total_words']}词（{cit_result['word_rate']}）")
+            ledger_status = "已交付" if fields.get("status") == "已交付" else "已核对"
             update_article_ledger(vault, task_key, fields.get("title_or_topic", ""),
-                                  fields.get("writing_skill", ""), "已核对", coverage=cov, task_path=task_path)
+                                  fields.get("writing_skill", ""), ledger_status, coverage=cov, task_path=task_path)
     text = report(result)
     if args.output:
         write_text(Path(args.output), text)

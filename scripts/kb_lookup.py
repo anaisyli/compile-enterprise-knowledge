@@ -523,7 +523,7 @@ def update_article_ledger(vault: Path, task_key: str, title: str, writing_skill:
     if ledger.is_file():
         for line in ledger.read_text(encoding="utf-8").splitlines():
             if line.lstrip().startswith("|"):
-                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
                 if len(cells) >= 7 and cells[0] != "任务编号" and not set(cells[0]) <= set("-: "):
                     rows[cells[0]] = cells[:7]
                     if cells[0] not in order:

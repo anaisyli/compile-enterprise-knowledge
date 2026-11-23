@@ -163,6 +163,19 @@ class CheckTests(unittest.TestCase):
         self.assertIn("产品系列-YFD71F#参数 > 基本技术数据（客户知识）", trace)
         self.assertIn("产品画册-YFD71F#第 1 页", trace)
         self.assertIn("硬事实共", trace)
+        self.assertIn("正文引用占比：", trace)
+        self.assertGreater(res["cited_words"], 0)
+        self.assertLess(res["cited_words"], res["total_words"])
+
+    def test_body_word_citation_ratio_merges_overlaps_and_skips_failed_rows(self) -> None:
+        article = "# Title\n\nAlpha beta gamma delta. Epsilon zeta eta theta iota kappa.\n"
+        stats = check_article.body_word_citation_stats(
+            article,
+            ["Alpha beta gamma", "beta gamma delta", "Not in article"],
+        )
+        self.assertEqual(stats["total_words"], 10)
+        self.assertEqual(stats["cited_words"], 4)
+        self.assertEqual(stats["word_rate"], "40%")
 
 
 if __name__ == "__main__":
