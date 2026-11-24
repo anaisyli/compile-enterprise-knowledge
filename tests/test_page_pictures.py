@@ -91,6 +91,21 @@ class PagePictureTests(unittest.TestCase):
         self.assertNotEqual(checked.returncode, 0)
         self.assertIn("原页图文件不见了", checked.stdout + checked.stderr)
 
+    def test_project_prefixed_pictures_remain_verifiable_without_rewriting_sources(self) -> None:
+        self.assertEqual(run("run_pipeline.py", *self.args(), "--images", "none").returncode, 0)
+        source = next((self.out / "03_净化md").rglob("*DS50*.md"))
+        source.write_text(source.read_text(encoding="utf-8").replace(
+            "![[03_正式知识/90_素材/", "![[客户项目/P-995/03_正式知识/90_素材/"), encoding="utf-8")
+        frozen = source.read_bytes()
+        checked = self.verify()
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(source.read_bytes(), frozen)
+        merged = json.loads((self.out / BUILD / "extract-status.json").read_text(encoding="utf-8"))
+        (self.out / BUILD / "assets" / merged["items"]["p1"]["page_images"]["1"]).unlink()
+        checked = self.verify()
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("原页图文件不见了", checked.stdout + checked.stderr)
+
     def test_the_check_finds_a_page_with_no_pictures_at_all(self) -> None:
         self.assertEqual(run("run_pipeline.py", *self.args(), "--images", "none").returncode, 0)
         source = next((self.out / "03_净化md").rglob("*DS50*.md"))

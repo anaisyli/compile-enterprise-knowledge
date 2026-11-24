@@ -178,7 +178,15 @@ def page_picture_errors(build: Path, clean: Path, docs: dict[str, dict[str, Any]
         text = (clean / relative).read_text(encoding="utf-8")
         shown = PAGE_PICTURE.findall(text)
         for name in shown:
-            if name not in files or not (build / "assets" / files[name]).is_file():
+            picture_id = files.get(name)
+            if picture_id is None:
+                # Published links may start with a project folder inside a shared
+                # Obsidian vault. Incremental curate runs keep those sources frozen.
+                # Still match the full material path, rather than just its basename.
+                material_path = re.search(r"(?:^|/)(03_正式知识/90_素材/.+)$", name)
+                if material_path:
+                    picture_id = files.get(material_path.group(1))
+            if picture_id is None or not (build / "assets" / picture_id).is_file():
                 errors.append(f"原页图文件不见了：{doc['title']} {name}")
         # A page with no text has no section to hang a picture on, and a page something was removed
         # from or held on deliberately shows none; any other page with text should have one.
