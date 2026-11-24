@@ -132,17 +132,17 @@
 **手动一键体检 / 设为每月自动执行的 Prompt：**
 
 ```text
-用 compile-enterprise-knowledge 对知识库根目录 `<Obsidian知识库根目录>` 下所有项目做本月月度体检：
-运行 `python scripts/kb_status.py --vault-root "<Obsidian知识库根目录>"`（只读检查，不自动抓官网；非知识库子目录自动跳过）。
-完成后给我简明汇报：
-1. 全库总览（检查了几个项目，🔴 需处理 / 🟡 待关注 / 🟢 正常 各几个）；
+用 compile-enterprise-knowledge 对知识库根目录 `<Obsidian知识库根目录>` 做本月月度体检（只读检查，不自动抓官网）：
+- 检查范围：<全部项目 / 或填几个项目编号或公司名，如 P-002、恒塔>
+
+请运行 `kb_status.py --vault-root "<Obsidian知识库根目录>"`（若指定了部分项目则加上 `--projects`），完成后给我简明汇报：
+1. 体检总览（共检查几个项目，🔴 需处理 / 🟡 待关注 / 🟢 正常 各几个；如有未匹配的筛选词请指出）；
 2. 逐项列出 🔴 和 🟡 项目的问题重点、负责人与建议动作；
-3. 根目录汇总报告（`月度体检总览_YYYY-MM.md`）位置。
+3. 根目录汇总报告位置（全库为 `月度体检总览_YYYY-MM.md`，部分项目为 `月度体检总览_YYYY-MM_部分项目.md`）。
 ```
 
 - **定时自动跑**：在 Codex Automations 或支持定时任务的客户端里，按**每月最后一个周五 10:00（`Asia/Shanghai`）**新建定时任务，直接粘贴上面这段 Prompt 即可。
-- **只体检其中几个项目**：加 `--projects P-002,P-011`（可填项目编号或公司名关键词，逗号分隔），单独输出 `月度体检总览_YYYY-MM_部分项目.md`，不覆盖全库总览。
-- **只体检单个项目**：把命令换成 `python scripts/kb_status.py --vault "<单个知识库>" --monthly`。
+- **只体检单个项目**：也可以直接说“用 compile-enterprise-knowledge 给 `<单个知识库路径>` 做本月月度体检”（运行 `kb_status.py --vault "<单个知识库>" --monthly`）。
 
 ### 核心规则速览
 
