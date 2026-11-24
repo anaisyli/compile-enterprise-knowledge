@@ -400,15 +400,60 @@ def present(fact: str, zone: str) -> bool:
     return False
 
 
+def disputed_values(pack_paths: list[Path], vault: Path | None) -> list[dict[str, Any]]:
+    """Values waiting for the client: from each pack's 资料包.json, plus vault guards (scoped by context)."""
+    found: dict[str, dict[str, Any]] = {}
+    has_pack_json = False
+    for path in (p.with_suffix(".json") for p in pack_paths):
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if "disputed_values" in data:
+                has_pack_json = True
+            for guard in data.get("disputed_values") or []:
+                if guard.get("value"):
+                    found.setdefault(f"{guard.get('id')}|{guard['value']}", {**guard, "_from_pack": True})
+    if vault:
+        vault_guards = vault / "05_数据与审核/70_构建状态/writing-guards.json"
+        if vault_guards.is_file():
+            data = json.loads(vault_guards.read_text(encoding="utf-8"))
+            for guard in data.get("guards") or []:
+                if guard.get("value"):
+                    found.setdefault(f"{guard.get('id')}|{guard['value']}", {**guard, "_from_pack": not has_pack_json})
+    return list(found.values())
+
+
+def _guard_applies_to_article(guard: dict[str, Any], article: str) -> bool:
+    """Pack-scoped guards always apply; vault-wide guards only fire if the page/product or row context appears."""
+    if guard.get("_from_pack", True):
+        return True
+    page = str(guard.get("page") or "")
+    candidates = [c.strip() for c in (page, page.split("-", 1)[-1] if "-" in page else "", guard.get("row", "")) if c and c.strip()]
+    lowered = article.casefold()
+    return any(len(c) >= 2 and c.casefold() in lowered for c in candidates)
+
+
 def check(article: str, pack: str | list[str], prefixes: list[str], deny: list[str], vault: Path | None,
-          rules: dict[str, list[str]] | None = None) -> dict[str, Any]:
+          rules: dict[str, list[str]] | None = None, disputed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """One pack, or the main pack and its 补读 packs: each is split into zones on its own."""
     zones = {"资料": "", "需核实": "", "未整理": ""}
     for one in [pack] if isinstance(pack, str) else pack:
         for name, text in split_zones(one).items():
             zones[name] += "\n" + text
     missing, risky, uncurated, ok = [], [], [], 0
+    # A value waiting for the client is checked first: showing up in the pack's text must not pass it,
+    # and a bare number with no unit is still caught.
+    held = []
+    for guard in disputed or []:
+        if not _guard_applies_to_article(guard, article):
+            continue
+        token = re.compile(r"(?<![\d.])" + re.escape(str(guard["value"])) + r"(?![\d.])")
+        if token.search(article):
+            held.append(token)
+            context = " ".join(x for x in (guard.get("row"), guard.get("column")) if x)
+            risky.append({"kind": "待客户核实", "text": f"{guard['value']}（{guard.get('page', '')} {context}，{guard.get('id', '')}）"})
     for kind, text in facts(article, prefixes, rules):
+        if any(token.search(text) for token in held):
+            continue  # Already reported as waiting for the client.
         if present(text, zones["资料"]):
             ok += 1
         elif present(text, zones["需核实"]):
@@ -578,7 +623,7 @@ def report(result: dict[str, Any]) -> str:
                      if item.get("elsewhere") else "——知识库里也没有，可能是编的或凭印象写的")
             lines.append(f"- {item['kind']}：{item['text']}{where}")
     if result["risky"]:
-        lines.extend(["", "## 只出现在“口径避坑”（不要写成确定的事实）"])
+        lines.extend(["", "## 只出现在“口径避坑”或待客户核实（不要写成确定的事实，待核实的数值删掉或改写）"])
         lines.extend(f"- {item['kind']}：{item['text']}" for item in result["risky"])
     if result["uncurated"]:
         lines.extend(["", "## 只出现在“原文里搜到的”（还没整理，用前核对）"])
@@ -629,7 +674,7 @@ def main() -> int:
     rules = load_rules(config, vault)
     prefixes = list(config.get("style_prefixes") or [])
     result = check(article_text, [p.read_text(encoding="utf-8") for p in pack_paths],
-                   prefixes, list(config.get("deny_terms") or []), vault, rules)
+                   prefixes, list(config.get("deny_terms") or []), vault, rules, disputed_values(pack_paths, vault))
     trace_path = None
     if args.citations:
         cit_path = Path(args.citations).resolve()

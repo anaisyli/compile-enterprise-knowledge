@@ -264,6 +264,23 @@
 
 格式参照 manage-article-knowledge，编号形如 `P-007-CUS-001`，跨次运行不变。**一个问题只在一个地方出现。**
 
+### 待办处理（决定与发现分开）
+
+- `governance.py` 每次建库重新检测问题；`governance_state.py` 把决定存在 `04_知识库构建/governance-state.json`（发布时存进 `70_构建状态/`），建库时叠加：证据还在，决定照旧；证据消失，这一条自动关闭（以后又检测到就恢复原状态）；出现新证据重新打开。同一输入连跑两次，事项、决定、处理记录都不增长。
+- 每个事项一种状态。内部：待内部处理、风险保留、已转 CUS、已关闭；客户：待汇总、已导出待发、已发待答、已答待核验、已关闭。“当前阶段”一列显示状态，部分处理时写“（剩 n / m）”，转客户时写“→ CUS 编号”；决定历史写在详情末尾“处理经过（系统记录）”。
+- 证据成员：CUS 按子问题（`sub_id`），其他按详情里的列表行和表格行；可以逐条关闭（58 / 60 页已修）。
+- 默认状态：`ai_read`、`report_page`、`reference_draft` 为风险保留；其余 ANM / MAT 为待内部处理；CUS 为待汇总。
+- `sync --vault`：把已发布台账里人改过的“当前阶段”（和上次渲染的不同）和“处理记录”读进决定文件：含“关闭、完成、结案、已解决、无需”的为已关闭；ANM / MAT 含“保留”的为风险保留；CUS 含“等待客户、已发”的为已发待答（批次“以前已发”），含“已答、已回复、待核验”的为已答待核验。`run_pipeline.py --vault` 开头自动运行。发布合并台账时，状态列以决定文件为准，人写的处理记录照常保留。
+- `auto`：`review-queue.jsonl` 里命中 `assets/vocabulary-common.txt` 且不像认证/机构缩写的词，写进 `review-decisions.json` 的 `allow_terms`，规则版本记在 `allow_rules`；重跑后生效。
+- `review`：写 `governance-review.md`（清单 A：待内部处理的事项，附剩余证据、建议，被整理页引用的证据标 ★ 排前；清单 B：待汇总的客户问题，分“资料公开与授权”和“事实与参数”；另列已在客户那里的）和 `governance-decisions-template.json`。加 `--webpage-json [路径]` 同步导出 `internal-review-input.v1` JSON，供 `customer-confirmation-webpage --mode internal` 直接建页。
+- `collect --decisions [--dry-run]`：`action` 为 `close`、`risk_retained`（可带 `members` 按证据处理、`scope: "project"` 表示同范围新增不重开）、`reopen`、`keep`、`to_cus`（必须带 `question`，生成 `escalated:` 开头的 CUS，原事项变已转 CUS）；原生兼容 `customer-confirmation-webpage --mode internal` 导出的 `governance-decisions.v1`。加 `--dry-run` 只预览受影响组数、成员数和解除的写作护栏、不改文件；正式落盘后记录可回滚批次，可用 `undo [--batch <批次>]` 一键撤销（含 `auto` / `allow-term` 词项放行）。
+- `allow-term --term <词> --scope project|industry:<行业>|doc:<DOC编号>`：写入 `review-decisions.json` 的 `scoped_allow_terms`；`doc:<DOC编号>` 仅在该文档内放行，其他文档仍保留 ⚠。`migrate --vault <知识库>` 将旧库台账与放行词幂等迁移到 `governance-state.v2`。
+- 尺寸图型号待确认按证据自动分为三组：`dimension_drawing_model:neighbor_title`（可按标题或同页确认）、`dimension_drawing_model:weak_hint`（目录线索但证据不足）、`dimension_drawing_model:unknown`（无法判断，建议整组关闭为“保留为型号待确认”，不问客户）。
+- `flag-value`：登记待客户核实的数值（页名、小板块、行关键词、列名、原印值、问题），生成 `value:` 开头的 CUS 和 `writing-guards.json`（随发布存进 `70_构建状态/`；带 `--vault` 时立即写进知识库）。`kb_lookup.py` 读护栏：在对应小板块里找到含行关键词和该数值的行（支持 Markdown 表和多行 HTML `<tr>` 单元格），就把数值换成“[待客户核实，不可引用：编号]”，找不到就在小板块开头加警告；同时写进该页“需核实”，资料包 JSON 记 `disputed_values`。`check_article.py` 先查这些数值（不要求带单位，且按页/产品上下文过滤，不误伤无关产品文章），出现即报“待客户核实”，不会因为资料区里也有而算通过。对应 CUS 关闭后护栏解除。
+- `cus-export [--items] [--webpage-json]`：只导出待汇总的问题到 `客户确认表-<批次>.csv`，授权在前、事实在后，状态改已导出待发（加 `--webpage-json` 同步导出 `customer-review-input.v1` 草稿 JSON）；`cus-sent --batch` 改已发待答。`客户确认表.csv` 只列待汇总的问题。`apply_answers.py` 支持读回 `.csv`、`.xlsx` 和 `customer-feedback.v1` `.json`，答了的子问题标已答，全部答完的事项变已答待核验，核验后用 `collect` 关闭。
+- 总览“待处理”一节第一行写“需要做决定 X 组（内部 Y，待发客户 Z）”，再写已发待答、已答待核验、风险保留，审计行写证据总数。
+- 台账详情里字面的 `\n` 渲染时拆成多行，不会冒充标题。
+
 | 台账 | 登记什么 | 谁来解决 |
 |---|---|---|
 | CUS 待客户补充事项 | 所有要客户回答的：待确认的页、节、文件、官网案例页；产品图能否公开；公司数据、款号面料以哪个为准 | 客户 |

@@ -274,14 +274,39 @@ def contact_hits(text: str, own_domains: set[str], own_contacts: list[str]) -> l
 
 def load_vocabulary(config: dict[str, Any], decisions: dict[str, Any]) -> set[str]:
     words = set(GENERIC_WORDS)
-    for name in config.get("vocabularies", []):
+    active_vocabs = set(config.get("vocabularies", []))
+    for name in active_vocabs:
         path = VOCABULARY_DIRECTORY / f"vocabulary-{name}.txt"
         words.update(line.strip().casefold() for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
     # The company's own style prefixes (ANST in ANST-001) are its words, not unknown names.
-    for term in list(decisions.get("allow_terms", [])) + list(config["own_terms"]) + list(config.get("style_prefixes", [])):
+    extra_terms = list(decisions.get("allow_terms", [])) + list(config["own_terms"]) + list(config.get("style_prefixes", []))
+    for rule in decisions.get("scoped_allow_terms", []):
+        if not isinstance(rule, dict):
+            continue
+        scope = rule.get("scope", "")
+        term = rule.get("term", "")
+        if term and (scope == "project" or (scope.startswith("industry:") and scope.split(":", 1)[1] in active_vocabs)):
+            extra_terms.append(term)
+    for term in extra_terms:
         words.add(term.casefold())
         words.update(word.casefold() for word in WORD.findall(term))
     return words
+
+
+def load_doc_scoped_vocabulary(decisions: dict[str, Any]) -> dict[str, set[str]]:
+    """Per-document allow rules (scope == 'doc:<doc_id>') apply only inside that document."""
+    by_doc: dict[str, set[str]] = {}
+    for rule in decisions.get("scoped_allow_terms", []):
+        if not isinstance(rule, dict):
+            continue
+        scope = rule.get("scope", "")
+        term = rule.get("term", "")
+        if term and scope.startswith("doc:"):
+            doc_id = scope.split(":", 1)[1]
+            bucket = by_doc.setdefault(doc_id, set())
+            bucket.add(term.casefold())
+            bucket.update(word.casefold() for word in WORD.findall(term))
+    return by_doc
 
 
 def unknown_words(text: str, vocabulary: set[str]) -> set[str]:
@@ -492,6 +517,7 @@ def scan_block(
     own_domains: set[str],
     own_contacts: list[str],
     vocabulary: set[str],
+    doc_vocabulary: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Return (removal reasons, likely customer names, unvetted words)."""
     # Section titles are published too, so they are scanned with the text.
@@ -505,13 +531,14 @@ def scan_block(
             hard.append("invalid_style_label")
         hard.extend(name for name, pattern in ROW_PATTERNS.items() if pattern.search(unjudged))
     customers = sorted({normalize_space(m.group(0)) for m in soft_terms.finditer(text)}) if soft_terms else []
+    effective_vocab = vocabulary | doc_vocabulary if doc_vocabulary else vocabulary
     unvetted: list[str] = []
     if block["kind"] == "row" or block.get("ocr") or block.get("figure_description"):
         # Brands, celebrities, and IP turn up as words nobody has vetted yet.
-        unvetted = sorted(unknown_words(unjudged, vocabulary))
+        unvetted = sorted(unknown_words(unjudged, effective_vocab))
     elif block["doc_id"].startswith("WEB-"):
         # Shop copy is ordinary English; a name is capitalised or has digits (2Pac).
-        unvetted = sorted(w for w in unknown_words(unjudged, vocabulary) if w[:1].isupper() or any(c.isdigit() for c in w))
+        unvetted = sorted(w for w in unknown_words(unjudged, effective_vocab) if w[:1].isupper() or any(c.isdigit() for c in w))
     return hard, customers, unvetted
 
 
@@ -622,6 +649,7 @@ def main() -> int:
             apply_cell_decisions(block, cell_decisions)
     repeated = strip_repeated_lines(blocks) + strip_site_furniture(blocks)
     vocabulary = load_vocabulary(config, decisions)
+    doc_vocabularies = load_doc_scoped_vocabulary(decisions)
     terms = build_terms(build, routes, [Path(raw).resolve() for raw in args.text_dir], config, decisions, vocabulary)
     widespread = widespread_terms(terms.pop("guessed"), blocks)
     terms["soft"] = [t for t in terms["soft"] if t not in widespread]
@@ -667,7 +695,10 @@ def main() -> int:
             entry["examples"].append(block["text"][:120])
 
     for block in blocks:
-        hard, customers, unvetted = scan_block(block, hard_terms, soft_terms, own_domains, config["own_contacts"], vocabulary)
+        hard, customers, unvetted = scan_block(
+            block, hard_terms, soft_terms, own_domains, config["own_contacts"], vocabulary,
+            doc_vocabularies.get(block["doc_id"]),
+        )
         block["hold_reasons"], block["flags"] = [], []
         trusted = block["block_id"] in keep_blocks or block.get("part_of") in keep_blocks
         if block["kind"] == "row" and not ({"description", "fabric", "style"} & set(block["cells"])):

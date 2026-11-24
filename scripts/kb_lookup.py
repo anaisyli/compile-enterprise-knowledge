@@ -555,10 +555,73 @@ def update_article_ledger(vault: Path, task_key: str, title: str, writing_skill:
     return ledger
 
 
+GUARDS = Path("05_数据与审核/70_构建状态/writing-guards.json")
+
+
+def apply_guards(vault: Path, pages: list[Page]) -> list[dict[str, Any]]:
+    """Values the client has not confirmed come out of the citable text, whole tables included.
+
+    The cell is found by its row key and value; where it cannot be found, the whole section
+    gets a warning instead. Each guard also goes into the page's 需核实, so 口径避坑 lists it."""
+    path = vault / GUARDS
+    guards = json.loads(path.read_text(encoding="utf-8")).get("guards", []) if path.is_file() else []
+    applied = []
+    for guard in guards:
+        page = find_page(pages, guard.get("page", ""))
+        if not page:
+            continue
+        value = str(guard.get("value", ""))
+        token = re.compile(r"(?<![\d.])" + re.escape(value) + r"(?![\d.])")
+        mark = f"[待客户核实，不可引用：{guard['id']}]"
+        wanted = squeeze(guard.get("section", ""))
+        targets = [s for s in page.sections if s.h2 != CHECK_HEADING
+                   and (not wanted or squeeze(s.name).startswith(wanted) or squeeze(s.h2) == wanted)]
+        hit = False
+        row_key = squeeze(guard.get("row", ""))
+        for section in targets:
+            if "<tr" in section.text.lower():
+                def mask_tr(match: re.Match[str]) -> str:
+                    nonlocal hit
+                    tr_html = match.group(0)
+                    if not token.search(tr_html) or (row_key and row_key not in squeeze(tr_html)):
+                        return tr_html
+                    def mask_cell_text(cell: re.Match[str]) -> str:
+                        nonlocal hit
+                        inner = cell.group(1)
+                        if token.search(inner):
+                            hit = True
+                            return ">" + token.sub(mark, inner) + "<"
+                        return cell.group(0)
+                    return re.sub(r">([^<]+)<", mask_cell_text, tr_html)
+                section.text = re.sub(r"(?is)<tr\b[^>]*>.*?</tr>", mask_tr, section.text)
+            lines = section.text.splitlines()
+            for i, line in enumerate(lines):
+                if "<" in line and ">" in line:
+                    continue
+                if token.search(line) and (not row_key or row_key in squeeze(line)):
+                    lines[i] = token.sub(mark, line)
+                    hit = True
+            section.text = "\n".join(lines)
+        if not hit:
+            for section in targets:
+                section.text = (f"> ⚠ 本节有待客户核实的数值 {value}（{guard.get('row', '')} {guard.get('column', '')}），"
+                                f"不可引用：{guard['id']}\n\n" + section.text)
+        cell = " ".join(x for x in (guard.get("row"), guard.get("column")) if x)
+        warning = f"- ⚠ {guard.get('section', '')}{(' ' + cell) if cell else ''} 原印 {value}，待客户核实（{guard['id']}）：{guard.get('question', '')}"
+        check = next((s for s in page.sections if s.h2 == CHECK_HEADING), None)
+        if check:
+            check.text = (check.text + "\n" + warning).strip()
+        else:
+            page.sections.append(Section(page, CHECK_HEADING, None, warning))
+        applied.append({**guard, "page": page.stem, "located": hit})
+    return applied
+
+
 def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with_sources: bool, full_tables: bool,
          brief: bool = True, budget: int | None = None, task_groups: list[tuple[str, list[str]]] | None = None,
          id_prefix: str = "K") -> dict[str, Any]:
     pages = load_pages(vault)
+    disputed = apply_guards(vault, pages)
     rules = load_rules(vault)
     chosen: list[Section] = []
     problems: list[str] = []
@@ -736,7 +799,8 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
         sizes = "、".join(f"{p.stem} {sum(len(s.text) for s in chosen if s.page is p)}" for p in used_pages)
         head.append(f"> ⚠ 资料包约 {len(body)} 字，超过 {limit} 字（各页约：{sizes}）。内容照常全给；需要时少挑几个小板块。")
     return {"text": "\n".join(head) + "\n\n" + body, "sections": [f"{s.page.stem}#{s.name}" for s in chosen],
-            "gaps": gap_rows, "problems": problems, "characters": len(body), "facts": facts}
+            "gaps": gap_rows, "problems": problems, "characters": len(body), "facts": facts,
+            "disputed_values": [d for d in disputed if d["page"] in {p.stem for p in used_pages}]}
 
 
 def split_list(values: list[str]) -> list[str]:
@@ -794,6 +858,8 @@ def main() -> int:
             "id_prefix": args.id_prefix,
             "sections": result["sections"],
             "facts": result["facts"],
+            # check_article.py reads these first: a value waiting for the client is flagged even if the pack shows it.
+            "disputed_values": result.get("disputed_values", []),
         })
     if task and task_path:
         task_key = task["fields"].get("task_key") or task_path.parent.name

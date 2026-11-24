@@ -106,6 +106,7 @@ def gather(run: Path, vault: Path | None) -> dict[str, Any]:
         "warnings": read(build / "校验结果.json", {}).get("warnings", []),
         "sections": section_rows(run),
         "ledger": read(build / "curation-ledger.json", {}),
+        "decided": read(build / "governance-decisions-summary.json", {}),
         # External research lives in the vault only; every writer of the overview reads it the same way.
         "external": external_summary(vault),
         "build": str(build),
@@ -169,6 +170,12 @@ def overview(state: dict[str, Any]) -> list[str]:
 
     ledgers, names = state["ledgers"], state["ledger_names"]
     lines.extend(["## 待处理：都在 05_数据与审核", ""])
+    decided = state.get("decided") or {}
+    if decided:
+        lines.append(f"- **需要做决定 {decided.get('internal_groups', 0) + decided.get('cus_draft', 0)} 组**（内部 {decided.get('internal_groups', 0)} 组，"
+                     f"待发客户 {decided.get('cus_draft', 0)} 组）；已发客户待答 {decided.get('cus_waiting', 0)} 组，客户已答待核验 {decided.get('cus_answered', 0)} 组；"
+                     f"风险保留 {decided.get('risk_retained', 0)} 组（照用、带 ⚠，不算待办）。说“处理这个项目的待办”即可。")
+        lines.append(f"- 审计：涉及证据 {decided.get('evidence', 0)} 条，其中待内部处理 {decided.get('internal_open_evidence', 0)} 条。")
     for kind, label in (("CUS", "待客户确认"), ("MAT", "资料要处理"), ("ANM", "风险与冲突")):
         counts = state.get("ledger_counts", {}).get(kind, {"pending": ledgers.get(kind, 0), "resolved": 0, "system_solved": 0})
         lines.append(f"- {label}（{kind}）：当前待处理 {counts['pending']} 项；历史解除、待关闭 {counts.get('system_solved', 0)} 项；人工已关闭 {counts['resolved']} 项 → [[{names[kind].removesuffix('.md')}|{Path(names[kind]).stem.removeprefix('01_')}]]")

@@ -39,6 +39,8 @@ FILES = [
     "picture-layout.json",
     # Home-page candidates the model picked, and which ones a person confirmed.
     "site-home.json",
+    # Decisions over the ledgers, and the values writers must not cite until the client confirms them.
+    "governance-state.json", "writing-guards.json",
     # Frozen source-layer tables so --from guard / --from curate work even in a fresh run folder.
     "docs.jsonl", "blocks-raw.jsonl", "blocks.jsonl", "removed-terms.jsonl", "routes.json",
     "sheet-report.json", "extract-status.json", "media.json", "guard-terms.json", "review-queue.jsonl",

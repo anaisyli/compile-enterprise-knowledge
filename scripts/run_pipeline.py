@@ -148,6 +148,9 @@ def main() -> int:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
         vault = Path(args.vault).resolve()
         restored = sync_config(out, vault, Path(args.config).resolve() if args.config else None)
+        # Stages and notes people wrote in the published ledgers become decisions before anything is rebuilt.
+        from governance_state import sync as sync_decisions
+        sync_decisions(build, vault)
         print(f"== 从知识库恢复构建状态：{restored['restored']} 个文件", flush=True)
         report_kept(restored["kept_newer_in_run"])
         for line in restored["removed"]:

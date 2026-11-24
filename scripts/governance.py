@@ -353,18 +353,47 @@ def build(
     checks = [record for key, record in load_json(checks_path).items() if key not in excluded_checks
               ] if checks_path.is_file() else []
     heading = lambda r: {"slide": f"第 {r['page']} 张幻灯片", "image": f"图片 {r['page']}"}.get(r["unit"], f"第 {r['page']} 页")
-    unknown_drawings = [
-        f"{link(by_item[r['item_id']], heading(r))}：尺寸图型号待确认"
-        for r in checks if r.get("dimension_drawing") and not r.get("drawing_model_confirmed")
-        and r["item_id"] in by_item
-    ]
-    unknown_drawings.extend(
-        f"{show(route.get('display_name') or item_id)}（资料编号 `{item_id}`）：尺寸图型号待确认"
-        for item_id, route in routes.items()
-        if route.get("reason") == "dimension_drawing" and not route.get("drawing_model_confirmed")
-    )
-    mat("dimension_drawing_model", "尺寸图型号待确认", unknown_drawings, "处", "待知识库专员判断",
-        "查看原图确认型号后更新尺寸图名称", "型号确认后")
+    from kb_common import infer_model_from_title
+
+    def _model_hint(text: str) -> str:
+        candidate = infer_model_from_title(text)
+        if not candidate:
+            return ""
+        # Require a model-like code (letters + digits) or explicit series marker so generic names like "misc.pdf" stay unknown.
+        return candidate if re.search(r"(?:[A-Za-z]+\s*[-_]?\s*\d|\d\s*[-_]?\s*[A-Za-z]|系列|\bseries\b)", candidate, re.I) else ""
+
+    drawing_groups: dict[str, list[str]] = {"neighbor_title": [], "weak_hint": [], "unknown": []}
+    for r in checks:
+        if not (r.get("dimension_drawing") and not r.get("drawing_model_confirmed") and r["item_id"] in by_item):
+            continue
+        doc = by_item[r["item_id"]]
+        route = routes.get(r["item_id"], {})
+        title_model = _model_hint(doc.get("title") or "") or (r.get("pairing") or "").strip()
+        path_hint = _model_hint(route.get("source_relpath") or route.get("display_name") or "")
+        if title_model:
+            drawing_groups["neighbor_title"].append(f"{link(doc, heading(r))}：尺寸图型号待确认（标题/同页候选：{short(title_model, 30)}）")
+        elif path_hint:
+            drawing_groups["weak_hint"].append(f"{link(doc, heading(r))}：尺寸图型号待确认（目录线索：{short(path_hint, 30)}，证据不足）")
+        else:
+            drawing_groups["unknown"].append(f"{link(doc, heading(r))}：尺寸图型号待确认")
+    for item_id, route in routes.items():
+        if not (route.get("reason") == "dimension_drawing" and not route.get("drawing_model_confirmed")):
+            continue
+        path_hint = _model_hint(route.get("source_relpath") or route.get("display_name") or "")
+        label = f"{show(route.get('display_name') or item_id)}（资料编号 `{item_id}`）"
+        if path_hint:
+            drawing_groups["weak_hint"].append(f"{label}：尺寸图型号待确认（目录线索：{short(path_hint, 30)}，证据不足）")
+        else:
+            drawing_groups["unknown"].append(f"{label}：尺寸图型号待确认")
+    mat("dimension_drawing_model:neighbor_title", "尺寸图型号待确认（可按标题或同页确认）",
+        drawing_groups["neighbor_title"], "处", "待知识库专员判断",
+        "核对标题或同页型号候选后整组确认归属；个别例外可取消勾选", "型号确认后")
+    mat("dimension_drawing_model:weak_hint", "尺寸图型号待确认（疑似关联，证据不足）",
+        drawing_groups["weak_hint"], "处", "待知识库专员判断",
+        "抽看原图核实目录线索是否准确，拿不准的保留为型号待确认（不问客户）", "型号确认后")
+    mat("dimension_drawing_model:unknown", "尺寸图型号待确认（无法判断，建议整组保留）",
+        drawing_groups["unknown"], "处", "待知识库专员判断",
+        "原图和周边均无型号线索，整组关闭为“保留为型号待确认”，不问客户", "新原件补齐型号时")
     from source_fidelity import reviewed_units
 
     reviewed_locators: set[tuple[str, str]] = set()
@@ -489,21 +518,17 @@ def build(
             "项", "知识库专员处理中", "review_cells.py 导出、判断、合并，再独立通读", "产品表更新时")
 
     registry.save()
+    # Decisions people and agents made (governance-state.json) are laid over this build's findings:
+    # stage = status, settled evidence stays settled, and questions already sent are not asked again.
+    from governance_state import load_state, overlay, write_client_sheet
+    state = load_state(build_dir)
+    decided = overlay(build_dir, records, state)
     for kind, (relative, title, purpose) in LEDGERS.items():
         write_text(build_dir / "vault" / relative, render_ledger(kind, title, purpose, project_id, today, records[kind]))
 
-    # One row per answerable item, so a grouped entry still gets a separate answer for each file.
-    with (build_dir / "客户确认表.csv").open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle)
-        # The client knows their files by the original names; this table goes to them, not into the vault.
-        friendly = client_confirmation.get("friendly")
-        writer.writerow(["编号", "要确认的问题", "原文件名", "在文件里的位置" if friendly else "在初筛包里的位置", "回答（保留 / 不用 / 文字）"])
-        for record in sorted(records["CUS"], key=lambda r: r["id"]):
-            for item in record["items"]:
-                route = routes.get(item["item_id"], {})
-                place = item.get("location") or "整份文件" if friendly else item.get("place") or route.get("path") or ""
-                writer.writerow([item.get("client_id", item["sub_id"]), item["question"], item.get("name") or route.get("display_name") or "",
-                                 place, ""])
+    # One row per answerable item, using the same 6-column schema as governance_state.write_client_sheet.
+    # Only questions not yet exported: a batch that went to the client is not sent again.
+    write_client_sheet(build_dir, records, state, routes=routes, friendly=bool(client_confirmation.get("friendly")))
     write_json(build_dir / "governance.json", {kind: [{k: v for k, v in r.items() if k != "details"} for r in rs] for kind, rs in records.items()})
     cus_items = {f"{i['item_id']}:{i['location']}": r["id"] for r in records["CUS"] for i in r["items"]}
     for record in records["CUS"]:
@@ -511,7 +536,7 @@ def build(
             for related in item.get("related_item_ids", []):
                 cus_items[f"{related}:review:{item['key']}"] = record["id"]
     return {"anm_ids": anm_ids, "mat_ids": mat_ids, "cus_ids": cus_ids, "cus_items": cus_items,
-            "counts": {kind: len(rs) for kind, rs in records.items()}}
+            "counts": {kind: len(rs) for kind, rs in records.items()}, "decided": decided}
 
 
 def strip_fingerprints(lines: list[str]) -> list[str]:
@@ -538,7 +563,8 @@ def render_ledger(kind: str, title: str, purpose: str, project_id: str, today: s
         lines.append("| 无 |" + " |" * (len(columns) - 1))
     lines.extend(["", "## 事项详情", ""])
     for record in sorted(records, key=lambda r: r["id"]):
-        details = strip_fingerprints(record["details"])
+        # One line per list item: a literal "\n" in a detail must not hide the next heading.
+        details = strip_fingerprints([part for line in record["details"] for part in str(line).replace("\\n", "\n").split("\n")])
         items = record.get("items", [])
         if kind == "CUS" and record.get("key", "").startswith(("review:", "pending:")) and len(items) == 1:
             item = items[0]
@@ -608,6 +634,13 @@ def finding_count(row: list[str], header: list[str]) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def decided_stage(stage: str) -> bool:
+    """A stage the decision state wrote (待内部处理, 风险保留, 已发待答（批次 …）…) wins over the old ledger:
+    what people wrote there was read into the state by governance_state.py sync."""
+    from governance_state import LABELS
+    return stage.split("（")[0].split(" → ")[0] in LABELS
+
+
 def merge_ledger(old_text: str, new_text: str) -> str:
     """Keep what people wrote: their stage, owner, and notes win over the machine's defaults.
 
@@ -642,7 +675,12 @@ def merge_ledger(old_text: str, new_text: str) -> str:
                 or (old_count is not None and new_count is not None and new_count > old_count)
                 or (not old_fp and bool(new_fp) and "个没核实过的词" in new_rows[record_id][0] and (new_count or 0) > 10)
             )
-            if reopened and "当前阶段" in new_header:
+            old_stage_text = old_rows[record_id][old_header.index("当前阶段")] if "当前阶段" in old_header else ""
+            # The state's stage wins only over a stage the state wrote; what a person typed keeps showing
+            # (sync reads it into the state, so counts and lists already follow it).
+            stage_decided = ("当前阶段" in new_header and decided_stage(cells[new_header.index("当前阶段")])
+                             and (not old_stage_text or decided_stage(old_stage_text) or old_stage_text == SOLVED_STAGE))
+            if reopened and "当前阶段" in new_header and not stage_decided:
                 stage_idx = new_header.index("当前阶段")
                 cells[stage_idx] = f"{cells[stage_idx]}（有新增）"
             else:
@@ -651,6 +689,8 @@ def merge_ledger(old_text: str, new_text: str) -> str:
                         value = old_rows[record_id][old_header.index(column)]
                         # This is an automatic historical state. A fresh machine finding reopens it;
                         # explicit human closed states and all human notes still win.
+                        if column == "当前阶段" and stage_decided:
+                            continue
                         if column != "当前阶段" or value != SOLVED_STAGE:
                             cells[new_header.index(column)] = value
             line = row_line(cells)
@@ -723,3 +763,9 @@ def cleanup_record(build_dir: Path, blocks: list[dict[str, Any]], docs: dict[str
         doc = docs[doc_id]
         lines.append(f"- {link(doc)}：{len(places)} 段 — " + "；".join(places[:8]) + (" 等" if len(places) > 8 else ""))
     write_text(build_dir / "vault" / "05_数据与审核/50_运行记录/内容清理记录.md", "\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    import sys
+    from governance_state import main
+    sys.exit(main())

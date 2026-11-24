@@ -136,13 +136,31 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
     - 用户确认后运行 `publish_vault.py --out <运行目录> --vault <项目目录>`。想先看会撤下、改名、新增什么，加 `--dry-run`。
     - 一次要让很多资料变成“已失效”时（超过 5 份且超过两成），发布会停下。这通常是官网没读到或少给了初筛包，先查清楚；用户确认确实要撤下，才加 `--allow-withdraw`。
 
-15. **客户确认：** 把 `04_知识库构建/客户确认表.csv` 交给用户转给客户。客户填好“回答”列后，用 `apply_answers.py` 读回，再重跑、发布。
+15. **客户确认：** 按下面“处理这个项目的待办”做：`governance_state.py cus-export` 导出这一批要问的，用户发出后 `cus-sent`；客户填好“回答”列后，用 `apply_answers.py --answers <回复的表>` 读回，再重跑、发布。已经发出的问题不会再导出。
     - 客户已经填过初筛包的 `客户确认表.xlsx` 时，`run_pipeline.py` 每次建库开头会自动读回，不要让客户再答一遍。初筛包本身不改。“需要修改”和备注记进 `client-notes.jsonl` 给人看，不改建库。
 
 16. **查原件：** 运行 `find_source.py --package <初筛包> --id <知识库名字或资料编号>`，把真实路径告诉用户；也可以直接打开初筛包的 `审计记录/知识库文件对照.md` 查。真实路径只在对话里给，不写进知识库。
     - 知识库里只用改过的名字，名字两边不一样是正常的，不要当问题报告；公司自己的名字出现在标题里也不是问题，要藏的只是买家和零售商。
 
 17. **发给同事、换电脑：** 知识库和初筛包一起发。打包时跳过初筛包的 `审计记录/按知识库名字/`（硬链接，打包会变成第二份拷贝）。对方解压后运行 `kb_relink.py --vault <知识库> --package <初筛包新位置>`。重建时找不到上次的初筛包，`run_pipeline.py` 会停下并提示这一步。
+
+## 处理这个项目的待办（CUS / MAT / ANM）
+
+用户说“处理这个项目的待办”“清一下台账”时走这里。规则见合同“待办处理”。目标是只交两份短清单：**清单 A 需要内部决定**、**清单 B 可以攒进下一批问客户的**；首页只报“还要做几个决定”，涉及多少页、图、词放在审计数据里。
+
+1. **复用上一轮**：带 `--vault` 重跑时会自动把台账里人写的阶段和处理记录读进决定文件（`governance_state.py sync`）；没重跑就先手动运行一次 `sync --out <运行目录> --vault <知识库>`。
+2. **先自动处理能确定的**：
+   - `governance_state.py auto --out <运行目录>`：词典 `assets/vocabulary-common.txt` 里的普通词放行；品牌、平台、认证、标准、检测机构、组织、IP 一律不放行，保留 ⚠。
+   - AI 看图、Reducto 识别、提及检测报告、参考稿默认是**风险保留**：内容照用、带 ⚠，不算待办。
+   - 提取文字和原图不一致的页：按 `review` 里 ★ 的顺序（被整理页引用的先做），原图清楚的照第 7 步看图核对修正，修好的逐页关闭；原件本身看不清、疑似印错、几份资料冲突的转客户，**一律问客户，不自己判定数值**。
+   - 尺寸图型号：能从页标题或同页款号确认的改名；其余整组关闭为“保留为型号待确认”，不问客户。
+   - 官网读不到、工具不可用：先试已授权的替代方法；做不了就沿用快照并写明日期和重试条件（风险保留）。
+3. **出清单（可选一键导出离线决策页 JSON）**：`governance_state.py review --out <运行目录>` 生成 `governance-review.md`，把清单 A 和清单 B 原样给用户看（每条有建议）。加 `--webpage-json` 可同时导出 `internal-review-input.json`，直接交给 `customer-confirmation-webpage --mode internal` 生成离线内部决策页。
+4. **预览、落盘与撤销**：用户说“A1–A3 按建议，A4 转客户：……，B 全部导出，B5 先不问”（或从内部决策页导出 `governance-decisions.json`）后，可用 `governance_state.py collect --out <运行目录> --decisions <文件> --dry-run` 先看影响预览，确认后去掉 `--dry-run` 落盘；误放行或误关闭时用 `governance_state.py undo --out <运行目录> [--batch <批次>]` 一键回滚。需要按范围放行词项时用 `governance_state.py allow-term --out <运行目录> --term <词> --scope project|industry:<行业>|doc:<DOC编号>`。
+5. **客户问题按批次**：`governance_state.py cus-export --out <运行目录> [--items 编号,…] [--webpage-json]` 只导出“待汇总”的，授权许可和事实参数分两组，状态变“已导出待发”（加 `--webpage-json` 同步产出给 `customer-confirmation-webpage --mode customer` 的预填草稿 JSON）；用户确认发出后 `cus-sent --batch <批次>`。客户回复用 `apply_answers.py --answers <回复的 CSV / 网页反馈 JSON>` 读回：答了的字段变“已答待核验”，没答的留着，不会重开已发的批次；核验后 `collect` 关闭。
+6. **可疑数值要挡住写作**：发现某个数值要客户确认（例如扭矩表 DN65 的 292），用 `governance_state.py flag-value --out <运行目录> --vault <知识库> --page <页名> --section <小板块> --row <行关键词> --column <列名> --value <原印值> --question "<问题>"` 登记，**不要手改台账**。它生成一个 CUS 问题和一条写作护栏：`kb_lookup.py pack`（含 `--full-tables`）把这一格换成“待客户核实，不可引用”并列进口径避坑，`check_article.py` 见到这个数值就报警。客户确认后按答复更新整理页，再 `collect` 关闭这个 CUS，护栏随之解除。
+7. 自动关闭的事项抽 10% 交给独立子 Agent 复核；抽检错一条，这一类重做。
+8. 台账只由脚本生成：人和 Agent 都不手改三本台账。
 
 ## 外部调研（只用知识库，不要运行目录和初筛包）
 

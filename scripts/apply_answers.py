@@ -29,6 +29,8 @@ from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, lo
 
 KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
 DROP = {"不用", "不可以", "删除", "不同意", "否", "drop", "no", "n"}
+JSON_KEEP_DECISIONS = {"keep", "yes", "whole", "approve", "allow"}
+JSON_DROP_DECISIONS = {"drop", "no", "exclude", "reject"}
 ANSWER_COLUMN = "回答（保留 / 不用 / 文字）"
 QUESTION_COLUMN = "要确认的问题"
 SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -133,12 +135,54 @@ def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, lis
     return applied, notes, unclear
 
 
+def read_feedback_json(path: Path) -> list[dict[str, Any]]:
+    """Convert customer-feedback.v1 JSON (exported by customer-confirmation-webpage) into answer rows."""
+    payload = load_json(path)
+    if not isinstance(payload, dict) or not isinstance(payload.get("answers"), list):
+        raise SystemExit(f"不是有效的客户反馈 JSON（缺少 answers 列表）：{path}")
+    reviewer = payload.get("reviewer") if isinstance(payload.get("reviewer"), dict) else {}
+    reviewer_tag = " / ".join(v for v in (reviewer.get("name"), reviewer.get("team")) if isinstance(v, str) and v.strip())
+    rows: list[dict[str, Any]] = []
+    for entry in payload["answers"]:
+        if not isinstance(entry, dict):
+            continue
+        decision = (entry.get("decision") or "").strip()
+        answer_text = (entry.get("answerText") or "").strip()
+        if not decision and not answer_text:
+            continue
+        values = entry.get("values") if isinstance(entry.get("values"), dict) else {}
+        has_values = any(isinstance(v, str) and v.strip() for v in values.values())
+        applicability = (entry.get("applicability") or "").strip()
+        note = (entry.get("note") or "").strip()
+        low = decision.casefold()
+        # Only a clean whole-item yes/no without extra scope or correction values auto-applies as binary 保留/不用.
+        if low in JSON_KEEP_DECISIONS and not has_values and not applicability:
+            answer = "保留"
+        elif low in JSON_DROP_DECISIONS and not has_values and not applicability:
+            answer = "不用"
+        else:
+            answer = answer_text or decision
+        target_ids = [entry.get("answerId") or entry.get("id") or ""]
+        linked = entry.get("linkedAnswers") or []
+        if linked and low != "exception":
+            target_ids.extend(l.get("answerId") or "" for l in linked if isinstance(l, dict))
+        extra_note = "；".join(p for p in (
+            f"适用范围：{applicability}" if applicability else "",
+            f"备注：{note}" if note else "",
+            f"填写人：{reviewer_tag}" if reviewer_tag else "",
+        ) if p)
+        for tid in target_ids:
+            if tid:
+                rows.append({"编号": tid, ANSWER_COLUMN: answer, "_json_note": extra_note, "_json_raw": answer_text,
+                             "_from_json": True, "_force_note": low in {"partial", "pending", "exception", "revise"} or has_values or bool(applicability)})
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Apply answers from 客户确认表.csv to kb-config.json.")
+    parser = argparse.ArgumentParser(description="Apply answers from 客户确认表.csv, .xlsx, or customer-feedback.v1 .json to kb-config.json.")
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--config", required=True, help="kb-config.json to update")
-    parser.add_argument("--answers", help="Filled 客户确认表.csv of the build (default), or the screening "
-                        "package's 客户确认表.xlsx")
+    parser.add_argument("--answers", help="Filled 客户确认表.csv (default), customer-feedback.v1 .json, or screening 客户确认表.xlsx")
     parser.add_argument("--release-awaiting-overrides", action="store_true",
                         help="For an explicitly confirmed build CSV, remove its obsolete awaiting-client route overrides")
     parser.add_argument("--previous-config", help="Optional config backup from before these CUS answers, to recover exact folder membership after resolution")
@@ -189,8 +233,11 @@ def main() -> int:
                            if key.startswith("media:") else [])
                 if members:
                     records[sub_id] = {"id": sub_id, "item_id": ",".join(members), "location": ""}
-        with answers_path.open(encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
+        if answers_path.suffix.casefold() == ".json":
+            rows = read_feedback_json(answers_path)
+        else:
+            with answers_path.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
         applied, notes, unclear = [], [], []
     for row in rows:
         answer = (row.get(ANSWER_COLUMN) or row.get("回答") or "").strip()
@@ -198,14 +245,20 @@ def main() -> int:
         if not answer or not record:
             continue
         decision = normalized(answer)
-        if not record.get("item_id") or record.get("answer_type") == "text":
-            # Which fabric, which year: a person decides, the build does not.
+        if not record.get("item_id") or record.get("answer_type") == "text" or row.get("_force_note"):
+            # Which fabric, which year, or partial scope from webpage JSON: a person decides, the build does not.
             notes.append({"id": record["id"], "question": record["question"], "answer": answer,
+                          **({"note": row["_json_note"]} if row.get("_json_note") else {}),
+                          **({"from": "客户确认网页 JSON"} if row.get("_from_json") else {}),
                           "at": datetime.now().isoformat(timespec="seconds")})
             continue
         if decision is None:
             unclear.append({"id": record["id"], "answer": answer})
             continue
+        if row.get("_json_note"):
+            notes.append({"id": record["id"], "question": record["question"], "answer": answer,
+                          "note": row["_json_note"], "from": "客户确认网页 JSON",
+                          "at": datetime.now().isoformat(timespec="seconds")})
         if args.release_awaiting_overrides:
             confirmations = config.setdefault("client_answer_confirmations", {})
             for item_id in [i for i, value in confirmations.items() if value.get("cus_id") == record["id"]]:
@@ -225,6 +278,10 @@ def main() -> int:
                     del config["ask_client"][item_id]
         applied.append({"id": record["id"], "decision": decision})
 
+    # Answered questions wait for a person to verify (已答待核验); unanswered ones stay with their batch.
+    if records:
+        from governance_state import mark_answered
+        mark_answered(build, [r["id"] for r in applied] + [n["id"] for n in notes])
     # Read again on every build: only a real change touches the config, and a remark is kept once.
     changed = applied and config != load_json(config_path)
     if changed:
