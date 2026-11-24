@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date, datetime
@@ -349,14 +350,458 @@ def coverage(state: dict[str, Any], run: Path) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Write the knowledge base overview; --monthly writes the monthly check.")
-    parser.add_argument("--out", required=True, help="Run directory")
+    parser.add_argument("--out", help="Run directory (required unless running standalone --vault --monthly or --vault-root)")
     parser.add_argument("--vault", help="Published project folder")
-    parser.add_argument("--monthly", action="store_true")
+    parser.add_argument("--vault-root", help="Obsidian root folder containing multiple project vaults (batch monthly audit)")
+    parser.add_argument("--monthly", action="store_true", help="Write dated monthly health report")
+    parser.add_argument("--month", help="Target month YYYY-MM for monthly audit (default: current month)")
+    parser.add_argument("--json", action="store_true", help="Print full JSON result")
     return parser.parse_args()
+
+
+def resolve_month(raw: str | None) -> str:
+    month = raw or date.today().strftime("%Y-%m")
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        raise SystemExit(f"--month 格式应为 YYYY-MM，收到：{month}")
+    return month
+
+
+def parse_project_info(vault: Path) -> dict[str, str]:
+    info_path = vault / "01_工作台/10_项目基础信息.md"
+    info: dict[str, str] = {}
+    if not info_path.is_file():
+        return info
+    for line in info_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"^\s*-\s*([^：:]+)[：:]\s*(.+?)\s*$", line)
+        if m:
+            info[m.group(1).strip()] = m.group(2).strip()
+    return info
+
+
+def gather_ledgers_vault(vault: Path) -> tuple[dict[str, str], dict[str, dict[str, int]]]:
+    names, ledger_counts = {}, {}
+    for kind, stem in (("CUS", "待客户补充事项"), ("MAT", "源资料处理台账"), ("ANM", "源文与事实异常台账")):
+        side = any(vault.glob(f"05_数据与审核/30_异常与待决定/*/02_知识库构建_{stem}.md"))
+        name = f"02_知识库构建_{stem}.md" if side else f"01_{stem}.md"
+        names[kind] = (Path(LEDGERS[kind][0]).parent / name).as_posix()
+        ledger = vault / names[kind]
+        if ledger.is_file():
+            header, rows, _ = parse_ledger(ledger.read_text(encoding="utf-8", errors="replace"))
+            stage = header.index("当前阶段") if "当前阶段" in header else None
+            closed = sum(stage is not None and row[stage] in CLOSED_STAGES - {SOLVED_STAGE} for row in rows.values())
+            solved = sum(stage is not None and row[stage] == SOLVED_STAGE for row in rows.values())
+            ledger_counts[kind] = {"pending": len(rows) - closed - solved, "resolved": closed, "system_solved": solved}
+        else:
+            ledger_counts[kind] = {"pending": 0, "resolved": 0, "system_solved": 0}
+    return names, ledger_counts
+
+
+def gather_articles(vault: Path, month: str) -> dict[str, Any]:
+    ledger = vault / "04_文章任务/00_文章台账.md"
+    all_rows: list[dict[str, Any]] = []
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.lstrip().startswith("|"):
+                continue
+            cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+            if len(cells) < 7 or cells[0] == "任务编号" or set(cells[0]) <= set("-: "):
+                continue
+            task_key, when, title, skill, status, cov, link = cells[:7]
+            fact_m = re.search(r"硬事实\s*\d+/\d+[（(](\d+(?:\.\d+)?)%[）)]", cov)
+            if not fact_m and cov not in {"", "-"}:
+                fact_m = re.search(r"(\d+(?:\.\d+)?)%", cov)
+            word_m = re.search(r"正文\s*\d+/\d+词[（(](\d+(?:\.\d+)?)%[）)]", cov)
+            trace_file = vault / "04_文章任务/10_写作记录" / task_key / "引用追溯.md"
+            has_trace = trace_file.is_file() or (cov not in {"", "-"})
+            all_rows.append({
+                "task_key": task_key, "date": when, "title": title, "writing_skill": skill,
+                "status": status, "coverage": cov, "link": link,
+                "fact_rate": float(fact_m.group(1)) if fact_m else None,
+                "word_rate": float(word_m.group(1)) if word_m else None,
+                "has_trace": has_trace,
+            })
+    month_rows = [r for r in all_rows if r["date"].startswith(month)]
+    fact_rates = [r["fact_rate"] for r in month_rows if r["fact_rate"] is not None]
+    word_rates = [r["word_rate"] for r in month_rows if r["word_rate"] is not None]
+    return {
+        "total": len(all_rows),
+        "month_count": len(month_rows),
+        "month_rows": month_rows,
+        "avg_fact_rate": round(sum(fact_rates) / len(fact_rates), 1) if fact_rates else None,
+        "avg_word_rate": round(sum(word_rates) / len(word_rates), 1) if word_rates else None,
+        "missing_trace": sum(1 for r in month_rows if not r["has_trace"]),
+    }
+
+
+def gather_website_vault(vault: Path) -> tuple[int, str | None, bool]:
+    dates: list[str] = []
+    units_dir = vault / "02_源资料/30_官网快照/units"
+    pages_json = vault / "02_源资料/30_官网快照/pages.json"
+    count = 0
+    if pages_json.is_file():
+        pages = read(pages_json, [])
+        if isinstance(pages, list):
+            count = len(pages)
+            dates.extend(str(p["fetched_at"])[:10] for p in pages if isinstance(p, dict) and p.get("fetched_at"))
+    if not count and units_dir.is_dir():
+        unit_files = sorted(units_dir.glob("*.json"))
+        count = len(unit_files)
+        for uf in unit_files:
+            data = read(uf, {})
+            if isinstance(data, dict) and data.get("fetched_at"):
+                dates.append(str(data["fetched_at"])[:10])
+    if not count:
+        web_md = vault / "02_源资料/10_净化原文/官网"
+        if web_md.is_dir():
+            md_files = sorted(web_md.rglob("*.md"))
+            count = len(md_files)
+            for mf in md_files:
+                fields = parse_frontmatter(mf.read_text(encoding="utf-8", errors="replace"))
+                if fields.get("fetched_at"):
+                    dates.append(str(fields["fetched_at"])[:10])
+    valid_dates = [d for d in dates if re.match(r"^\d{4}-\d{2}-\d{2}$", d)]
+    oldest = min(valid_dates) if valid_dates else None
+    stale = bool(oldest) and (date.today() - date.fromisoformat(oldest)).days > WEBSITE_STALE_DAYS
+    return count, oldest, stale
+
+
+def gather_coverage_vault(vault: Path) -> dict[str, Any]:
+    cov_path = vault / COVERAGE
+    unhandled = 0
+    section_summary = ""
+    uncited_docs = 0
+    if cov_path.is_file():
+        text = cov_path.read_text(encoding="utf-8", errors="replace")
+        m_sec = re.search(r"(?m)^小板块状态：(.+?)。?$", text)
+        if m_sec:
+            section_summary = m_sec.group(1).strip()
+        m_led = re.search(r"可用原文\s*\d+\s*段要在整理页里有去处：([^\n。]+)", text)
+        if m_led:
+            m_un = re.search(r"未处理\s*(\d+)", m_led.group(1))
+            if m_un:
+                unhandled = int(m_un.group(1))
+        for m_unc in re.finditer(r"有效但没被整理页引用：(\d+)\s*份", text):
+            uncited_docs += int(m_unc.group(1))
+    return {"unhandled_segments": unhandled, "section_summary": section_summary, "uncited_docs": uncited_docs}
+
+
+def gather_vault(vault: Path, month: str, token_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Gather monthly health metrics directly from a published vault (no --out run folder needed)."""
+    from kb_relink import check_links
+    token = token_info if token_info is not None else probe()
+    info = parse_project_info(vault)
+    receipt = vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json"
+    knowledge_root = vault / "03_正式知识/10_客户知识"
+    source_root = vault / "02_源资料/10_净化原文"
+    knowledge_pages = len(list(knowledge_root.rglob("*.md"))) if knowledge_root.is_dir() else 0
+    source_docs = len(list(source_root.rglob("*.md"))) if source_root.is_dir() else 0
+    ledger_names, ledger_counts = gather_ledgers_vault(vault)
+    website_pages, website_oldest, website_stale = gather_website_vault(vault)
+    index_path = vault / "02_源资料/knowledge-index.sqlite"
+    index_exists = index_path.is_file()
+    index_updated = datetime.fromtimestamp(index_path.stat().st_mtime).strftime("%Y-%m-%d") if index_exists else None
+    return {
+        "vault": str(vault),
+        "vault_name": vault.name,
+        "month": month,
+        "info": info,
+        "last_publish": read(receipt, {}).get("published_at") if receipt.is_file() else None,
+        "knowledge_pages": knowledge_pages,
+        "has_catalog": (vault / "01_工作台/写作目录.md").is_file(),
+        "source_docs": source_docs,
+        "ledger_names": ledger_names,
+        "ledger_counts": ledger_counts,
+        "coverage": gather_coverage_vault(vault),
+        "articles": gather_articles(vault, month),
+        "external": external_summary(vault),
+        "website_pages": website_pages,
+        "website_oldest": website_oldest,
+        "website_stale": website_stale,
+        "links": check_links(vault),
+        "index_exists": index_exists,
+        "index_updated": index_updated,
+        "token": token["expiry"]["message"] if token["ok"] else token["message"],
+        "token_days": token["expiry"].get("days_remaining"),
+    }
+
+
+def classify_health(vstate: dict[str, Any]) -> tuple[str, list[str]]:
+    red: list[str] = []
+    yellow: list[str] = []
+    unhandled = vstate["coverage"]["unhandled_segments"]
+    if unhandled:
+        red.append(f"整理未处理段 {unhandled}")
+    links = vstate["links"]
+    if links["broken"] or links["wiki_broken"]:
+        red.append(f"断链（原件 {links['broken']} / Wiki {links['wiki_broken']}）")
+    if not vstate["index_exists"]:
+        red.append("缺少检索索引")
+    if vstate["token_days"] is not None and vstate["token_days"] <= 7:
+        red.append(f"MinerU Token 剩 {vstate['token_days']} 天")
+
+    lc = vstate["ledger_counts"]
+    pending_parts = [f"{k} {lc[k]['pending']}" for k in ("CUS", "MAT", "ANM") if lc.get(k, {}).get("pending")]
+    if pending_parts:
+        yellow.append("待处理 " + "/".join(pending_parts))
+    if vstate["website_stale"]:
+        yellow.append(f"官网超 {WEBSITE_STALE_DAYS} 天（{vstate['website_oldest']}）")
+    ext = vstate.get("external") or {}
+    if ext.get("to_spot_check") or ext.get("overdue"):
+        yellow.append(f"外部知识 待抽检 {len(ext.get('to_spot_check', []))} / 过期 {len(ext.get('overdue', []))}")
+    if vstate["articles"]["missing_trace"]:
+        yellow.append(f"本月 {vstate['articles']['missing_trace']} 篇文章缺引用追溯")
+    if vstate["coverage"]["uncited_docs"]:
+        yellow.append(f"未引用有效原文 {vstate['coverage']['uncited_docs']} 份")
+
+    if red:
+        return "🔴 需处理", red + yellow
+    if yellow:
+        return "🟡 待关注", yellow
+    return "🟢 正常", ["无异常"]
+
+
+def render_vault_monthly(vstate: dict[str, Any]) -> str:
+    level, reasons = classify_health(vstate)
+    info = vstate["info"]
+    title_name = info.get("项目名称") or vstate["vault_name"]
+    pid = info.get("项目ID", "")
+    owner = info.get("内容运营负责人", "未填写")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        f"# 知识库月度体检 {vstate['month']}",
+        "",
+        f"- 项目：{f'{pid} · ' if pid else ''}{title_name}（`{vstate['vault_name']}`）",
+        f"- 负责人：{owner}；检查时间：{now}；最近发布：{vstate['last_publish'] or '未记录'}",
+        f"- 体检结论：**{level}**（{'；'.join(reasons)}）",
+        f"- 基础盘：整理页 {vstate['knowledge_pages']} 页、来源原文 {vstate['source_docs']} 份、"
+        f"写作目录 {'正常' if vstate['has_catalog'] else '缺失'}",
+        "",
+        "## 一、本月写作与引用覆盖",
+        "",
+    ]
+    art = vstate["articles"]
+    avg_fact = f"{art['avg_fact_rate']}%" if art["avg_fact_rate"] is not None else "N/A"
+    avg_word = f"{art['avg_word_rate']}%" if art["avg_word_rate"] is not None else "N/A"
+    lines.append(f"- 累计文章 {art['total']} 篇；**本月（{vstate['month']}）产出 {art['month_count']} 篇**"
+                 f"；本月平均硬事实引用覆盖率：**{avg_fact}**（正文引用占比均值：{avg_word}）；缺引用追溯：{art['missing_trace']} 篇。")
+    lines.append("- 说明：引用覆盖率仅作知识库支撑度观察，不设及格线，不直接代表文章质量。")
+    if art["month_rows"]:
+        lines.extend(["", "| 日期 | 标题 | 写作 Skill | 状态 | 引用覆盖率 | 追溯 |",
+                      "| --- | --- | --- | --- | --- | --- |"])
+        for row in art["month_rows"]:
+            trace_ok = "有" if row["has_trace"] else "⚠ 缺"
+            lines.append(f"| {row['date']} | {row['title']} | {row['writing_skill']} | {row['status']} | {row['coverage']} | {trace_ok} |")
+    lines.extend(["", "## 二、待处理台账（CUS / MAT / ANM）", ""])
+    vault_path = Path(vstate["vault"])
+    lc, ln = vstate["ledger_counts"], vstate["ledger_names"]
+    for kind, label in (("CUS", "待客户确认"), ("MAT", "资料要处理"), ("ANM", "风险与冲突")):
+        c = lc[kind]
+        tail = (f" → [[{ln[kind].removesuffix('.md')}|{Path(ln[kind]).stem.removeprefix('01_')}]]"
+                if (vault_path / ln[kind]).is_file() else "（暂未建表）")
+        lines.append(f"- {label}（{kind}）：待处理 **{c['pending']}** 项；历史解除待关闭 {c['system_solved']} 项；已关闭 {c['resolved']} 项{tail}")
+
+    cov = vstate["coverage"]
+    lines.extend(["", "## 三、整理覆盖与缺口", ""])
+    if cov["section_summary"]:
+        lines.append(f"- 小板块状态：{cov['section_summary']}")
+    lines.append(f"- 整理覆盖账本未处理段：**{cov['unhandled_segments']}** 段；有效但未被整理页引用的原文：**{cov['uncited_docs']}** 份。")
+    if (vault_path / COVERAGE).is_file():
+        lines.append("- 详情见 [[05_数据与审核/20_知识库覆盖与缺口/01_知识库覆盖与缺口|知识库覆盖与缺口]]。")
+
+    ext = vstate.get("external") or {"pages": 0, "to_spot_check": [], "overdue": [], "todo": 0}
+    lines.extend(["", "## 四、外部公共知识（待抽检与复查）", "",
+                  f"- 共 {ext['pages']} 页：待抽检 **{len(ext['to_spot_check'])}** 页、已过复查日期 **{len(ext['overdue'])}** 页、待调研缺口 **{ext['todo']}** 个。"])
+    if ext["to_spot_check"]:
+        lines.append("- 待抽检：" + "、".join(f"[[{Path(p['page']).stem}|{p['title']}]]" for p in ext["to_spot_check"]))
+    if ext["overdue"]:
+        lines.append("- 已过复查日期：" + "、".join(f"[[{Path(p['page']).stem}|{p['title']}]]（{p['review_due']}）" for p in ext["overdue"]))
+
+    links = vstate["links"]
+    web_note = (f"{vstate['website_pages']} 页，最早抓取 {vstate['website_oldest']}"
+                + (f"（⚠ 已超 {WEBSITE_STALE_DAYS} 天，建议人工确认后重抓）" if vstate["website_stale"] else "（新鲜）")
+                if vstate["website_pages"] else "暂无官网快照")
+    idx_note = f"正常（更新于 {vstate['index_updated']}）" if vstate["index_exists"] else "⚠ 缺失（请运行 `kb_index.py` 重建）"
+    lines.extend([
+        "",
+        "## 五、官网新鲜度与链接/检索健康",
+        "",
+        f"- 官网快照：{web_note}",
+        f"- 链接检查：原件链接 {links['file_links']} 条（断链 **{links['broken']}**），Wiki 链接 {links['wiki_links']} 条（断链 **{links['wiki_broken']}**）",
+        f"- 检索索引（`knowledge-index.sqlite`）：{idx_note}",
+        f"- 本机 MinerU Token：{vstate['token']}",
+    ])
+    if links["examples"]:
+        lines.append("- 断链样例（最多列 5 条）：")
+        lines.extend(f"  - `{ex}`" for ex in links["examples"][:5])
+
+    actions: list[str] = []
+    if cov["unhandled_segments"]:
+        actions.append(f"- 清理整理覆盖账本里剩余的 {cov['unhandled_segments']} 段“未处理”原文")
+    if links["broken"] or links["wiki_broken"]:
+        actions.append("- 检查断链：若知识库刚跨电脑拷贝，运行 `kb_relink.py --vault <知识库> --package <初筛包>` 修复")
+    if not vstate["index_exists"]:
+        actions.append("- 运行 `python scripts/kb_index.py --vault <知识库>` 重建检索索引")
+    if vstate["website_stale"]:
+        actions.append(f"- 官网已超 {WEBSITE_STALE_DAYS} 天未更新，确认需要时用 `fetch_website.py` 重读（变动页才会更新）")
+    if ext["to_spot_check"] or ext["overdue"]:
+        actions.append("- 抽检外部公共知识的“待抽检”页、重查“已过复查日期”页，完成后用 `research.py mark` 标记")
+    if any(lc[k]["pending"] for k in ("CUS", "MAT", "ANM")):
+        actions.append("- 跟进待处理 CUS/MAT/ANM；收到客户回复后用 `apply_answers.py` 读回并 `--from guard` 更新")
+    if art["missing_trace"]:
+        actions.append("- 补全本月缺少引用追溯的文章核对记录（`check_article.py --citations`）")
+    if not actions:
+        actions.append("- 本月无紧急待办；如有客户新资料，用 `prepare-seo-knowledge-materials` 初筛后增量重跑即可。")
+    lines.extend(["", "## 六、本月建议动作", "", *actions, ""])
+    return "\n".join(lines)
+
+
+def is_kb_vault(path: Path) -> bool:
+    if not path.is_dir() or path.name.startswith("."):
+        return False
+    if not (path / "01_工作台").is_dir():
+        return False
+    markers = (
+        path / "01_工作台/00_知识库总览.md",
+        path / "01_工作台/写作目录.md",
+        path / "05_数据与审核/70_构建状态",
+        path / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json",
+    )
+    return any(m.exists() for m in markers)
+
+
+def run_batch_monthly(vault_root: Path, month: str) -> dict[str, Any]:
+    token_info = probe()
+    results: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    errors: list[dict[str, str]] = []
+    for child in sorted(vault_root.iterdir(), key=lambda p: p.name.casefold()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if not is_kb_vault(child):
+            skipped.append(child.name)
+            continue
+        try:
+            vstate = gather_vault(child, month, token_info=token_info)
+            level, reasons = classify_health(vstate)
+            report_path = child / f"05_数据与审核/40_月度与交接/知识库体检_{month}.md"
+            write_text(report_path, render_vault_monthly(vstate))
+            results.append({
+                "vault_name": child.name,
+                "project_name": vstate["info"].get("项目名称") or child.name,
+                "owner": vstate["info"].get("内容运营负责人", "-"),
+                "level": level,
+                "reasons": reasons,
+                "report": report_path.relative_to(vault_root).as_posix(),
+                "articles_month": vstate["articles"]["month_count"],
+                "avg_fact_rate": vstate["articles"]["avg_fact_rate"],
+                "pending": {k: vstate["ledger_counts"][k]["pending"] for k in ("CUS", "MAT", "ANM")},
+                "unhandled_segments": vstate["coverage"]["unhandled_segments"],
+                "external_spot_check": len((vstate.get("external") or {}).get("to_spot_check", [])),
+                "external_overdue": len((vstate.get("external") or {}).get("overdue", [])),
+                "website_oldest": vstate["website_oldest"],
+                "website_stale": vstate["website_stale"],
+                "broken_links": vstate["links"]["broken"],
+                "wiki_broken": vstate["links"]["wiki_broken"],
+                "index_exists": vstate["index_exists"],
+            })
+        except Exception as exc:  # One bad vault never blocks the rest of the root scan.
+            errors.append({"vault": child.name, "error": f"{type(exc).__name__}: {exc}"})
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    token_msg = token_info["expiry"]["message"] if token_info["ok"] else token_info["message"]
+    red_n = sum(1 for r in results if r["level"].startswith("🔴"))
+    yellow_n = sum(1 for r in results if r["level"].startswith("🟡"))
+    green_n = sum(1 for r in results if r["level"].startswith("🟢"))
+    lines = [
+        f"# 全库月度体检总览 {month}",
+        "",
+        f"- 扫描根目录：`{vault_root}`",
+        f"- 生成时间：{now}；检查项目：{len(results)} 个（🔴 需处理 {red_n}、🟡 待关注 {yellow_n}、🟢 正常 {green_n}）；"
+        f"跳过非知识库目录：{len(skipped)} 个；异常：{len(errors)} 个",
+        f"- 本机 MinerU Token：{token_msg}",
+        "- 官网超期策略：只读检查与提醒，不自动抓网。",
+        "",
+        "## 一、全项目体检总表",
+        "",
+        "| 项目 | 本月文章 / 均引用率 | 待处理 (CUS/MAT/ANM) | 整理未处理 | 外部知识 (抽检/过期) | 官网状态 | 断链 (原件/Wiki) | 结论与关注重点 |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- |",
+    ]
+    for r in results:
+        avg_str = f"{r['avg_fact_rate']}%" if r["avg_fact_rate"] is not None else "N/A"
+        art_col = f"{r['articles_month']} 篇 / {avg_str}"
+        pend_col = f"{r['pending']['CUS']}/{r['pending']['MAT']}/{r['pending']['ANM']}"
+        ext_col = f"{r['external_spot_check']}/{r['external_overdue']}"
+        if r["website_oldest"]:
+            web_col = f"{'⚠ ' if r['website_stale'] else ''}{r['website_oldest']}"
+        else:
+            web_col = "无"
+        link_col = f"{r['broken_links']}/{r['wiki_broken']}"
+        report_link = f"[[{r['report'].removesuffix('.md')}|{r['vault_name']}]]"
+        note = r["level"] if r["level"].startswith("🟢") else f"{r['level']}：{'；'.join(r['reasons'])}"
+        lines.append(f"| {report_link} | {art_col} | {pend_col} | {r['unhandled_segments']} | {ext_col} | {web_col} | {link_col} | {note} |")
+
+    need_action = [r for r in results if not r["level"].startswith("🟢")]
+    lines.extend(["", "## 二、本月需要人工处理的重点", ""])
+    if need_action:
+        for r in need_action:
+            lines.append(f"- **{r['vault_name']}**（负责人：{r['owner']}，{r['level']}）：{'；'.join(r['reasons'])} → [[{r['report'].removesuffix('.md')}|查看体检详情]]")
+    else:
+        lines.append("- 本月所有知识库均正常，无紧急待办。")
+
+    if skipped or errors:
+        lines.extend(["", "## 三、跳过与异常目录", ""])
+        if skipped:
+            lines.append("- 已跳过（非本 Skill 知识库目录）：" + "、".join(f"`{s}`" for s in skipped))
+        for err in errors:
+            lines.append(f"- ❌ `{err['vault']}` 检查失败：{err['error']}")
+    lines.append("")
+    summary_path = vault_root / f"月度体检总览_{month}.md"
+    write_text(summary_path, "\n".join(lines))
+    return {
+        "month": month,
+        "vault_root": str(vault_root),
+        "summary_report": str(summary_path),
+        "checked": len(results),
+        "red": red_n,
+        "yellow": yellow_n,
+        "green": green_n,
+        "skipped": skipped,
+        "errors": errors,
+        "token": token_msg,
+        "projects": results,
+    }
 
 
 def main() -> int:
     args = parse_args()
+    month = resolve_month(args.month)
+    if args.vault_root:
+        vault_root = Path(args.vault_root).resolve()
+        if not vault_root.is_dir():
+            raise SystemExit(f"找不到知识库根目录：{vault_root}")
+        batch = run_batch_monthly(vault_root, month)
+        print(json.dumps(batch, ensure_ascii=False, indent=2))
+        return 1 if batch["errors"] else 0
+    if not args.out:
+        if not args.vault:
+            raise SystemExit("请提供 --vault-root（批量月度体检）、--vault --monthly（单库月度体检），或 --out（建库总览）。")
+        vault = Path(args.vault).resolve()
+        if not vault.is_dir():
+            raise SystemExit(f"找不到知识库目录：{vault}")
+        vstate = gather_vault(vault, month)
+        level, reasons = classify_health(vstate)
+        report_path = vault / f"05_数据与审核/40_月度与交接/知识库体检_{month}.md"
+        write_text(report_path, render_vault_monthly(vstate))
+        out = {
+            "vault": str(vault), "month": month, "level": level, "reasons": reasons,
+            "report": str(report_path), "articles": vstate["articles"],
+            "ledger_counts": vstate["ledger_counts"], "coverage": vstate["coverage"],
+            "links": {k: vstate["links"][k] for k in ("file_links", "broken", "wiki_links", "wiki_broken")},
+            "website_oldest": vstate["website_oldest"], "website_stale": vstate["website_stale"],
+            "token": vstate["token"],
+        }
+        print(json.dumps(vstate if args.json else out, ensure_ascii=False, indent=2))
+        return 0
     if not run_lock(Path(args.out).resolve(), "kb_status.py"):
         return 3
     run = Path(args.out).resolve()
@@ -385,15 +830,8 @@ def main() -> int:
         if receipt:
             write_json(receipt_path, receipt)
         if args.monthly:
-            month = date.today().strftime("%Y-%m")
-            report = [f"# 知识库月度体检 {month}", "", *page[3:], "", "## 本月要做", "",
-                      "- 有新资料：用 prepare-seo-knowledge-materials 生成小初筛包，加进 --package 重跑",
-                      "- 客户回复了确认表：apply_answers.py 读回，再重跑和发布",
-                      "- 官网超过一个月没读：fetch_website.py 重读，变了的页才会更新",
-                      "- 抽查：让独立 Agent 通读本月新增或变化的文档和整理页",
-                      "- 外部公共知识：抽检“待抽检”的页、重查过了复查日期的页，结果用 research.py mark 记下；"
-                      "缺口可以运行 research.py plan --from-gaps 再补一轮"]
-            write_text(vault / f"05_数据与审核/40_月度与交接/知识库体检_{month}.md", "\n".join(report) + "\n")
+            vstate = gather_vault(vault, month)
+            write_text(vault / f"05_数据与审核/40_月度与交接/知识库体检_{month}.md", render_vault_monthly(vstate))
     summary = {key: state[key] for key in ("verified", "ledgers", "terms_to_review", "cells", "t3", "token", "last_publish")}
     print(json.dumps({**summary, "knowledge_pages": len(state["knowledge"]), "source_docs": len(state["published"])}, ensure_ascii=False, indent=2))
     return 0

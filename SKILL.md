@@ -213,7 +213,10 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
   - 只改了整理页、别名、账本或速查卡时，加 `--from curate`（直接跳过提取和筛查，只重跑整理和校验）；
   - 带 `--vault` 重跑时默认沿用上次发布时的 `--images`、`--tiers` 和 `--max-image-mb`。
 - **官网：** 每月重读一次，没变的页不会更新。
-- **体检：** 运行 `kb_status.py --out <运行目录> --vault <项目目录> --monthly`，更新总览，并写本月体检报告。外部公共知识看 `research.py status`：抽检“待抽检”的页，重查过了复查日期的页；新出现的缺口可以 `research.py plan --from-gaps` 再补一轮。
+- **体检（单库 / 全库批量）：**
+  - 单库独立体检（不需要临时运行目录）：`kb_status.py --vault <项目目录> --monthly`；
+  - 全库批量体检（扫描 Obsidian 根目录下全部知识库）：`kb_status.py --vault-root <Obsidian根目录>`，逐项目写 `05_数据与审核/40_月度与交接/知识库体检_YYYY-MM.md` 并在根目录生成 `月度体检总览_YYYY-MM.md`（跳过非知识库目录，单库异常不阻塞其余项目；汇总本月文章与平均引用覆盖率、CUS/MAT/ANM、整理未处理段、外部知识待抽检/过期、官网超 31 天提醒、断链、索引与 MinerU Token；默认只读检查，不自动抓官网）；
+  - 建库流水线内仍可用 `kb_status.py --out <运行目录> --vault <项目目录> --monthly` 同步更新总览与体检报告。外部公共知识抽检/复查后用 `research.py mark` 标记，新缺口可 `research.py plan --from-gaps` 补一轮。
 - **导航与素材记录维护：** `refresh_navigation.py --out <运行目录> --vault <项目目录>` 只预览要更新的总览、台账、素材索引和清单；加 `--apply` 才写入，旧版自动备份。它明确链接到当前库内路径，不重新提取或发布；有人改过的非台账生成页拒绝覆盖。旧版本误丢失已解决台账历史时，可加 `--recover-ledger-history` 从归档恢复为已解决历史，不重新向客户提问。
   - 链接以实际包含 `.obsidian` 的库根为准；多个项目放在同一库时，链接包含项目文件夹。`--all-links` 检查和修复所有本 Skill 发布的 Markdown 页，不改人工补充页。台账再次检出的问题不能沿用旧的“系统已解决”状态；人工关闭状态和处理记录仍保留。待判断词与 ANM 词数统一按大小写不敏感去重，并注明来源范围。
 - **只增不删：** 发布过的来源文档消失时，原位置留“已失效”记录；旧版本自动归档；产品图一直保留。
