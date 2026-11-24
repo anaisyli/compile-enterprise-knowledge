@@ -35,6 +35,15 @@ from kb_common import write_text
 ZONES = (("三、口径避坑", "需核实"), ("原文里搜到的", "未整理"))
 RULES = Path(__file__).resolve().parents[1] / "assets" / "check-rules.json"
 KINDS = ("units", "standards", "certificates", "ratings", "patterns", "codes")
+LEARNED_FILE = Path("05_数据与审核/70_构建状态/check-learned.json")
+COMMON_SERIES_STOPWORDS = {
+    "LED", "LCD", "OLED", "IPS", "FHD", "UHD", "QHD", "USB", "HDMI", "VGA", "DVI", "WIFI", "LAN", "WAN",
+    "CPU", "GPU", "RAM", "ROM", "SSD", "HDD", "DDR", "NFC", "POS", "OEM", "ODM", "NEW", "PRO", "MAX",
+    "MIN", "MINI", "STD", "FAQ", "PDF", "PPT", "DOC", "DOCX", "XLS", "XLSX", "URL", "SEO", "B2B", "B2C", "RGB",
+    "CMYK", "AND", "FOR", "THE", "WITH", "ALL", "ONE", "TWO", "USE", "OUT", "END", "TOP", "LOW", "HIGH",
+    "DIY", "VIP", "APP", "API", "SDK", "IOS", "ETC", "USA", "EUR", "CHN", "RMB", "USD", "MOQ", "FOB",
+    "CIF", "EXW", "DDP", "SKU", "ERP", "CRM", "SOP", "KPI", "ROI", "GEO", "CTA", "RFQ", "ADA", "CNC",
+}
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 # Words that follow numbers in prose and are not units, when collecting a project's own units.
 NOT_UNITS = {"to", "and", "or", "of", "for", "the", "with", "at", "by", "x", "a", "an", "is", "are", "from", "per", "page",
@@ -107,10 +116,81 @@ def load_rules(config: dict[str, Any] | None = None, vault: Path | None = None) 
     rules = {kind: list(dict.fromkeys([*table["common"].get(kind, []), *(i for group in industries for i in group.get(kind, [])),
                                        *own.get(kind, [])])) for kind in KINDS}
     if vault:
-        units, codes = harvest(vault, rules, config, body=body)
-        rules["units"] = list(dict.fromkeys([*rules["units"], *units]))
-        rules["codes"] = list(dict.fromkeys([*rules["codes"], *codes]))
+        learned = sync_learned_rules(vault, rules, config, body=body)
+        rules["units"] = list(dict.fromkeys([*rules["units"], *learned["units"]]))
+        rules["codes"] = list(dict.fromkeys([*rules["codes"], *learned["codes"]]))
+        rules["series"] = list(dict.fromkeys(learned["series"]))
+    else:
+        rules["series"] = []
     return rules
+
+
+def harvest_series(vault: Path, rules: dict[str, list[str]], config: dict[str, Any], body: str | None = None) -> list[str]:
+    """Collect project-specific standalone series/model tokens (e.g. XMY, DS50) from products config and headings."""
+    known = {
+        str(x).casefold()
+        for k in ("standards", "certificates", "ratings", "units", "codes")
+        for x in (rules.get(k) or [])
+    } | {str(t).casefold() for t in (config.get("own_terms") or [])} | {w.casefold() for w in COMMON_SERIES_STOPWORDS}
+
+    candidates: dict[str, int] = {}
+    token_re = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9-]{2,18}(?![A-Za-z0-9])")
+
+    def scan_text(txt: str, weight: int) -> None:
+        for m in token_re.finditer(txt):
+            tok = m.group(0).strip("-")
+            if len(tok) < 3 or tok.casefold() in known or tok.isdigit():
+                continue
+            candidates[tok] = candidates.get(tok, 0) + weight
+
+    for prod in config.get("products") or []:
+        if not isinstance(prod, dict):
+            continue
+        for field in (prod.get("name"), *(prod.get("aliases") or []), *(prod.get("models") or [])):
+            if isinstance(field, str) and field.strip():
+                scan_text(field, HARVEST_MIN)
+
+    cust_dir = vault / "03_正式知识/10_客户知识"
+    if cust_dir.is_dir():
+        for page in sorted(cust_dir.rglob("*.md")):
+            scan_text(page.stem, 2)
+            for line in page.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lstrip().startswith("#"):
+                    scan_text(line, 2)
+    elif body:
+        for line in body.splitlines():
+            if line.lstrip().startswith("#"):
+                scan_text(line, 2)
+
+    return [tok for tok, score in candidates.items() if score >= HARVEST_MIN]
+
+
+def sync_learned_rules(vault: Path, rules: dict[str, list[str]], config: dict[str, Any],
+                       body: str | None = None) -> dict[str, list[str]]:
+    """Load, incrementally harvest, and persist project-only learned terms in 05_数据与审核/70_构建状态/check-learned.json."""
+    learned_path = vault / LEARNED_FILE
+    existing: dict[str, list[str]] = {"units": [], "codes": [], "series": []}
+    if learned_path.is_file():
+        try:
+            raw = json.loads(learned_path.read_text(encoding="utf-8"))
+            for k in existing:
+                if isinstance(raw.get(k), list):
+                    existing[k] = [str(x) for x in raw[k] if str(x).strip()]
+        except Exception:
+            pass
+    units, codes = harvest(vault, rules, config, body=body)
+    series = harvest_series(vault, rules, config, body=body)
+    merged = {
+        "units": list(dict.fromkeys([*existing["units"], *units])),
+        "codes": list(dict.fromkeys([*existing["codes"], *codes])),
+        "series": list(dict.fromkeys([*existing["series"], *series])),
+    }
+    if learned_path.parent.is_dir() and merged != existing:
+        try:
+            write_text(learned_path, json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
+        except OSError:
+            pass
+    return merged
 
 
 def harvest(vault: Path, rules: dict[str, list[str]], config: dict[str, Any], body: str | None = None) -> tuple[list[str], list[str]]:
@@ -147,9 +227,13 @@ def compiled(rules: dict[str, list[str]], prefixes: list[str]) -> list[tuple[str
         return "|".join(fragment(i) for i in sorted(items, key=len, reverse=True))
 
     found: list[tuple[str, re.Pattern[str]]] = []
-    if prefixes:
-        found.append(("型号", re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, prefixes), key=len, reverse=True))
+    all_prefixes = list(dict.fromkeys([*prefixes, *(rules.get("series") or [])]))
+    if all_prefixes:
+        found.append(("型号", re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, all_prefixes), key=len, reverse=True))
                                         + r")[\s-]?[A-Z]?-?\d{2,4}[A-Z]{0,4}(?:-\d+)?\b")))
+        standalone = [p for p in all_prefixes if len(p) >= 3 and re.fullmatch(r"[A-Z0-9-]{3,18}", p)]
+        if standalone:
+            found.append(("型号", re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(sorted(map(re.escape, standalone), key=len, reverse=True)) + r")(?![A-Za-z0-9])")))
     if rules["standards"]:
         found.append(("标准", re.compile(r"\b(?:" + alternatives(rules["standards"]) + r")\s?-?\s?[A-Z]{0,2}\d[\w.]*(?:[-/]\d[\w.]*)*")))
     if rules["certificates"]:

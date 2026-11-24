@@ -177,6 +177,26 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(stats["cited_words"], 4)
         self.assertEqual(stats["word_rate"], "40%")
 
+    def test_project_learns_pure_letter_series_and_saves_to_vault_only(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            (vault / "05_数据与审核/70_构建状态").mkdir(parents=True)
+            page = vault / "03_正式知识/10_客户知识/20_产品介绍/产品大类-自助机.md"
+            page.parent.mkdir(parents=True)
+            page.write_text("# 产品大类-自助机\n\n## XMY 自助机\n\n### XMY 壁挂款\n\nXMY 支持壁挂安装。\n", encoding="utf-8")
+            config = {"own_terms": ["Smartline"], "products": [{"name": "DS50系列", "aliases": ["DS50"]}]}
+            rules = check_article.load_rules(config, vault)
+            self.assertIn("XMY", rules["series"])
+            self.assertIn("DS50", rules["series"])
+            learned_file = vault / check_article.LEARNED_FILE
+            self.assertTrue(learned_file.is_file())
+            saved = learned_file.read_text(encoding="utf-8")
+            self.assertIn("XMY", saved)
+            found = {t for _, t in check_article.facts("Smartline XMY and DS50 support LED signage.", [], rules)}
+            self.assertIn("XMY", found)
+            self.assertIn("DS50", found)
+            self.assertNotIn("LED", found)
+
 
 if __name__ == "__main__":
     unittest.main()
