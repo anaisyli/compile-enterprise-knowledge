@@ -320,6 +320,19 @@ class StateTests(unittest.TestCase):
         self.assertEqual(len(internal_data["issues"]), 2)
         self.assertEqual(len(internal_data["riskRetained"]), 1)
 
+        # Long member text (>200 chars) must not be truncated and splits wiki-link title from full detail.
+        long_tail = "此前仅提取到残缺表头，现已对照原图逐格恢复并复核完毕，完整保留全部孔型与公差列。"
+        long_line = f"- [[产品画册-YFZ41T#第 15 页|产品画册-YFZ41T · 第 15 页]]：已逐图恢复两张完整尺寸表及各组三行示意图。孔型图标按原页图例改用原文Blind hole thread、Through hole、Drilling through作列头；T后两图标共用一格，2--0等与末列-2/-4均保留原字。{long_tail}"
+        long_records = findings()
+        long_records["ANM"][1]["details"] = [long_line]
+        gs.overlay(self.build, long_records)
+        write_json(self.build / "governance.json", {k: [{x: y for x, y in r.items() if x != "details"} for r in v]
+                                                    for k, v in long_records.items()})
+        long_json = json.loads(gs.export_internal_webpage_json(self.build).read_text(encoding="utf-8"))
+        anm4 = next(i for i in long_json["issues"] if i["id"] == "P-999-ANM-004")
+        self.assertEqual(anm4["members"][0]["label"], "产品画册-YFZ41T · 第 15 页")
+        self.assertTrue(anm4["members"][0]["detail"].endswith(long_tail))
+
         exported = gs.cus_export(self.build, None)
         chosen = gs.load_state(self.build)["cus_batches"][exported["batch"]]["items"]
         customer_json = gs.export_customer_webpage_json(self.build, exported["batch"], chosen)

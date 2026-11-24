@@ -171,7 +171,9 @@ def overlay(build: Path, records: dict[str, list[dict[str, Any]]], state: dict[s
             known = item["members"]
             fresh = [k for k, _ in current if k not in known]
             for key, text in current:
-                known.setdefault(key, {"status": "open", "text": text[:160]})
+                entry = known.setdefault(key, {"status": "open", "text": text})
+                if entry.get("text") != text:
+                    entry["text"] = text  # Keep full text and heal older truncated state entries.
             # Evidence that is gone is no longer counted; a decision on what remains stands.
             for key in [k for k in known if k not in {k for k, _ in current}]:
                 del known[key]
@@ -795,6 +797,15 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 {"value": "to_cus", "label": "转客户确认（进待汇总 CUS）", "detail": "原件存疑或需客户授权时填写客户问法", "targetStatus": "escalated_cus", "correctionField": "cus_question"},
                 {"value": "keep", "label": "暂留待内部处理", "detail": "本轮暂不结案，保留在待办列表", "targetStatus": "action_needed"},
             ]
+            def _format_member(text: str, hot: bool) -> dict[str, Any]:
+                readable = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", text)
+                readable = re.sub(r"\[\[([^\]]+)\]\]", r"\1", readable).strip()
+                prefix = "★ " if hot else ""
+                if "：" in readable:
+                    head, body = readable.split("：", 1)
+                    return {"label": prefix + head.strip(), "detail": body.strip()}
+                return {"label": prefix + readable, "detail": ""}
+
             issue_entry: dict[str, Any] = {
                 "id": record["id"],
                 "rootKey": record["key"],
@@ -809,7 +820,7 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 "members": [
                     {
                         "memberId": m["key"],
-                        "label": ("★ " if any(p in m["text"] for p in cited) else "") + m["text"][:140],
+                        **_format_member(m["text"], any(p in m["text"] for p in cited)),
                         "selected": True,
                     }
                     for m in open_members
