@@ -308,6 +308,28 @@ class StateTests(unittest.TestCase):
         gs.overlay(self.build, more)
         self.assertEqual(gs.load_state(self.build)["items"]["P-999-ANM-002"]["status"], "risk_retained")
 
+    def test_risk_drawer_exports_full_legacy_evidence(self) -> None:
+        records = findings()
+        detail = "按原图核对表头、孔型及公差列。" * 14 + "已恢复完整尺寸表。"
+        text = f"[[画册#第 15 页|画册 · 第 15 页]]：{detail}"
+        risk = records["ANM"][1]
+        risk["details"][16] = "- " + text
+        gs.overlay(self.build, records)
+        state = gs.load_state(self.build)
+        item = state["items"][risk["id"]]
+        item["status"] = "risk_retained"
+        key = gs.member_key(text)
+        item["members"][key]["text"] = text[:160]
+        gs.save_state(self.build, state)
+        next(member for member in risk["members"] if member["key"] == key)["text"] = text[:160]
+        write_json(self.build / "governance.json", records)
+
+        exported = json.loads(gs.export_internal_webpage_json(self.build).read_text(encoding="utf-8"))
+        drawer = next(record for record in exported["riskRetained"] if record["id"] == risk["id"])
+        self.assertEqual(len(drawer["members"]), 60)
+        self.assertIn({"label": "画册 · 第 15 页", "detail": detail}, drawer["members"])
+        self.assertEqual(gs.load_state(self.build), state)
+
     def test_webpage_json_exports_and_feedback_json_import(self) -> None:
         import subprocess
         self.run_overlay()

@@ -745,6 +745,13 @@ def allow_term(build: Path, term: str, scope: str = "project", rule_version: str
             "next": "重跑 run_pipeline.py --from guard 使作用域放行生效"}
 
 
+def format_webpage_member(text: str, hot: bool = False) -> dict[str, str]:
+    readable = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", text)
+    readable = re.sub(r"\[\[([^\]]+)\]\]", r"\1", readable).strip()
+    head, _, body = readable.partition("：")
+    return {"label": ("★ " if hot else "") + head.strip(), "detail": body.strip()}
+
+
 def export_internal_webpage_json(build: Path, output: Path | None = None) -> Path:
     """Export an internal-review-input.v1 JSON directly consumable by customer-confirmation-webpage --mode internal."""
     state = load_state(build)
@@ -774,21 +781,26 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
         for record in sorted(records.get(ledger, []), key=lambda r: r["id"]):
             item = state["items"].get(record["id"], {})
             status = item.get("status", "action_needed")
+            if status not in {"risk_retained", "action_needed"}:
+                continue
+            # Older builds cached truncated member text, but kept the full evidence in the ledger details.
+            full_text = dict(members_of(record))
+            members = [
+                {**member, "text": full_text.get(member["key"], member["text"])}
+                for member in record.get("members", [])
+            ]
             if status == "risk_retained":
-                members = [m["text"] for m in record.get("members", [])[:50]]
                 risk_retained.append({
                     "id": record["id"],
                     "ledger": ledger,
                     "title": record["row"][0],
                     "evidenceCount": record.get("total", len(members) or 1),
                     "reason": "已归入风险保留（不计入待办），内容仍带 ⚠ 提示。",
-                    "members": members,
+                    "members": [format_webpage_member(m["text"]) for m in members],
                 })
                 continue
-            if status != "action_needed":
-                continue
             advice, rec_action = RECOMMEND.get(record["key"]) or RECOMMEND.get(kind_of(record), ("看详情后决定：关闭、风险保留或转客户", None))
-            open_members = [m for m in record.get("members", []) if m["status"] not in DONE_MEMBER]
+            open_members = [m for m in members if m["status"] not in DONE_MEMBER]
             open_members.sort(key=lambda m: not any(place in m["text"] for place in cited))
             rec_choice = {"closed": "close", "risk_retained": "risk_retained"}.get(rec_action or "", "")
             choices = [
@@ -797,15 +809,6 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 {"value": "to_cus", "label": "转客户确认（进待汇总 CUS）", "detail": "原件存疑或需客户授权时填写客户问法", "targetStatus": "escalated_cus", "correctionField": "cus_question"},
                 {"value": "keep", "label": "暂留待内部处理", "detail": "本轮暂不结案，保留在待办列表", "targetStatus": "action_needed"},
             ]
-            def _format_member(text: str, hot: bool) -> dict[str, Any]:
-                readable = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", text)
-                readable = re.sub(r"\[\[([^\]]+)\]\]", r"\1", readable).strip()
-                prefix = "★ " if hot else ""
-                if "：" in readable:
-                    head, body = readable.split("：", 1)
-                    return {"label": prefix + head.strip(), "detail": body.strip()}
-                return {"label": prefix + readable, "detail": ""}
-
             issue_entry: dict[str, Any] = {
                 "id": record["id"],
                 "rootKey": record["key"],
@@ -820,7 +823,7 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 "members": [
                     {
                         "memberId": m["key"],
-                        **_format_member(m["text"], any(p in m["text"] for p in cited)),
+                        **format_webpage_member(m["text"], any(p in m["text"] for p in cited)),
                         "selected": True,
                     }
                     for m in open_members
