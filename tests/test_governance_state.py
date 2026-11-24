@@ -461,16 +461,17 @@ class StateTests(unittest.TestCase):
         self.assertEqual(len(open_left), 1)
         self.assertIn("292", open_left[0]["text"])
 
-        # 2) apply_terms routes brands/certs into risk_retained_terms (even if CERT_LIKE was passed in allow) and is undoable.
+        # 2) apply_terms routes brands/certs into risk_retained_terms (even if CERT_LIKE was passed in allow)
+        #    while allowing ordinary ALL-CAPS words/headings like HOME, FAQ, HDMI, OEM.
         applied = gs.apply_terms(self.build, {
-            "allow": ["TUV"],  # Should be safely diverted to risk_retained_terms, never allow_terms!
+            "allow": ["TUV", "ISO9001", "HOME", "FAQ", "HDMI", "OEM"],
             "risk_retained": ["Google"],
             "deny": [],
             "human": ["MysteryBrand"],
         })
-        self.assertEqual(applied["added_allow"], 0)
-        self.assertEqual(applied["cert_diverted_to_retained"], ["TUV"])
-        self.assertEqual(applied["added_retained"], 2)
+        self.assertEqual(applied["added_allow"], 4)
+        self.assertEqual(applied["cert_diverted_to_retained"], ["TUV", "ISO9001"])
+        self.assertEqual(applied["added_retained"], 3)
         self.assertEqual(applied["remaining_for_human"], ["MysteryBrand"])
 
         # 3) governance.build splits unverified_name into pending (MysteryBrand only) and risk_retained (TUV, Google).

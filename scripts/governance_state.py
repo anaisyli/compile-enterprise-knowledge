@@ -678,7 +678,15 @@ def vocabulary() -> set[str]:
 
 
 # Certification, standard and testing bodies are compliance facts, never plain words.
-CERT_LIKE = re.compile(r"^(?:[A-Z]{2,6}(?:[-/ ]?[A-Z0-9]{1,6})?|T[ÜU]V|SIL\s?\d)$")
+CERT_LIKE = re.compile(
+    r"^(?:"
+    r"CE|CB|UL|cUL|cULus|CSA|ETL|cETL|FCC|ICASA|KC|PSE|RCM|TELEC|NCC|BSMI|SRRC|CCC|CQC|BIS|WPC|UKCA|EAC|NOM|ANATEL|INMETRO|"
+    r"T[ÜU]V|Tüv|VDE|GS|SGS|BV|ITS|Intertek|DEKRA|DNV|ABS|CCS|LR|GL|RINA|NFPA|FM|"
+    r"RoHS|ROHS|REACH|WEEE|ErP|ERP|ATEX|IECEx|PED|LVD|EMC|FDA|NSF|WRAS|ACS|KTW|DVGW|MSDS|UN\s?38\.?3|"
+    r"BSCI|SEDEX|SMETA|WRAP|SA\s?8000|OEKO(?:-?TEX)?|Oeko-?Tex|GRS|RCS|GOTS|FSC|BCI|ZDHC|HIGG|"
+    r"(?:ISO|IEC|EN|DIN|ANSI|ASME|ASTM|API|AWWA|MSS|JIS|BS|GB|GB/T|JB|JB/T|HG|SH|NACE|SIL|NFPA)(?:[-/\s]?[A-Z0-9.]{1,10})?"
+    r")$"
+)
 RESOLVED_TEXT_ERROR = re.compile(r"已修正|已逐图恢复|已按原图恢复|已恢复完整|与原图一致|无实质差异|纯排版差异|空白页")
 STILL_OPEN_TEXT_ERROR = re.compile(r"仍待|未解决|疑似印错|看不清|待确认|无法确认|尚需|需客户")
 TERM_BATCH_SIZE = 200
@@ -691,8 +699,8 @@ PROTECTED_BRAND_OR_PLATFORM = {
 
 
 def _matches_plain_vocab(term: str, words: set[str]) -> bool:
-    """Exact match or simple English inflection of a plain vocabulary word (never acronyms/codes/platforms)."""
-    if CERT_LIKE.match(term) or any(ch.isdigit() for ch in term) or (term.isupper() and len(term) <= 6):
+    """Exact match or simple English inflection of a plain vocabulary word (never certs/standards/codes/platforms)."""
+    if CERT_LIKE.match(term) or any(ch.isdigit() for ch in term):
         return False
     low = term.casefold()
     if low in PROTECTED_BRAND_OR_PLATFORM:
