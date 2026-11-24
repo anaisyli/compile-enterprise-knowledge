@@ -119,6 +119,25 @@ class MonthlyAuditTests(unittest.TestCase):
             self.assertTrue((root / "P-001_正常项目知识库/05_数据与审核/40_月度与交接/知识库体检_2026-11.md").is_file())
             self.assertTrue((root / "P-002_红灯项目知识库/05_数据与审核/40_月度与交接/知识库体检_2026-11.md").is_file())
 
+    def test_batch_vault_root_with_project_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_vault(root, "P-001_洛阳一阀知识库", pid="P-001", company="洛阳一阀")
+            make_vault(root, "P-002_恒塔知识库", pid="P-002", company="恒塔")
+            make_vault(root, "P-003_未选中知识库", pid="P-003", company="未选中")
+
+            res = self.run_cli("--vault-root", str(root), "--projects", "P-001,恒塔,P-999", "--month", "2026-11")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            data = json.loads(res.stdout)
+            self.assertEqual(data["checked"], 2)
+            self.assertEqual([p["vault_name"] for p in data["projects"]], ["P-001_洛阳一阀知识库", "P-002_恒塔知识库"])
+            self.assertEqual(data["unmatched"], ["P-999"])
+            partial_summary = root / "月度体检总览_2026-11_部分项目.md"
+            self.assertTrue(partial_summary.is_file())
+            self.assertFalse((root / "月度体检总览_2026-11.md").exists())
+            self.assertFalse((root / "P-003_未选中知识库/05_数据与审核/40_月度与交接/知识库体检_2026-11.md").exists())
+            self.assertIn("P-999", partial_summary.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

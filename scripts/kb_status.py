@@ -353,6 +353,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", help="Run directory (required unless running standalone --vault --monthly or --vault-root)")
     parser.add_argument("--vault", help="Published project folder")
     parser.add_argument("--vault-root", help="Obsidian root folder containing multiple project vaults (batch monthly audit)")
+    parser.add_argument("--projects", action="append", default=[],
+                        help="Optional project ID/name filters under --vault-root (comma-separated or repeated)")
     parser.add_argument("--monthly", action="store_true", help="Write dated monthly health report")
     parser.add_argument("--month", help="Target month YYYY-MM for monthly audit (default: current month)")
     parser.add_argument("--json", action="store_true", help="Print full JSON result")
@@ -669,8 +671,14 @@ def is_kb_vault(path: Path) -> bool:
     return any(m.exists() for m in markers)
 
 
-def run_batch_monthly(vault_root: Path, month: str) -> dict[str, Any]:
+def parse_project_filters(raw: list[str]) -> list[str]:
+    return [part.strip() for item in raw for part in re.split(r"[,，;；]+", item) if part.strip()]
+
+
+def run_batch_monthly(vault_root: Path, month: str, project_filters: list[str] | None = None) -> dict[str, Any]:
     token_info = probe()
+    filters = project_filters or []
+    matched_filters: set[str] = set()
     results: list[dict[str, Any]] = []
     skipped: list[str] = []
     errors: list[dict[str, str]] = []
@@ -678,8 +686,14 @@ def run_batch_monthly(vault_root: Path, month: str) -> dict[str, Any]:
         if not child.is_dir() or child.name.startswith("."):
             continue
         if not is_kb_vault(child):
-            skipped.append(child.name)
+            if not filters:
+                skipped.append(child.name)
             continue
+        if filters:
+            hits = [f for f in filters if f.casefold() in child.name.casefold()]
+            if not hits:
+                continue
+            matched_filters.update(hits)
         try:
             vstate = gather_vault(child, month, token_info=token_info)
             level, reasons = classify_health(vstate)
@@ -707,15 +721,17 @@ def run_batch_monthly(vault_root: Path, month: str) -> dict[str, Any]:
         except Exception as exc:  # One bad vault never blocks the rest of the root scan.
             errors.append({"vault": child.name, "error": f"{type(exc).__name__}: {exc}"})
 
+    unmatched = [f for f in filters if f not in matched_filters]
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     token_msg = token_info["expiry"]["message"] if token_info["ok"] else token_info["message"]
     red_n = sum(1 for r in results if r["level"].startswith("🔴"))
     yellow_n = sum(1 for r in results if r["level"].startswith("🟡"))
     green_n = sum(1 for r in results if r["level"].startswith("🟢"))
+    scope_label = f"（筛选：{', '.join(filters)}）" if filters else ""
     lines = [
-        f"# 全库月度体检总览 {month}",
+        f"# {'部分项目' if filters else '全库'}月度体检总览 {month}",
         "",
-        f"- 扫描根目录：`{vault_root}`",
+        f"- 扫描根目录：`{vault_root}`{scope_label}",
         f"- 生成时间：{now}；检查项目：{len(results)} 个（🔴 需处理 {red_n}、🟡 待关注 {yellow_n}、🟢 正常 {green_n}）；"
         f"跳过非知识库目录：{len(skipped)} 个；异常：{len(errors)} 个",
         f"- 本机 MinerU Token：{token_msg}",
@@ -748,18 +764,23 @@ def run_batch_monthly(vault_root: Path, month: str) -> dict[str, Any]:
     else:
         lines.append("- 本月所有知识库均正常，无紧急待办。")
 
-    if skipped or errors:
-        lines.extend(["", "## 三、跳过与异常目录", ""])
+    if skipped or errors or unmatched:
+        lines.extend(["", "## 三、跳过、未匹配与异常目录", ""])
+        if unmatched:
+            lines.append("- ⚠ 未匹配到任何知识库的筛选条件：" + "、".join(f"`{u}`" for u in unmatched))
         if skipped:
             lines.append("- 已跳过（非本 Skill 知识库目录）：" + "、".join(f"`{s}`" for s in skipped))
         for err in errors:
             lines.append(f"- ❌ `{err['vault']}` 检查失败：{err['error']}")
     lines.append("")
-    summary_path = vault_root / f"月度体检总览_{month}.md"
+    summary_name = f"月度体检总览_{month}_部分项目.md" if filters else f"月度体检总览_{month}.md"
+    summary_path = vault_root / summary_name
     write_text(summary_path, "\n".join(lines))
     return {
         "month": month,
         "vault_root": str(vault_root),
+        "filters": filters,
+        "unmatched": unmatched,
         "summary_report": str(summary_path),
         "checked": len(results),
         "red": red_n,
@@ -779,7 +800,7 @@ def main() -> int:
         vault_root = Path(args.vault_root).resolve()
         if not vault_root.is_dir():
             raise SystemExit(f"找不到知识库根目录：{vault_root}")
-        batch = run_batch_monthly(vault_root, month)
+        batch = run_batch_monthly(vault_root, month, parse_project_filters(args.projects))
         print(json.dumps(batch, ensure_ascii=False, indent=2))
         return 1 if batch["errors"] else 0
     if not args.out:
