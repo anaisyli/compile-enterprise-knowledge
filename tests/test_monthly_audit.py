@@ -122,15 +122,15 @@ class MonthlyAuditTests(unittest.TestCase):
     def test_batch_vault_root_with_project_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            make_vault(root, "P-001_洛阳一阀知识库", pid="P-001", company="洛阳一阀")
-            make_vault(root, "P-002_恒塔知识库", pid="P-002", company="恒塔")
+            make_vault(root, "P-001_甲公司知识库", pid="P-001", company="甲公司")
+            make_vault(root, "P-002_乙公司知识库", pid="P-002", company="乙公司")
             make_vault(root, "P-003_未选中知识库", pid="P-003", company="未选中")
 
-            res = self.run_cli("--vault-root", str(root), "--projects", "P-001,恒塔,P-999", "--month", "2026-11")
+            res = self.run_cli("--vault-root", str(root), "--projects", "P-001,乙公司,P-999", "--month", "2026-11")
             self.assertEqual(res.returncode, 0, res.stderr)
             data = json.loads(res.stdout)
             self.assertEqual(data["checked"], 2)
-            self.assertEqual([p["vault_name"] for p in data["projects"]], ["P-001_洛阳一阀知识库", "P-002_恒塔知识库"])
+            self.assertEqual([p["vault_name"] for p in data["projects"]], ["P-001_甲公司知识库", "P-002_乙公司知识库"])
             self.assertEqual(data["unmatched"], ["P-999"])
             partial_summary = root / "月度体检总览_2026-11_部分项目.md"
             self.assertTrue(partial_summary.is_file())
