@@ -305,14 +305,31 @@ def build(
                                   "- 怎么关闭：对照原页核对；有 MinerU 时重新识别，MinerU 的结果会替换 AI 转写和 Reducto 识别。", ""]
                                  + [f"- {page}" for page in sorted(ai_pages)])
     if unverified:
-        detail = ["- 为什么有风险：可能是品牌、明星或 IP 名，对外使用可能涉及授权。",
-                  "- 现在怎么处理：内容已入库，原文旁标 ⚠；整理页引用时必须带 ⚠。",
-                  "- 怎么关闭：普通词写进行业词表或 allow_terms；确认是品牌、IP 的保持标记，并决定能否对外使用。", "",
-                  "| 词 | 出现在 |", "| --- | --- |"]
-        detail += [f"| {short(term_labels[term], 30)} | {'、'.join(sorted(pages)[:3])}{' 等' if len(pages) > 3 else ''} |"
-                   for term, pages in sorted(unverified.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
-        anm_ids["unverified_name"] = add("ANM", "unverified_name", f"{len(unverified)} 个没核实过的词出现在已生效资料里",
-                                         f"{len(unverified)} 个词", "待判断", "知识库专员", detail)
+        decisions_path = build_dir / "review-decisions.json"
+        decisions_doc = load_json(decisions_path) if decisions_path.is_file() else {}
+        retained_set = {str(t).casefold() for t in decisions_doc.get("risk_retained_terms", [])}
+        pending_terms = {k: v for k, v in unverified.items() if k not in retained_set}
+        retained_terms = {k: v for k, v in unverified.items() if k in retained_set}
+        if pending_terms:
+            detail = ["- 为什么有风险：可能是品牌、明星或 IP 名，对外使用可能涉及授权。",
+                      "- 现在怎么处理：内容已入库，原文旁标 ⚠；整理页引用时必须带 ⚠。",
+                      "- 怎么关闭：普通词写进行业词表或 allow_terms；确认是品牌、认证或 IP 的写进 risk_retained_terms（保留 ⚠ 并退出待办），确认客户/竞品写 deny_terms。", "",
+                      "| 词 | 出现在 |", "| --- | --- |"]
+            detail += [f"| {short(term_labels[term], 30)} | {'、'.join(sorted(pages)[:3])}{' 等' if len(pages) > 3 else ''} |"
+                       for term, pages in sorted(pending_terms.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+            anm_ids["unverified_name"] = add("ANM", "unverified_name", f"{len(pending_terms)} 个没核实过的词出现在已生效资料里",
+                                             f"{len(pending_terms)} 个词", "待判断", "知识库专员", detail)
+        if retained_terms:
+            r_detail = ["- 为什么有风险：已确认为品牌、认证、标准、平台或 IP 名，对外使用须留意授权或合规边界。",
+                        "- 现在怎么处理：内容照常使用并保留原文 ⚠；已退出待办，不计入未完成事项。", "",
+                        "| 词 | 出现在 |", "| --- | --- |"]
+            r_detail += [f"| {short(term_labels[term], 30)} | {'、'.join(sorted(pages)[:3])}{' 等' if len(pages) > 3 else ''} |"
+                         for term, pages in sorted(retained_terms.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+            anm_ids["unverified_name_retained"] = add(
+                "ANM", "unverified_name_retained",
+                f"{len(retained_terms)} 个已确认的品牌/认证/IP 词（风险保留）",
+                f"{len(retained_terms)} 个词", "风险保留", "知识库专员", r_detail,
+            )
     if reports:
         report_name = (f"{len(reports)} 处验货或检测报告模板" if reports == report_templates
                        else f"{len(reports)} 处提及检测或审核报告的内容（含 {len(report_templates)} 处模板）")

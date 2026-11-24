@@ -436,6 +436,58 @@ class StateTests(unittest.TestCase):
         self.assertEqual(mig["migrated_allow_rules"], 1)
         self.assertEqual(gs.migrate(self.build, self.build / "vault")["migrated_allow_rules"], 0)
 
+    def test_auto_inflections_resolved_text_errors_and_apply_terms_risk_retained(self) -> None:
+        # 1) auto() matches inflections, auto-closes already-fixed text_errors, and exports remaining terms in batches.
+        records = findings()
+        records["ANM"][1]["details"] = [
+            "- [[画册#第 1 页|画册 · 第 1 页]]：已逐图恢复完整尺寸表",
+            "- [[画册#第 2 页|画册 · 第 2 页]]：与原图一致，仅纯排版差异",
+            "- [[画册#第 3 页|画册 · 第 3 页]]：原印 292 疑似印错，仍待确认",
+        ]
+        gs.overlay(self.build, records)
+        write_json(self.build / "governance.json", {k: [{x: y for x, y in r.items() if x != "details"} for r in v]
+                                                    for k, v in records.items()})
+        (self.build / "review-queue.jsonl").write_text("".join(
+            json.dumps({"term": t, "kind": "unverified_name", "blocks": 3, "documents": 2, "examples": [f"ctx {t}"]}) + "\n"
+            for t in ["Adjusted", "Connecting", "Policies", "TUV", "Google", "MysteryBrand"]
+        ), encoding="utf-8")
+        auto_res = gs.auto(self.build)
+        self.assertEqual(sorted(auto_res["allowed"]), ["Adjusted", "Connecting", "Policies"])
+        self.assertEqual(auto_res["closed_text_errors"], 2)
+        self.assertEqual(auto_res["remaining_terms"], 3)
+        self.assertEqual(len(auto_res["term_batches"]), 1)
+        anm4_state = gs.load_state(self.build)["items"]["P-999-ANM-004"]
+        open_left = [m for m in anm4_state["members"].values() if m["status"] not in gs.DONE_MEMBER]
+        self.assertEqual(len(open_left), 1)
+        self.assertIn("292", open_left[0]["text"])
+
+        # 2) apply_terms routes brands/certs into risk_retained_terms (even if CERT_LIKE was passed in allow) and is undoable.
+        applied = gs.apply_terms(self.build, {
+            "allow": ["TUV"],  # Should be safely diverted to risk_retained_terms, never allow_terms!
+            "risk_retained": ["Google"],
+            "deny": [],
+            "human": ["MysteryBrand"],
+        })
+        self.assertEqual(applied["added_allow"], 0)
+        self.assertEqual(applied["cert_diverted_to_retained"], ["TUV"])
+        self.assertEqual(applied["added_retained"], 2)
+        self.assertEqual(applied["remaining_for_human"], ["MysteryBrand"])
+
+        # 3) governance.build splits unverified_name into pending (MysteryBrand only) and risk_retained (TUV, Google).
+        docs = {"DOC-1": {"doc_id": "DOC-1", "item_id": "i1", "title": "画册", "file_name": "画册.md", "tier": "T1"}}
+        blocks = [{"doc_id": "DOC-1", "status": "flagged", "kind": "text", "group": "第 1 页", "locator": "page 1",
+                   "text": "TUV Google MysteryBrand", "flags": [{"type": "unverified_name", "terms": ["TUV", "Google", "MysteryBrand"]}]}]
+        governance.build("P-999", self.build, {}, docs, blocks, [], {}, [], {}, (True, ""), {})
+        gov = json.loads((self.build / "governance.json").read_text(encoding="utf-8"))
+        pending = next(r for r in gov["ANM"] if r["key"] == "unverified_name")
+        retained = next(r for r in gov["ANM"] if r["key"] == "unverified_name_retained")
+        self.assertIn("1 个没核实过的词", pending["row"][0])
+        self.assertEqual(retained["row"][2], "风险保留")
+
+        # 4) undo reverts apply_terms cleanly.
+        gs.undo(self.build, applied["batch_id"])
+        self.assertEqual(json.loads((self.build / "review-decisions.json").read_text(encoding="utf-8")).get("risk_retained_terms", []), [])
+
 
 if __name__ == "__main__":
     unittest.main()

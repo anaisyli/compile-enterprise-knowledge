@@ -48,7 +48,7 @@ CUSTOMER = {"draft": "待汇总", "exported": "已导出待发", "sent": "已发
 LABELS = set(INTERNAL.values()) | set(CUSTOMER.values())
 DONE_MEMBER = {"closed", "risk_retained", "answered", "escalated_cus"}
 # Findings whose content stays in use with its ⚠: a mark, not a task.
-RETAINED_BY_DEFAULT = {"ai_read", "report_page", "reference_draft"}
+RETAINED_BY_DEFAULT = {"ai_read", "report_page", "reference_draft", "unverified_name_retained"}
 # Questions about whether material may be used at all, asked apart from questions about facts.
 PERMISSION = ("pending:", "website_cases", "media:", "images")
 # What list A recommends for each kind of finding, and the action "按建议" takes.
@@ -530,7 +530,7 @@ def undo(build: Path, batch_id: str | None = None) -> dict[str, Any]:
                 state["items"][rec_id] = entry["before_items"][rec_id]
         if "before_extra_cus" in entry:
             state["extra_cus"] = entry["before_extra_cus"]
-    elif entry.get("kind") in {"auto", "allow_term"}:
+    elif entry.get("kind") in {"auto", "allow_term", "apply_terms"}:
         path = build / "review-decisions.json"
         decisions = load_json(path) if path.is_file() else {}
         if "before_allow_terms" in entry:
@@ -539,7 +539,14 @@ def undo(build: Path, batch_id: str | None = None) -> dict[str, Any]:
             decisions["allow_rules"] = entry["before_allow_rules"]
         if "before_scoped_allow_terms" in entry:
             decisions["scoped_allow_terms"] = entry["before_scoped_allow_terms"]
+        if "before_deny_terms" in entry:
+            decisions["deny_terms"] = entry["before_deny_terms"]
+        if "before_risk_retained_terms" in entry:
+            decisions["risk_retained_terms"] = entry["before_risk_retained_terms"]
         write_json(path, decisions)
+        if "before_items" in entry:
+            for rec_id, prev in entry["before_items"].items():
+                state["items"][rec_id] = prev
     save_state(build, state)
     summary = rewrite(build, state) if (build / "governance.json").is_file() else {}
     return {"undone": entry["batch_id"], "kind": entry.get("kind"), "summary": summary,
@@ -672,26 +679,88 @@ def vocabulary() -> set[str]:
 
 # Certification, standard and testing bodies are compliance facts, never plain words.
 CERT_LIKE = re.compile(r"^(?:[A-Z]{2,6}(?:[-/ ]?[A-Z0-9]{1,6})?|T[ÜU]V|SIL\s?\d)$")
+RESOLVED_TEXT_ERROR = re.compile(r"已修正|已逐图恢复|已按原图恢复|已恢复完整|与原图一致|无实质差异|纯排版差异|空白页")
+STILL_OPEN_TEXT_ERROR = re.compile(r"仍待|未解决|疑似印错|看不清|待确认|无法确认|尚需|需客户")
+TERM_BATCH_SIZE = 200
+
+
+PROTECTED_BRAND_OR_PLATFORM = {
+    "windows", "apple", "android", "linux", "google", "chrome", "microsoft", "intel",
+    "bluetooth", "wifi", "amazon", "oracle", "adobe", "samsung", "sony", "disney", "marvel",
+}
+
+
+def _matches_plain_vocab(term: str, words: set[str]) -> bool:
+    """Exact match or simple English inflection of a plain vocabulary word (never acronyms/codes/platforms)."""
+    if CERT_LIKE.match(term) or any(ch.isdigit() for ch in term) or (term.isupper() and len(term) <= 6):
+        return False
+    low = term.casefold()
+    if low in PROTECTED_BRAND_OR_PLATFORM:
+        return False
+    if low in words:
+        return True
+    if not low.isalpha() or len(low) < 4:
+        return False
+    candidates = []
+    if low.endswith("ies") and len(low) > 4:
+        candidates.append(low[:-3] + "y")
+    for suffix in ("es", "s", "ed", "d", "ing", "er", "est", "ly"):
+        if low.endswith(suffix) and len(low) - len(suffix) >= 3:
+            stem = low[:-len(suffix)]
+            candidates.append(stem)
+            candidates.append(stem + "e")
+            if len(stem) >= 2 and stem[-1] == stem[-2]:
+                candidates.append(stem[:-1])
+    return any(c in words for c in candidates)
 
 
 def auto(build: Path) -> dict[str, Any]:
-    """Plain words in the versioned vocabulary are allowed; names that look like brands or certificates stay."""
+    """Auto-settle plain vocabulary words (with inflections) and already-resolved text_errors, then export remaining terms in batches for Agent triage."""
     queue = load_jsonl(build / "review-queue.jsonl")
     words = vocabulary()
-    allowed = [e["term"] for e in queue if e.get("kind") == "unverified_name" and e["term"].casefold() in words
-               and not CERT_LIKE.match(e["term"])]
     path = build / "review-decisions.json"
     decisions = load_json(path) if path.is_file() else {}
     before_terms = list(decisions.get("allow_terms", []))
     before_rules = copy.deepcopy(decisions.get("allow_rules", {}))
     current = decisions.setdefault("allow_terms", [])
-    added = [t for t in allowed if t not in current]
-    batch_id = ""
+    current_cf = {t.casefold() for t in current}
+    denied_cf = {t.casefold() for t in decisions.get("deny_terms", [])}
+    retained_cf = {t.casefold() for t in decisions.get("risk_retained_terms", [])}
+    allowed = [e["term"] for e in queue if e.get("kind") == "unverified_name"
+               and _matches_plain_vocab(e["term"], words)
+               and e["term"].casefold() not in denied_cf]
+    added = [t for t in allowed if t.casefold() not in current_cf]
     if added:
         current.extend(added)
+        current_cf.update(t.casefold() for t in added)
         decisions.setdefault("allow_rules", {})[VOCABULARY_VERSION] = sorted(set(decisions.get("allow_rules", {}).get(VOCABULARY_VERSION, []) + added))
         write_json(path, decisions)
-        state = load_state(build)
+
+    # Auto-close text_errors members that already record a completed fix or cosmetic-only match.
+    state = load_state(build)
+    before_items: dict[str, Any] = {}
+    closed_text_errors = 0
+    for rec_id, item in state["items"].items():
+        if item.get("key") != "text_errors" or item.get("status") != "action_needed":
+            continue
+        newly_closed = []
+        for mkey, member in item.get("members", {}).items():
+            if member.get("status") in DONE_MEMBER:
+                continue
+            txt = member.get("text") or ""
+            if RESOLVED_TEXT_ERROR.search(txt) and not STILL_OPEN_TEXT_ERROR.search(txt):
+                newly_closed.append(mkey)
+        if newly_closed:
+            before_items[rec_id] = copy.deepcopy(item)
+            for mkey in newly_closed:
+                item["members"][mkey]["status"] = "closed"
+            closed_text_errors += len(newly_closed)
+            note(item, f"自动关闭 {len(newly_closed)} 条已核对/已恢复/无实质差异记录", "系统")
+            if all(m["status"] in DONE_MEMBER for m in item["members"].values()):
+                item["status"] = "closed"
+
+    batch_id = ""
+    if added or closed_text_errors:
         batch_id = next_history_batch(state)
         state["history"].append({
             "batch_id": batch_id,
@@ -699,12 +768,109 @@ def auto(build: Path) -> dict[str, Any]:
             "rule": VOCABULARY_VERSION,
             "at": datetime.now().isoformat(timespec="seconds"),
             "added": added,
+            "closed_text_errors": closed_text_errors,
             "before_allow_terms": before_terms,
             "before_allow_rules": before_rules,
+            "before_items": before_items,
         })
         save_state(build, state)
-    return {"batch_id": batch_id, "allowed": added, "rule": VOCABULARY_VERSION,
-            "next": "重跑 run_pipeline.py --from guard（或整条流水线）让放行生效" if added else "没有可按词典放行的词"}
+        if closed_text_errors and (build / "governance.json").is_file():
+            rewrite(build, state)
+
+    # Export remaining unjudged terms in batches so the Agent (or parallel subagents) triages them BEFORE asking the user.
+    remaining = [
+        {"term": e["term"], "blocks": e.get("blocks", 0), "documents": e.get("documents", 0), "examples": e.get("examples", [])}
+        for e in queue
+        if e.get("kind") == "unverified_name"
+        and e["term"].casefold() not in current_cf
+        and e["term"].casefold() not in denied_cf
+        and e["term"].casefold() not in retained_cf
+    ]
+    triage_dir = build / "triage-terms"
+    if triage_dir.is_dir():
+        for old in triage_dir.glob("batch-*.jsonl"):
+            old.unlink()
+    batch_files = []
+    if remaining:
+        triage_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(0, len(remaining), TERM_BATCH_SIZE):
+            bf = triage_dir / f"batch-{i // TERM_BATCH_SIZE + 1:03d}.jsonl"
+            bf.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in remaining[i:i + TERM_BATCH_SIZE]), encoding="utf-8")
+            batch_files.append(str(bf))
+    return {
+        "batch_id": batch_id,
+        "allowed": added,
+        "closed_text_errors": closed_text_errors,
+        "remaining_terms": len(remaining),
+        "term_batches": batch_files,
+        "rule": VOCABULARY_VERSION,
+        "next": (
+            f"还有 {len(remaining)} 个剩余词条已分 {len(batch_files)} 批写入 {triage_dir}：由 Agent（可并行分给子 Agent）批量判定后运行 apply-terms，再 --from guard 重跑；不要直接把几百/几千个词抛给用户"
+            if remaining else "重跑 run_pipeline.py --from guard（或整条流水线）让放行生效" if added else "没有可按词典放行的词"
+        ),
+    }
+
+
+def apply_terms(build: Path, decisions_input: dict[str, Any]) -> dict[str, Any]:
+    """Apply Agent batch term-triage decisions: {"allow": [...], "deny": [...], "risk_retained": [...], "human": [...]}."""
+    path = build / "review-decisions.json"
+    decisions = load_json(path) if path.is_file() else {}
+    before_allow = list(decisions.get("allow_terms", []))
+    before_rules = copy.deepcopy(decisions.get("allow_rules", {}))
+    before_deny = list(decisions.get("deny_terms", []))
+    before_retained = list(decisions.get("risk_retained_terms", []))
+
+    allow_in = [str(t).strip() for t in decisions_input.get("allow", []) if str(t).strip()]
+    deny_in = [str(t).strip() for t in decisions_input.get("deny", []) if str(t).strip()]
+    retained_in = [str(t).strip() for t in decisions_input.get("risk_retained", []) if str(t).strip()]
+    human_in = [str(t).strip() for t in decisions_input.get("human", []) if str(t).strip()]
+
+    cur_allow = decisions.setdefault("allow_terms", [])
+    allow_cf = {t.casefold() for t in cur_allow}
+    added_allow = [t for t in allow_in if t.casefold() not in allow_cf and not CERT_LIKE.match(t)]
+    cur_allow.extend(added_allow)
+    if added_allow:
+        decisions.setdefault("allow_rules", {})["ai-triage"] = sorted(set(decisions.get("allow_rules", {}).get("ai-triage", []) + added_allow))
+
+    cur_deny = decisions.setdefault("deny_terms", [])
+    deny_cf = {t.casefold() for t in cur_deny}
+    added_deny = [t for t in deny_in if t.casefold() not in deny_cf]
+    cur_deny.extend(added_deny)
+
+    # Any CERT_LIKE term mistakenly put in allow is safely diverted to risk_retained instead of silently allowed.
+    cert_diverted = [t for t in allow_in if CERT_LIKE.match(t)]
+    cur_retained = decisions.setdefault("risk_retained_terms", [])
+    retained_cf = {t.casefold() for t in cur_retained}
+    added_retained = [t for t in [*retained_in, *cert_diverted] if t.casefold() not in retained_cf]
+    cur_retained.extend(added_retained)
+
+    batch_id = ""
+    if added_allow or added_deny or added_retained:
+        write_json(path, decisions)
+        state = load_state(build)
+        batch_id = next_history_batch(state)
+        state["history"].append({
+            "batch_id": batch_id,
+            "kind": "apply_terms",
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "added_allow": len(added_allow),
+            "added_deny": len(added_deny),
+            "added_retained": len(added_retained),
+            "before_allow_terms": before_allow,
+            "before_allow_rules": before_rules,
+            "before_deny_terms": before_deny,
+            "before_risk_retained_terms": before_retained,
+        })
+        save_state(build, state)
+    return {
+        "batch_id": batch_id,
+        "added_allow": len(added_allow),
+        "added_deny": len(added_deny),
+        "added_retained": len(added_retained),
+        "cert_diverted_to_retained": cert_diverted,
+        "remaining_for_human": human_in,
+        "next": "重跑 run_pipeline.py --from guard 刷新台账（风险保留词保留 ⚠ 但退出待办）",
+    }
 
 
 VALID_SCOPE = re.compile(r"^(?:project|industry:[A-Za-z0-9_-]+|doc:[A-Za-z0-9_-]+)$")
@@ -981,11 +1147,13 @@ def migrate(build: Path, vault: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Decisions over the CUS / MAT / ANM ledgers.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("sync", "auto", "review", "collect", "undo", "allow-term", "flag-value", "cus-export", "cus-sent", "migrate"):
+    for name in ("sync", "auto", "apply-terms", "review", "collect", "undo", "allow-term", "flag-value", "cus-export", "cus-sent", "migrate"):
         p = sub.add_parser(name)
         p.add_argument("--out", required=True, help="Run folder")
         if name in {"sync", "flag-value", "migrate"}:
             p.add_argument("--vault", required=name in {"sync", "migrate"})
+        if name == "apply-terms":
+            p.add_argument("--decisions", required=True, help="JSON: {\"allow\": [...], \"deny\": [...], \"risk_retained\": [...], \"human\": [...]}")
         if name == "review":
             p.add_argument("--webpage-json", nargs="?", const="__DEFAULT__", default=None,
                            help="Also export internal-review-input.v1 JSON for customer-confirmation-webpage --mode internal")
@@ -1017,6 +1185,8 @@ def main(argv: list[str] | None = None) -> int:
         result: Any = sync(build, Path(args.vault).resolve())
     elif args.command == "auto":
         result = auto(build)
+    elif args.command == "apply-terms":
+        result = apply_terms(build, load_json(Path(args.decisions)))
     elif args.command == "review":
         result = {"review": str(review(build)), "template": str(build / "governance-decisions-template.json")}
         if args.webpage_json:

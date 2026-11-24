@@ -146,16 +146,30 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 ## 处理这个项目的待办（CUS / MAT / ANM）
 
-用户说“处理这个项目的待办”“清一下台账”时走这里。规则见合同“待办处理”。目标是只交两份短清单：**清单 A 需要内部决定**、**清单 B 可以攒进下一批问客户的**；首页只报“还要做几个决定”，涉及多少页、图、词放在审计数据里。
+用户说“处理这个项目的待办”“清一下台账”时走这里。规则见合同“待办处理”。
+
+**核心铁律（严禁原样甩给用户）：** 不要把几百/几千个待判词条（如 `ANM-001` 新聚合出的 3,000 个词）或几十页提取差异（如 `ANM-004` 60 页）直接提醒给用户让人自己看！Agent 必须先**自主完成全部可判定项的批处理与精校**（数量大时并行分给子 Agent），最后只向用户汇报极简摘要 + **真正需要人拍板的极少数事项（清单 A）**和**需要问客户的事项（清单 B）**。
 
 1. **复用上一轮**：带 `--vault` 重跑时会自动把台账里人写的阶段和处理记录读进决定文件（`governance_state.py sync`）；没重跑就先手动运行一次 `sync --out <运行目录> --vault <知识库>`。
-2. **先自动处理能确定的**：
-   - `governance_state.py auto --out <运行目录>`：词典 `assets/vocabulary-common.txt` 里的普通词放行；品牌、平台、认证、标准、检测机构、组织、IP 一律不放行，保留 ⚠。
-   - AI 看图、Reducto 识别、提及检测报告、参考稿默认是**风险保留**：内容照用、带 ⚠，不算待办。
-   - 提取文字和原图不一致的页：按 `review` 里 ★ 的顺序（被整理页引用的先做），原图清楚的照第 7 步看图核对修正，修好的逐页关闭；原件本身看不清、疑似印错、几份资料冲突的转客户，**一律问客户，不自己判定数值**。
+2. **先跑规则自动消解 + Agent 自主批量消化（不要停下来问用户）**：
+   - 运行 `governance_state.py auto --out <运行目录>`：
+     - 自动按词典及英文常见词形变化（`-s/-es/-ed/-ing/-er/-ly`）放行普通词；
+     - 自动关闭 `text_errors` 里已写明“已修正 / 已逐图恢复 / 与原图一致 / 纯排版差异”的成员；
+     - 把剩余未判词条按每批 200 个写入 `04_知识库构建/triage-terms/batch-*.jsonl`。
+   - **批量消化剩余词条（Agent 自己判，不甩给用户）**：读取 `triage-terms/batch-*.jsonl`（多批时分给子 Agent 并行），把每个词分进 4 桶并运行 `governance_state.py apply-terms --out <运行目录> --decisions <文件>`：
+     - `allow`：普通英文词、行业通用技术词、普通地名/月份；
+     - `risk_retained`：明确的第三方品牌、平台、认证、标准、检测机构、IP（原文依然保留 ⚠，但移入“风险保留”区，**不再计入待办**；脚本也会自动拦截误放进 `allow` 的认证缩写）；
+     - `deny`：明确的竞品或客户名；
+     - `human`：只有**真正拿不准**（疑似客户自有商标/高风险授权争议）的极少数词才留下来。
+   - **自主消化 `text_errors`（提取文字和原图不一致的页，不把 60 页原样甩给用户）**：按 `review` 里 ★（被整理页引用）优先顺序，Agent 自己对照原页图判定和精校（页多时分给子 Agent 并行）：
+     - 排版差异或不影响内容的 → `collect` 关闭或归风险保留；
+     - 原图清楚、提取确实错了 → 走第 7 步 / `source_fidelity.py` 直接修正采纳并逐页关闭；
+     - 原件本身看不清、疑似印错（如 `292`）、或几份资料冲突 → 用 `flag-value` 或 `to_cus` 转入待汇总 CUS，**绝不自己编造或改原件数值**。
+   - AI 看图、Reducto 识别、提及检测报告、参考稿、已确认的风险保留词默认都是**风险保留**：内容照用、带 ⚠，不算待办。
    - 尺寸图型号：能从页标题或同页款号确认的改名；其余整组关闭为“保留为型号待确认”，不问客户。
    - 官网读不到、工具不可用：先试已授权的替代方法；做不了就沿用快照并写明日期和重试条件（风险保留）。
-3. **出清单（可选一键导出离线决策页 JSON）**：`governance_state.py review --out <运行目录>` 生成 `governance-review.md`，把清单 A 和清单 B 原样给用户看（每条有建议）。加 `--webpage-json` 可同时导出 `internal-review-input.json`，直接交给 `customer-confirmation-webpage --mode internal` 生成离线内部决策页。
+   - 做完自主消化后，重跑 `run_pipeline.py --from guard` 刷新台账。
+3. **只交压缩后的极简清单（可选一键导出离线决策页 JSON）**：`governance_state.py review --out <运行目录>` 生成 `governance-review.md`，先用一句话汇报“本轮已自动消化了多少词/多少页差异、归入风险保留多少项”，再把**真正剩下需要拍板的清单 A** 和 **清单 B** 给用户看。加 `--webpage-json` 可同时导出 `internal-review-input.json`，交给 `customer-confirmation-webpage --mode internal` 生成离线内部决策页。
 4. **预览、落盘与撤销**：用户说“A1–A3 按建议，A4 转客户：……，B 全部导出，B5 先不问”（或从内部决策页导出 `governance-decisions.json`）后，可用 `governance_state.py collect --out <运行目录> --decisions <文件> --dry-run` 先看影响预览，确认后去掉 `--dry-run` 落盘；误放行或误关闭时用 `governance_state.py undo --out <运行目录> [--batch <批次>]` 一键回滚。需要按范围放行词项时用 `governance_state.py allow-term --out <运行目录> --term <词> --scope project|industry:<行业>|doc:<DOC编号>`。
 5. **客户问题按批次**：`governance_state.py cus-export --out <运行目录> [--items 编号,…] [--webpage-json]` 只导出“待汇总”的，授权许可和事实参数分两组，状态变“已导出待发”（加 `--webpage-json` 同步产出给 `customer-confirmation-webpage --mode customer` 的预填草稿 JSON）；用户确认发出后 `cus-sent --batch <批次>`。客户回复用 `apply_answers.py --answers <回复的 CSV / 网页反馈 JSON>` 读回：答了的字段变“已答待核验”，没答的留着，不会重开已发的批次；核验后 `collect` 关闭。
 6. **可疑数值要挡住写作**：发现某个数值要客户确认（例如扭矩表 DN65 的 292），用 `governance_state.py flag-value --out <运行目录> --vault <知识库> --page <页名> --section <小板块> --row <行关键词> --column <列名> --value <原印值> --question "<问题>"` 登记，**不要手改台账**。它生成一个 CUS 问题和一条写作护栏：`kb_lookup.py pack`（含 `--full-tables`）把这一格换成“待客户核实，不可引用”并列进口径避坑，`check_article.py` 见到这个数值就报警。客户确认后按答复更新整理页，再 `collect` 关闭这个 CUS，护栏随之解除。
