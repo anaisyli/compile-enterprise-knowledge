@@ -81,6 +81,21 @@ class RelinkTests(unittest.TestCase):
         self.assertEqual((report["file_links"], report["broken"]), (1, 1))
         self.assertEqual((report["wiki_links"], report["wiki_broken"]), (3, 1))
 
+    def test_check_resolves_escaped_aliases_and_ignores_code_examples(self) -> None:
+        from kb_relink import check_links
+        with tempfile.TemporaryDirectory() as folder:
+            vault = Path(folder)
+            (vault / "a.md").write_text(
+                r"| [[docs/b\|标签]] | [[b#小节\|小节]] | ![[pic.png\|80]] | [[gone\|标签]] |"
+                "\n- `a.md → [[example\\]]`\n",
+                encoding="utf-8",
+            )
+            (vault / "b.md").write_text("## 小节\n", encoding="utf-8")
+            (vault / "pic.png").write_bytes(b"x")
+            report = check_links(vault)
+        self.assertEqual((report["wiki_links"], report["wiki_broken"]), (4, 1))
+        self.assertEqual(report["examples"], ["a.md → [[gone]]"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,8 @@ from render_kb import ALIAS_FOLDER, NAME_MAP_CSV
 
 STATE_RUN_INFO = "05_数据与审核/70_构建状态/run-info.json"
 FILE_LINK = re.compile(r"file://[^)\s\]>|]+")
+# Keep code examples out of the audit and accept the escaped alias separator in tables.
+WIKI_LINK = re.compile(r"`[^`\n]*`|!?\[\[([^\]\n|#]+?)(?=\\?\||#|\])")
 
 
 def plain(path: str) -> str:
@@ -212,9 +214,12 @@ def check_links(vault: Path) -> dict[str, Any]:
                 broken += 1
                 if len(examples) < 10:
                     examples.append(f"{key} → {link_path(match.group(0))}")
-        for match in re.finditer(r"!?\[\[([^\]|#]+)", text):
+        for match in WIKI_LINK.finditer(text):
+            link_target = match.group(1)
+            if link_target is None:
+                continue
             wiki += 1
-            target = match.group(1).strip().split("/")[-1]
+            target = link_target.strip().split("/")[-1]
             if target not in names and target not in stems:
                 wiki_broken += 1
                 if len(examples) < 10:
