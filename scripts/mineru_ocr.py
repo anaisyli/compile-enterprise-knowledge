@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from extract_package_text import markdown_table
+from build_progress import file_digest, select_batch_ocr
 from kb_common import BUILD_DIRECTORY, PAGED_FILES, load_config, load_json, load_jsonl, normalize_space, read_by, remaining_ocr_pages, run_lock, write_json, write_text
 from mineru_client import MinerUError, client_from_env, extract, failure_report, probe
 from samples import (METHODS, PAGED_KINDS, TYPES, choose_samples, doc_type, load_decisions, load_gate, method_and_source,
@@ -257,6 +258,10 @@ def main() -> int:
                 package_paths[asset["item_id"]] = root / asset["path"]
     routes = load_json(build / "routes.json")
     chosen = candidates(build, package_paths, args.samples, args.missing)
+    scope = config.get("mineru") or {}
+    outside_scope = []
+    if args.command == "run" and not args.only:
+        chosen, outside_scope = select_batch_ocr(chosen, scope)
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:
@@ -269,14 +274,24 @@ def main() -> int:
         print(json.dumps({"planned_files": len(chosen), "plan": str(build / "mineru-plan.md"), "token": state["message"]}, ensure_ascii=False))
         return 0
 
+    if not chosen and scope.get("batch_scoped"):
+        print(json.dumps({"done": 0, "outside_approval": outside_scope}, ensure_ascii=False))
+        return 0
     ok, reason = approved(config)
     if not ok:
         print(json.dumps({"ok": False, "reason": reason, "plan": str(build / "mineru-plan.md")}, ensure_ascii=False))
         return 2
-    allowed_ids = (config.get("mineru") or {}).get("approved_item_ids")
+    allowed_ids = scope.get("approved_item_ids")
     if allowed_ids is not None and any(entry["item_id"] not in allowed_ids for entry in chosen):
         print(json.dumps({"ok": False, "reason": "本次所选文件超出 MinerU 批准范围，请用 --only 限定"}, ensure_ascii=False))
         return 2
+    for entry in chosen:
+        expected = (scope.get("approved_source_hashes") or {}).get(entry["item_id"])
+        if scope.get("batch_scoped") and (not expected or entry["source_hash"] != expected
+                                           or file_digest(Path(entry["path"])) != expected):
+            print(json.dumps({"ok": False, "reason": "文件版本与 MinerU 批准范围不一致", "item_id": entry["item_id"]},
+                             ensure_ascii=False))
+            return 2
     units_dir, cache = build / OCR_DIRECTORY, build / CACHE_DIRECTORY
     units_dir.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
@@ -293,6 +308,12 @@ def main() -> int:
         key = (routes[entry["item_id"]].get("source_hash") or entry["item_id"])[:32]
         cached = cache / f"{key}.json"
         task_file = cache / f"{key}.task.json"
+        target = units_dir / f"{entry['item_id']}.json"
+        previous = load_json(target) if target.is_file() else {}
+        same_version = previous.get("source_hash") == entry["source_hash"]
+        if same_version and previous.get("source") == "mineru" and previous.get("units"):
+            report["cached"].append(entry["display_name"])
+            continue
         if cached.is_file():
             units = load_json(cached)
             report["cached"].append(entry["display_name"])
@@ -311,16 +332,16 @@ def main() -> int:
             write_json(cached, units)
             report["done"].append(entry["display_name"])
         # Pages the model read and MinerU did not stay; MinerU's reading replaces the rest.
-        target = units_dir / f"{entry['item_id']}.json"
-        previous = load_json(target).get("units", []) if target.is_file() else []
         read = {unit["locator"] for unit in units}
-        units = units + [unit for unit in previous if unit.get("engine") == "ai" and unit["locator"] not in read]
+        if same_version:
+            units += [unit for unit in previous.get("units", []) if unit.get("engine") == "ai" and unit["locator"] not in read]
         # The hash and date travel with the text, so a copy kept in the vault is a usable cache.
         write_json(target, {"item_id": entry["item_id"], "source": "mineru",
                             "source_hash": routes[entry["item_id"]].get("source_hash", ""),
                             "extracted_at": date.today().isoformat(), "units": units})
     write_json(build / "mineru-report.json", report)
-    print(json.dumps({key: len(value) for key, value in report.items()}, ensure_ascii=False))
+    print(json.dumps({**{key: len(value) for key, value in report.items()}, "outside_approval": outside_scope},
+                     ensure_ascii=False))
     for failure in report["failed"][:3]:
         print(f"{failure['file']}: {failure['failure_label']} -> {failure['next_action']}")
     return 0 if not report["failed"] else 1

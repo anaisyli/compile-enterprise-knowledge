@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_read import package_files, pdf_of
+from build_progress import file_digest, select_batch_ocr
 from kb_common import BUILD_DIRECTORY, load_config, load_json, load_jsonl, long_path, mineru_page_units, normalize_space, run_lock, write_json, write_text
 from mineru_ocr import html_table, separate_markdown_tables
 from reducto_client import KEY_PAGE, MODEL, PRICING_PAGE, ReductoError, client_from_env, failure_report, parse_pages, probe
@@ -192,7 +193,8 @@ def candidates(build: Path, files: dict[str, dict[str, Any]], samples_only: bool
                            "path": str(asset["file"]), "source_hash": asset.get("source_hash", ""),
                            "unit": "slide" if suffix in SLIDES else "page", "image": image, "full_document": full_document,
                            **({"primary": True} if chosen_reducto else {}),
-                           "pages": sorted(pages), "reasons": {str(k): v for k, v in sorted(pages.items())}})
+                           "total_pages": len(info.get("pages", {})), "pages": sorted(pages),
+                           "reasons": {str(k): v for k, v in sorted(pages.items())}})
     return chosen
 
 
@@ -218,10 +220,11 @@ def write_plan(build: Path, chosen: list[dict[str, Any]], state: dict[str, Any])
              "- 选了 Reducto 的文件，正文用 Reducto 的结果（同一页 MinerU 也读过时仍以 Reducto 为准），入库标 ⚠；文字层只用来核对，"
              "文字层有、Reducto 没读出的款号或数字，以及和 MinerU 不一致的页，交给 AI 看图核对。",
              "- 免费和标准套餐不能主动删除上传的文件，由 Reducto 按其保留期清除；要求零保留需 Growth / Enterprise 套餐。", "",
-             "| 文件 | 页数 | 页码 | 原因 |", "| --- | --- | --- | --- |"]
+             "| 文件 | 编号 | 整份页数 | 待解析页数 | 待解析页码 | 原因 |", "| --- | --- | --- | --- | --- | --- |"]
     for entry in chosen:
         why = sorted({reason for reasons in entry["reasons"].values() for reason in reasons})
-        lines.append(f"| {entry['display_name']} | {len(entry['pages'])} | {page_list(entry['pages'])} | {'；'.join(why)} |")
+        lines.append(f"| {entry['display_name']} | {entry['item_id']} | {entry['total_pages']} | "
+                     f"{len(entry['pages'])} | {page_list(entry['pages'])} | {'；'.join(why)} |")
     lines.extend(["", f"API Key 状态：{state['message']}。", "", "同意上传后，在 kb-config.json 里加：",
                   '`"reducto": {"approved": true, "approved_by": "姓名", "approved_at": "YYYY-MM-DD", "scope": "本计划全部文件"}`',
                   "", "可选：`approved_item_ids` 只允许列出的文件；`max_pages` 限制每次最多解析的页数。"])
@@ -387,6 +390,10 @@ def main() -> int:
         return 2
     chosen = candidates(build, files, args.samples, (config.get("reducto") or {}).get("full_document_item_ids"),
                         refresh_stale=args.refresh_stale)
+    rules = config.get("reducto") or {}
+    outside_scope = []
+    if args.command == "run" and not args.only:
+        chosen, outside_scope = select_batch_ocr(chosen, rules)
     if args.only:
         unknown = set(args.only) - {entry["item_id"] for entry in chosen}
         if unknown:
@@ -400,15 +407,34 @@ def main() -> int:
                          "plan": str(build / "reducto-plan.md"), "key": state["message"]}))
         return 0
 
+    if not chosen and rules.get("batch_scoped"):
+        print(json_text({"done": 0, "outside_approval": outside_scope}))
+        return 0
     ok, reason = approved(config)
     if not ok:
         print(json_text({"ok": False, "reason": reason, "plan": str(build / "reducto-plan.md")}))
         return 2
-    rules = config.get("reducto") or {}
     allowed_ids = rules.get("approved_item_ids")
     if allowed_ids is not None and any(entry["item_id"] not in allowed_ids for entry in chosen):
         print(json_text({"ok": False, "reason": "本次所选文件超出 Reducto 批准范围，请用 --only 限定"}))
         return 2
+    if rules.get("batch_scoped"):
+        approved_hashes = rules.get("approved_source_hashes") or {}
+        approved_pages = rules.get("approved_page_counts") or {}
+        problems = []
+        for entry in chosen:
+            iid = entry["item_id"]
+            expected_hash = approved_hashes.get(iid)
+            total = entry["total_pages"]
+            cap = approved_pages.get(iid)
+            if not expected_hash or entry["source_hash"] != expected_hash or file_digest(Path(entry["path"])) != expected_hash:
+                problems.append({"item_id": iid, "reason": "文件版本与 Reducto 批准范围不一致"})
+            elif not isinstance(cap, int) or total > cap:
+                problems.append({"item_id": iid, "reason": "实际页数尚未获批或超出批准范围",
+                                 "total_pages": total, "approved_pages": cap})
+        if problems:
+            print(json_text({"ok": False, "problems": problems, "plan": str(build / "reducto-plan.md")}))
+            return 2
     budget = rules.get("max_pages")
     try:
         api = client_from_env()
@@ -444,7 +470,8 @@ def main() -> int:
     report["comparison"] = write_diff(build, names)
     write_json(build / "reducto-report.json", report)
     print(json_text({"done": len(report["done"]), "pages": report["pages"], "failed": len(report["failed"]),
-                     "skipped": len(report["skipped"]), **report["comparison"], "diff": str(build / "reducto-diff.md")}))
+                     "skipped": len(report["skipped"]), "outside_approval": outside_scope,
+                     **report["comparison"], "diff": str(build / "reducto-diff.md")}))
     for failure in report["failed"][:3]:
         print(f"{failure['file']}: {failure['failure_label']} -> {failure['next_action']}")
     return 0 if not report["failed"] else 1

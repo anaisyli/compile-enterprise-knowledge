@@ -52,13 +52,14 @@ description: 编译并维护两层企业 Obsidian 知识库（来源层净化原
    - 把 **① 5 项建库基础信息（首次）+ ② MinerU（免费）/ Reducto（按页计费，附计费与余额链接）最终分流表与 `effective_pages`（若 `mineru_unknown_pages` 或 `reducto_unknown_pages` 大于 0，必须明确写“已知 X 页 + 另有 Y 份页数未知，实际页数与费用在阶段 2 转换后确定”，不得把已知页数说成准确总页数）+ ③ D 类全量初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
    - **一次确认的明确授权范围**：用户回复“同意，按推荐开跑”即同时授权：① 5 项建库基础信息与首次写入知识库目录；② 本批 MinerU / Reducto 外发页数；③ 本批 D 类去向；④ 整理层生成（`apply-plan` 自动写入含用户原话 `evidence` 的 `stage_authorization`）；⑤ 商定的执行节奏。之后运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" --evidence "<用户回复原话>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性落盘（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT、`page-check` 与阶段 4 待办双网页，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；仅在 `--fast` 明确把未判 D 类一并留到二期时才可附 `--allow-undecided-d`；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件与完整核对/治理即可）。确认后按商定的节奏继续执行。
 3. **阶段 2（批量云端提取 + 抽块）**：
+   - OCR 只处理本批确认的文件版本。若 Reducto 页数原先未知或超出已确认范围，先用 `reducto_ocr.py plan` 核对转换后的实际页数。用户同意后，在 `reducto.approved_page_counts` 写入各文件的批准页数再执行。
    - 抓官网（如有）→ **先跑一遍 `run_pipeline.py <共用参数> --images all`**（常规路径已由 `apply-plan` 自动设为 `build_stage: sources_only`，这一遍生成 OCR 所需的 `routes.json` 和 `page-triage.json`）→ 再按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → **最后重跑一遍 `run_pipeline.py <共用参数> --images all`** 把 OCR 结果合入来源层并生成最终 `page-check/todo.jsonl`。完成后按阶段 1 商定节奏继续下一阶段，或在此停下给出下一段新对话 Prompt。
 4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
    - 本阶段一口气核对完 `page-check/todo.jsonl` 里的全部剩余页面（页多时分给子 Agent 并行，不再每批停下来问用户“要不要继续”）。
    - **硬性防中断规则**：每核对完 **20–30 页**，必须立刻写一个 `answer-batch-N.jsonl` 并立即运行 `python scripts/page_check.py collect --out <运行目录>` 把结果增量写入 `page-check/results.json`（已核对页永久落盘，即使中途断网或超时，新对话跑 `kb_next.py status` 也会精确显示 `已完成 X/总 Y 页`，从第 X+1 页接着看，绝不重来）。
    - 全部核对完后重跑 `run_pipeline.py` 刷新来源层，按阶段 1 商定节奏继续阶段 4，或在此停下给出新对话 Prompt。
 5. **阶段 4（自动消化待办 + 同时生成内部决策网页和客户确认网页）**：
-   - 按下方“处理这个项目的待办”由 Agent 先自主消化全部可判定的 CUS/MAT/ANM 与待审 D 类文档，重跑 `run_pipeline.py --from guard` 刷新台账。
+   - 按下方“处理这个项目的待办”消化可判定事项，再按“日常维护”的增量重跑规则刷新台账。
    - 然后**同时导出并生成两份离线 HTML 网页**（有对应待办才生成；需本机已安装 `customer-confirmation-webpage` Skill，未安装时降级保留导出的 `--webpage-json` / CSV 与文字清单，并提醒用户安装 `https://github.com/anaisyli/customer-confirmation-webpage`）：
      1. 内部待办决策网页：`governance_state.py review --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode internal`；
      2. 客户确认网页：`governance_state.py cus-export --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode customer`。
@@ -160,7 +161,7 @@ description: 编译并维护两层企业 Obsidian 知识库（来源层净化原
 
 14. **建库和发布：**
     - 第一次发布前运行 `kb_project.py`，`--source-root` 填初筛包路径。若阶段 1 确认卡里用户**已经核对并同意过五项基础信息**，可直接带 `--confirm` 初始化，不再二次停下打断；否则先列出五项基础信息等用户回复“确认建库”后再加 `--confirm`。
-    - 用户确认后运行 `publish_vault.py --out <运行目录> --vault <项目目录>`。想先看会撤下、改名、新增什么，加 `--dry-run`。
+    - 用户确认后运行 `publish_vault.py --out <运行目录> --vault <项目目录>`。想先看会撤下、改名、新增什么，加 `--dry-run`。明确只发布来源层时加 `--sources-only`，保留库中已有的整理页。
     - 一次要让很多资料变成“已失效”时（超过 5 份且超过两成），发布会停下。这通常是官网没读到或少给了初筛包，先查清楚；用户确认确实要撤下，才加 `--allow-withdraw`。
 
 15. **客户确认：** 按下面“处理这个项目的待办”做：`governance_state.py cus-export` 导出这一批要问的，用户发出后 `cus-sent`；客户填好“回答”列后，用 `apply_answers.py --answers <回复的表>` 读回，再重跑、发布。已经发出的问题不会再导出。
@@ -195,7 +196,7 @@ description: 编译并维护两层企业 Obsidian 知识库（来源层净化原
    - **⑦ 尺寸图（MAT `dimension_drawing_model:*` / `drawing_review_withheld`）**：`neighbor_title` 核对后批量确认；`weak_hint` 抽看原图能定的改名、定不了的归待确认；`unknown` 整组关闭为“保留为型号待确认”，**不问客户**；`drawing_review_withheld` 由 Agent 按 `SPLIT-README.md` 自己拆完，只把真正“无法拆分”的留给人。
    - **⑧ 表格与分类配置（MAT `category_names` / `no_header` / `style_column` / `t3`）**：官网英文大类由 Agent 直接补中文名进 `categories`；缺表头/错款号列由 Agent 看样本行补 `header_map` / `sheet_columns`；产品表逐格判断由 Agent 批量走 `review_cells.py` 处理。
    - **⑨ 抓取与工具（MAT `ocr` / `extract` / `browser` / `website`）**：已授权的替代方式（如浏览器抓取、AI 看图补缺页）先自行尝试；抓不到但有旧快照的沿用旧快照并写明日期和重试条件归入**风险保留**；只有真的缺原文件、缺 Token/账号、或需新批准上传/付费时才交给人。
-   - 全部自主消化完成后，重跑 `run_pipeline.py --from guard` 刷新台账。
+    - 消化完成后按“日常维护”的增量重跑规则刷新台账。只改筛查或审核状态用 `--from guard`。资料去向、抽块结构或识别结果变了就完整重跑。
 3. **只交压缩后的极简清单（可选一键导出离线决策页 JSON）**：`governance_state.py review --out <运行目录>` 生成 `governance-review.md`，先用一句话汇报“本轮已自动消化了哪些类型、多少条证据、归入风险保留多少项”，再把**真正剩下需要拍板的极少数清单 A** 和 **清单 B** 给用户看。加 `--webpage-json` 可同时导出 `internal-review-input.json`，交给 `customer-confirmation-webpage --mode internal` 生成离线内部决策页。
 4. **预览、落盘与撤销**：用户说“A1–A3 按建议，A4 转客户：……，B 全部导出，B5 先不问”（或从内部决策页导出 `governance-decisions.json`）后，可用 `governance_state.py collect --out <运行目录> --decisions <文件> --dry-run` 先看影响预览，确认后去掉 `--dry-run` 落盘；误放行或误关闭时用 `governance_state.py undo --out <运行目录> [--batch <批次>]` 一键回滚。需要按范围放行词项时用 `governance_state.py allow-term --out <运行目录> --term <词> --scope project|industry:<行业>|doc:<DOC编号>`。
 5. **客户问题按批次**：`governance_state.py cus-export --out <运行目录> [--items 编号,…] [--webpage-json]` 只导出“待汇总”的，授权许可和事实参数分两组，状态变“已导出待发”（加 `--webpage-json` 同步产出给 `customer-confirmation-webpage --mode customer` 的预填草稿 JSON）；用户确认发出后 `cus-sent --batch <批次>`。客户回复用 `apply_answers.py --answers <回复的 CSV / 网页反馈 JSON>` 读回：答了的字段变“已答待核验”，没答的留着，不会重开已发的批次；核验后 `collect` 关闭。

@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from build_progress import PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT
 from governance import merge_ledger
 from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, SKILL_VERSION, frontmatter, load_json,
                        parse_frontmatter, run_lock, site_view_enabled, site_view_unset, vault_lock, write_json, write_text)
@@ -36,7 +37,7 @@ from samples import FILE_METHODS_HEADING, FILE_PREFIX, PENDING, PLAN_PAGE, STRUC
 SOURCE = Path("02_源资料/10_净化原文")
 ASSETS = Path("03_正式知识/90_素材")
 ARCHIVE = Path("05_数据与审核/60_版本归档/10_正式知识历史")
-RECEIPT = Path("05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json")
+RECEIPT = Path(RECEIPT_PATH)
 RUN_LOG = Path("05_数据与审核/50_运行记录/知识库构建记录.jsonl")
 PROJECT_INFO = Path("01_工作台/10_项目基础信息.md")
 OLD_TODO = Path("01_工作台/20_当前待办.md")
@@ -294,6 +295,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vault", required=True, help="Project folder made by kb_project.py")
     parser.add_argument("--manage-skill", help="Optional manage-article-knowledge directory")
     parser.add_argument("--allow-withdraw", action="store_true", help="Publish even when many documents would become 已失效")
+    parser.add_argument("--sources-only", action="store_true", help="Explicitly publish a source-layer build, preserving existing curated pages")
     parser.add_argument("--dry-run", action="store_true",
                         help="Write nothing: list what would become 已失效, be archived, renamed, added or changed")
     return parser.parse_args()
@@ -351,11 +353,23 @@ def main() -> int:
     # External research writes into the same vault from other computers; one writer at a time.
     if not args.dry_run and (vault / "01_工作台").is_dir() and not vault_lock(vault, "publish_vault.py"):
         return 3
-    report = load_json(build / "校验结果.json")
+    report = load_json(build / VERIFY_REPORT)
     if report.get("verified") is not True:
         raise SystemExit("这次构建没有通过校验。先运行 verify_kb.py 并修好报告的问题。")
     if not (vault / "01_工作台").is_dir():
         raise SystemExit("知识库项目还不存在。先运行 kb_project.py，用户确认建库后再发布。")
+    checkpoint_path = build / PIPELINE_CHECKPOINT
+    checkpoint = load_json(checkpoint_path) if checkpoint_path.is_file() else {}
+    config_path = build / "kb-config.json"
+    config = load_json(config_path) if config_path.is_file() else {}
+    build_stage = report.get("build_stage", config.get("build_stage", "full"))
+    if (build_stage == "sources_only") != args.sources_only:
+        raise SystemExit("来源层构建须显式加 --sources-only 发布。正式发布请先设为 full 并完成整理和校验。")
+    if not args.sources_only and (config.get("stage_authorization") or {}).get("batch_id"):
+        from kb_next import detect_status
+        status = detect_status(run, [], None, None)
+        if status["stage"] != "stage5_curate_publish" or not status["curation"]["verified"] or status["curation"]["topics_remaining"]:
+            raise SystemExit("本批尚未完成建库或校验，请先按 kb_next.py status 提示补齐。")
 
     receipt_path = vault / RECEIPT
     receipt = load_json(receipt_path) if receipt_path.is_file() else {}
@@ -385,6 +399,9 @@ def main() -> int:
     from refresh_navigation import STATUS_PAGES, normalize_build
     normalize_build(run, vault)
     planned = planned_files(run)
+    if args.sources_only:
+        formal = "03_正式知识/10_客户知识/"
+        planned = {key: path for key, path in planned.items() if not key.startswith(formal)}
     # The site view is made only when switched on. Pages published before and not made now leave
     # for the archive, said out loud; with no setting at all, nothing is decided for the person.
     build_config = load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}
@@ -521,7 +538,8 @@ def main() -> int:
         if key in excluded_pictures and key.startswith(ASSETS.as_posix() + "/") and target.resolve().is_relative_to((vault / ASSETS).resolve()):
             archive(vault, key, stamp, archived, move=True)
             continue
-        if key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT) or key in STATUS_PAGES:
+        if (key.startswith(ASSETS.as_posix()) or key.startswith(LEDGER_ROOT) or key in STATUS_PAGES
+                or (args.sources_only and key.startswith(formal))):
             # Pictures and ledgers are never removed; kb_status rewrites the overview pages right after.
             written[key] = normalized_hash(target)
             continue
@@ -574,15 +592,16 @@ def main() -> int:
     run_info = load_json(build / "run-info.json") if (build / "run-info.json").is_file() else {}
     update_project_info(vault, run_info.get("packages", []))
     state = save_state(run, vault)
+    if checkpoint.get("build_id"):
+        write_json(vault / STATE / PIPELINE_CHECKPOINT, {
+            key: checkpoint[key] for key in ("build_id", "packages", "routing", "source_inputs")
+        })
     warnings += kept_warnings(state["kept_newer_in_vault"])
     warnings += state["removed"]
-    write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
-                              "hash_mode": HASH_MODE, "files": written})
     index = build_index(vault)
     # The writing skills' entry page: every knowledge page, customer and external, with its sections.
     from kb_lookup import write_catalog
     write_catalog(vault)
-    build_stage = (load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}).get("build_stage", "full")
     if build_stage == "sources_only":
         warnings.append("本次发布仅为来源层（build_stage: sources_only），尚未生成整理页；正式上线前需设为 full 并补写整理页。")
     entry = {"published_at": stamp, "version": SKILL_VERSION, "build_stage": build_stage, "documents": report.get("documents"),
@@ -591,6 +610,9 @@ def main() -> int:
              "pages_relinked": relinked, "run": str(run)}
     with (vault / RUN_LOG).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    write_json(receipt_path, {"generated_by": f"compile-enterprise-knowledge {SKILL_VERSION}", "published_at": stamp,
+                              "build_stage": build_stage, "build_id": checkpoint.get("build_id"),
+                              "hash_mode": HASH_MODE, "files": written})
     subprocess.run([sys.executable, str(Path(__file__).with_name("kb_status.py")), "--out", str(run), "--vault", str(vault)],
                    capture_output=True, env={**os.environ, LOCK_HOLDER: str(os.getpid())})
     manage = run_manage(Path(args.manage_skill).resolve() / "scripts", vault) if args.manage_skill else {}

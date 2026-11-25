@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 import zipfile
@@ -39,6 +40,17 @@ PACK = """# 写作资料包
 
 
 class CheckTests(unittest.TestCase):
+    def test_duplicate_reference_ids_cannot_be_hidden_by_equal_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            packs = [Path(tmp) / name / "补读.md" for name in ("a", "b")]
+            for path in packs:
+                path.parent.mkdir()
+                path.with_suffix(".json").write_text(json.dumps({"facts": [{"id": "R1", "text": path.parent.name}]}),
+                                                     encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "重复的引用编号 R1"):
+                check_article.load_pack_facts(packs)
+            self.assertEqual(check_article.load_pack_facts([packs[0], packs[0]])["R1"]["text"], "a")
+
     def run_check(self, article: str, deny: list[str] | None = None) -> dict:
         return check_article.check(article, PACK, ["YFD"], deny or [], None)
 

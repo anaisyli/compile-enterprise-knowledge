@@ -496,8 +496,8 @@ def parse_citations(text: str) -> list[tuple[str, list[str]]]:
 def load_pack_facts(pack_paths: list[Path]) -> dict[str, dict[str, Any]]:
     """Load companion 资料包.json files next to each --pack file; refuse duplicate fact IDs across packs."""
     index: dict[str, dict[str, Any]] = {}
-    owners: dict[str, str] = {}
-    for path in pack_paths:
+    owners: dict[str, Path] = {}
+    for path in dict.fromkeys(path.resolve() for path in pack_paths):
         meta = path.with_suffix(".json")
         if meta.is_file():
             data = json.loads(meta.read_text(encoding="utf-8"))
@@ -505,13 +505,13 @@ def load_pack_facts(pack_paths: list[Path]) -> dict[str, dict[str, Any]]:
                 fid = str(item.get("id") or "")
                 if not fid:
                     continue
-                if fid in index and owners[fid] != path.name:
+                if fid in index:
                     raise SystemExit(
-                        f"多个资料包里存在重复的引用编号 {fid}（{owners[fid]} 与 {path.name}）。"
+                        f"资料包里存在重复的引用编号 {fid}（{owners[fid]} 与 {path}）。"
                         "补读多张表时请使用不同的 --id-prefix（如 R、RB、RC）和不同输出文件名，避免静默覆盖。"
                     )
                 index[fid] = item
-                owners[fid] = path.name
+                owners[fid] = path
     return index
 
 

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -58,6 +61,33 @@ class PlanTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.folder.cleanup()
+
+    def test_unapproved_page_count_stops_before_opening_client(self) -> None:
+        import reducto_ocr
+        from kb_common import BUILD_DIRECTORY, sha256_file, write_json
+
+        out = self.build / "run"
+        build = out / BUILD_DIRECTORY
+        build.mkdir(parents=True)
+        for name in ("routes.json", "page-triage.json"):
+            (build / name).write_bytes((self.build / name).read_bytes())
+        file_hash = sha256_file(self.files["a1"]["file"])
+        self.files["a1"]["source_hash"] = file_hash
+        cfg = self.build / "kb-config.json"
+        argv = ["reducto_ocr.py", "run", "--out", str(out), "--config", str(cfg), "--package", str(self.build)]
+        for limit in (None, 4):
+            with self.subTest(limit=limit):
+                write_json(cfg, {"reducto": {"approved": True, "approved_by": "测试员", "approved_at": "2026-11-25",
+                                            "batch_scoped": True, "approved_item_ids": ["a1"],
+                                            "approved_source_hashes": {"a1": file_hash},
+                                            "approved_page_counts": {"a1": limit}}})
+                with (mock.patch.object(sys, "argv", argv), mock.patch.object(reducto_ocr, "run_lock", return_value=True),
+                      mock.patch.object(reducto_ocr, "package_files", return_value=self.files),
+                      mock.patch.object(reducto_ocr, "client_from_env") as client,
+                      contextlib.redirect_stdout(io.StringIO()) as stdout):
+                    self.assertEqual(reducto_ocr.main(), 2)
+                client.assert_not_called()
+                self.assertEqual(json.loads(stdout.getvalue())["problems"][0]["total_pages"], 5)
 
     def test_only_files_read_by_reducto_send_their_b_and_c_pages_and_never_twice(self) -> None:
         [entry] = candidates(self.build, self.files)

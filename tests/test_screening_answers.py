@@ -100,8 +100,24 @@ class ScreeningAnswerTests(unittest.TestCase):
                 self.assertEqual(answers["older"], "keep")
                 self.assertNotIn("doc-part", answers)
                 self.assertEqual(config["client_answers_units"]["doc-part"], {"第 3 页": "drop"})
-                self.assertEqual(report["applied"], 4)
+                self.assertEqual(report["applied"], 0 if shared else 4)
                 self.assertEqual(report["unclear"], [])
+
+    def test_correction_from_the_same_workbook_updates_its_own_answer(self) -> None:
+        self.apply(False)
+        self.rows[0][5] = "不用"
+        report = self.apply(True)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config["client_answers"]["doc-whole"], "drop")
+        self.assertEqual(config["client_answers"]["doc-whole-copy"], "drop")
+        self.assertEqual(report["applied"], 1)
+
+    def test_screening_workbook_preserves_an_answer_from_another_source(self) -> None:
+        self.config.write_text(json.dumps({"client_answers": {"doc-whole": "drop"}}), encoding="utf-8")
+        report = self.apply(False)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config["client_answers"]["doc-whole"], "drop")
+        self.assertEqual([row["item_id"] for row in report["preserved_answers"]], ["doc-whole"])
 
     def test_remarks_and_changes_are_kept_for_a_person(self) -> None:
         self.apply(shared=True)

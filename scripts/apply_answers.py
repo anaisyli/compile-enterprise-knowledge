@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, load_jsonl, run_lock, write_json, write_jsonl
+from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, load_jsonl, run_lock, sha256_file, write_json, write_jsonl
 
 
 KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
@@ -90,10 +90,34 @@ def screening_targets(package: Path) -> tuple[dict[str, dict[str, Any]], dict[st
     return assets, groups, points
 
 
-def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, list]:
+def answer_key(item_id: str, location: str = "") -> str:
+    return json.dumps([item_id, location], ensure_ascii=False)
+
+
+def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, list, list]:
     """Turn the screening workbook's answers into the same config entries as the CSV."""
     assets, groups, points = screening_targets(path.parent)
-    applied, notes, unclear = [], [], []
+    applied, notes, unclear, skipped = [], [], [], []
+    manifest = sha256_file(path.parent / MANIFEST_NAME)
+    origins = config.get("screening_answer_origins", {})
+
+    def set_answer(item_id: str, location: str, decision: str) -> str:
+        answers = (config["client_answers_units"].get(item_id, {}) if location else config["client_answers"])
+        key = location or item_id
+        current = answers.get(key)
+        if current == decision:
+            return "unchanged"
+        origin_key = answer_key(item_id, location)
+        if current is not None and origins.get(origin_key) != {"manifest": manifest, "value": current}:
+            return "preserved"
+        if location:
+            config["client_answers_units"].setdefault(item_id, {})[location] = decision
+        else:
+            config["client_answers"][item_id] = decision
+        origins[origin_key] = {"manifest": manifest, "value": decision}
+        config["screening_answer_origins"] = origins
+        return "applied"
+
     for row in read_screening_workbook(path):
         number, answer, note = row["id"], row.get("choice", ""), row.get("note", "")
         if not answer and not note:
@@ -108,14 +132,13 @@ def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, lis
             if answer and answer != "需要修改":
                 unclear.append({"id": number, "answer": answer})
             continue
+        targets = []
         if number.startswith("folder:"):
             members = groups.get(number[len("folder:"):], [])
             if not members:
                 unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这个文件夹"})
                 continue
-            for item_id in members:
-                # Never let an older screening workbook overwrite a later explicit decision.
-                config["client_answers"].setdefault(item_id, decision)
+            targets = [(item_id, "") for item_id in members]
         elif "#" in number and number.rsplit("#", 1)[0] in assets:
             asked = assets[number.rsplit("#", 1)[0]]
             location = row.get("location", "")
@@ -123,17 +146,19 @@ def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, lis
             content = asked.get("source_hash")
             copies = [a for a in assets.values() if content and a.get("source_hash") == content] or [asked]
             for asset in copies:
-                if location in WHOLE_FILE or location not in (asset.get("pending_units") or []):
-                    config["client_answers"].setdefault(asset["item_id"], decision)
-                else:
-                    config["client_answers_units"].setdefault(asset["item_id"], {}).setdefault(location, decision)
+                unit = location if location not in WHOLE_FILE and location in (asset.get("pending_units") or []) else ""
+                targets.append((asset["item_id"], unit))
         elif number in points:
-            config["client_answers"].setdefault(number, decision)
+            targets = [(number, "")]
         else:
             unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这一项"})
             continue
-        applied.append({"id": number, "decision": decision})
-    return applied, notes, unclear
+        results = [(item_id, unit, set_answer(item_id, unit, decision)) for item_id, unit in targets]
+        if any(result == "applied" for _, _, result in results):
+            applied.append({"id": number, "decision": decision})
+        skipped.extend({"id": number, "item_id": item_id, "location": unit,
+                        "reason": "已有其他来源的客户决定"} for item_id, unit, result in results if result == "preserved")
+    return applied, notes, unclear, skipped
 
 
 def read_feedback_json(path: Path) -> list[dict[str, Any]]:
@@ -201,11 +226,12 @@ def main() -> int:
     config.setdefault("client_answers", {})
     config.setdefault("client_answers_units", {})
     records: dict[str, dict[str, Any]] = {}
+    skipped = []
     if answers_path.suffix.casefold() == ".xlsx":
         if args.release_awaiting_overrides:
             raise SystemExit("解除待确认路由仅适用于本次建库的客户确认 CSV，不能用于旧初筛回答")
         # The screening workbook can be read before the first build.
-        applied, notes, unclear = apply_screening(answers_path, config)
+        applied, notes, unclear, skipped = apply_screening(answers_path, config)
         rows: list[dict[str, str]] = []
     else:
         # Each answerable row has its own number (P-007-CUS-002.1), even inside a grouped entry.
@@ -265,6 +291,7 @@ def main() -> int:
             for item_id in [i for i, value in confirmations.items() if value.get("cus_id") == record["id"]]:
                 del confirmations[item_id]
         for item_id in record["item_id"].split(","):
+            (config.get("screening_answer_origins") or {}).pop(answer_key(item_id, record.get("location") or ""), None)
             if record.get("location"):
                 config["client_answers_units"].setdefault(item_id, {})[record["location"]] = decision
             else:
@@ -296,6 +323,7 @@ def main() -> int:
         if fresh:
             write_jsonl(build / "client-notes.jsonl", kept + fresh)
     print(json.dumps({"applied": len(applied), "config_changed": bool(changed), "notes_for_people": len(notes), "unclear": unclear,
+                      "preserved_answers": skipped,
                       "next": "重跑 run_pipeline.py，再发布" if changed else "没有新的回答"}, ensure_ascii=False, indent=2))
     return 0
 

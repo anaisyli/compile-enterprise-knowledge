@@ -14,8 +14,11 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
-from kb_common import (BUILD_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, load_json, run_lock, sha256_file,
+from build_progress import (PIPELINE_CHECKPOINT, VERIFY_REPORT, batch_id, curation_inputs,
+                            extracted_inputs, file_digest, package_digests, routing_inputs)
+from kb_common import (BUILD_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, load_config, load_json, run_lock, sha256_file,
                        site_view_unset, write_json)
 from kb_state import STATE, config_base, json_object, record_adopted, restore
 
@@ -144,9 +147,15 @@ def main() -> int:
         return 3
     out = Path(args.out).resolve()
     build = out / BUILD_DIRECTORY
+    checkpoint_path = build / PIPELINE_CHECKPOINT
+    previous = load_json(checkpoint_path) if checkpoint_path.is_file() else {}
+    checkpoint_path.unlink(missing_ok=True)
     if args.vault:
         # Only the package and the vault are kept long term; the run folder is rebuilt from them.
         vault = Path(args.vault).resolve()
+        published_checkpoint = vault / STATE / PIPELINE_CHECKPOINT
+        if (not previous or "build_id" not in previous) and published_checkpoint.is_file():
+            previous = load_json(published_checkpoint)
         restored = sync_config(out, vault, Path(args.config).resolve() if args.config else None)
         # Stages and notes people wrote in the published ledgers become decisions before anything is rebuilt.
         from governance_state import sync as sync_decisions
@@ -185,6 +194,7 @@ def main() -> int:
         if not (Path(package) / "审计记录" / "package-manifest.json").is_file():
             print(f"{package} 不是初筛包。没筛选过的资料先用 prepare-seo-knowledge-materials 生成初筛包，再来建库。")
             return 2
+    (build / VERIFY_REPORT).unlink(missing_ok=True)
     for package in args.package:
         workbook = Path(package) / SCREENING_WORKBOOK
         # The client may have answered screening's questions already; the build should not ask again.
@@ -195,6 +205,18 @@ def main() -> int:
     # means someone edited it by hand mid-build, and the result would mix two configs.
     config_path = Path(args.config).resolve() if args.config else None
     config_hash = sha256_file(config_path) if config_path and config_path.is_file() else None
+    config = load_config(config_path if config_hash else None)
+    packages = package_digests([Path(path) for path in args.package])
+    mineru_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else None
+    source_inputs = extracted_inputs(build, mineru_dir)
+    route_inputs = routing_inputs(build, config)
+    if args.start_from != "extract" and previous and (
+        previous.get("packages") != packages
+        or previous.get("routing") != route_inputs
+        or previous.get("source_inputs") != source_inputs
+    ):
+        print("初筛包、资料去向、表格设置或识别结果已变，改跑完整流水线并复用已有提取稿。")
+        args.start_from = "extract"
 
     def config_changed(script: str) -> bool:
         if config_path is None:
@@ -214,6 +236,8 @@ def main() -> int:
             return 5
         if code:
             return 1
+        source_inputs = extracted_inputs(build, mineru_dir)
+        route_inputs = routing_inputs(build, config)
         if not args.text_dir:
             # Colleagues hand over the package, not the screening work folder; unchanged items reuse frozen cache.
             re_ext = repeat("--re-extract", args.re_extract)
@@ -255,20 +279,41 @@ def main() -> int:
     elif not (build / "vault" / "02_源资料").is_dir():
         # Fresh run folder with --from curate: render the frozen source layer once so verify_kb / publish_vault have it.
         stages.append(("render_kb.py", render))
-    config = load_json(Path(args.config)) if args.config else {}
     if config.get("build_stage") != "sources_only":
         stages.extend([("curate.py", ["prepare", *common]), ("curate.py", ["build", *common])])
     stages.append(("verify_kb.py", [*sources, *ocr, *common]))
+    checkpoint = {
+        "batch_id": batch_id(config),
+        "build_stage": config.get("build_stage", "full"),
+        "packages": packages,
+        "routing": route_inputs,
+        "source_inputs": source_inputs,
+        "config": config_hash,
+        "config_path": str(config_path) if config_hash else None,
+        "mineru_dir": str(mineru_dir) if mineru_dir else None,
+    }
     for script, arguments in stages:
         code = step(script, *arguments)
         if config_changed(script):
             return 5
         if code:
             return code
+        if script == "page_check.py":
+            # A mostly scanned package may fail verification until OCR fills its source layer.
+            write_json(checkpoint_path, checkpoint)
     if (build / "run-info.json").is_file():
         info = load_json(build / "run-info.json")
         info.update({"images": args.images, "max_image_mb": args.max_image_mb, "tiers": args.tiers})
         write_json(build / "run-info.json", info)
+    if config_hash and config_path != build / "kb-config.json":
+        build.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config_path, build / "kb-config.json")
+    write_json(checkpoint_path, {
+        **checkpoint,
+        "build_id": uuid4().hex,
+        "curation": curation_inputs(build),
+        "report": file_digest(build / VERIFY_REPORT),
+    })
     return 0
 
 

@@ -567,6 +567,7 @@ def main() -> int:
     withdrawn = sum(1 for path in clean.rglob("*.md") if parse_frontmatter(path.read_text(encoding="utf-8")).get("status") == "已失效")
     report: dict[str, Any] = {
         "verified": not errors,
+        "build_stage": config.get("build_stage", "full"),
         "withdrawn": withdrawn,
         "documents": len(published),
         "blocks_kept": len(kept),

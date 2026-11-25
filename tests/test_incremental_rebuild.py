@@ -93,7 +93,10 @@ class IncrementalRebuildTests(PackageOnlyTests):
                           "--name", "测试公司", "--website", "https://example.com", "--owner", "运营",
                           "--source-root", str(self.package), "--confirm")
         self.assertEqual(proj.returncode, 0, proj.stdout + proj.stderr)
-        pub = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault))
+        blocked = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault))
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("--sources-only", blocked.stdout + blocked.stderr)
+        pub = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault), "--sources-only")
         self.assertEqual(pub.returncode, 0, pub.stdout + pub.stderr)
 
     def test_fresh_run_reuses_frozen_extraction_ppt_screenshots_and_remembers_flags(self) -> None:
@@ -134,6 +137,19 @@ class IncrementalRebuildTests(PackageOnlyTests):
         self.assertNotIn("== extract_package_text.py", res_curate.stdout)
         self.assertNotIn("== guard_blocks.py", res_curate.stdout)
         self.assertIn("== verify_kb.py", res_curate.stdout)
+
+        # Even in a fresh run, a changed permission must invalidate the frozen routing.
+        revoked = self.root / "revoked.json"
+        cfg = json.loads(self.config.read_text(encoding="utf-8"))
+        cfg["client_answers"] = {"a1": "drop"}
+        write_json(revoked, cfg)
+        out_revoked = self.root / "run_revoked"
+        rebuilt = run_script("run_pipeline.py", "--out", str(out_revoked), "--vault", str(self.vault),
+                             "--config", str(revoked), "--from", "guard")
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+        self.assertIn("== extract_blocks.py", rebuilt.stdout)
+        routes = json.loads((out_revoked / BUILD_DIRECTORY / "routes.json").read_text(encoding="utf-8"))
+        self.assertEqual(routes["a1"]["route"], "skip")
 
 
 if __name__ == "__main__":
