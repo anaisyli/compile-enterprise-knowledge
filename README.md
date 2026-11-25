@@ -33,6 +33,12 @@
 用 compile-enterprise-knowledge 把 <初筛包路径> 建成知识库，官网是 https://www.example.com ，发布到 <知识库路径>。
 ```
 
+**急着写文章？快车道极简版（MVP）Prompt：**
+```text
+用 compile-enterprise-knowledge 先出极简可用版（--fast），把 <初筛包路径> 建库发布到 <知识库路径>，官网是 https://www.example.com 。先用官网、Word/Excel 和规整 PDF 快速上线速查卡与核心页，重画册和看图核对暂缓。
+```
+> 以后有空补全重画册时，只需说一句：“把 `<知识库路径>` 里快车道暂缓的重画册和看图核对补全（`kb_next.py resume-full`）”，旧文件冻结不重提。
+
 **每段完成后 / 中途中断后的万能续跑 Prompt（直接复制上一轮 AI 给你的续跑句，或新开对话发下面这句）：**
 ```text
 用 compile-enterprise-knowledge 继续推进这个项目：

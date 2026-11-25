@@ -138,10 +138,22 @@ class KbNextTests(unittest.TestCase):
             st2 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st2["stage"], "stage2_extract")
 
-            # Simulate extraction + partial page-check progress -> Stage 3 resumes exact count
+            # Simulate docs/routes WITHOUT OCR outputs -> STILL Stage 2 (catches unfinished MinerU/Reducto!)
             build = out / "04_知识库构建"
             (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
             (build / "routes.json").write_text("{}", encoding="utf-8")
+            st2_ocr = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
+            self.assertEqual(st2_ocr["stage"], "stage2_extract")
+            self.assertIn("item-spec", st2_ocr["ocr_pending"]["mineru_missing"])
+            self.assertIn("item-cat", st2_ocr["ocr_pending"]["reducto_missing"])
+
+            # Write OCR outputs + partial page-check progress -> Stage 3 resumes exact count
+            (build / "mineru-units").mkdir(parents=True, exist_ok=True)
+            (build / "reducto-units").mkdir(parents=True, exist_ok=True)
+            for iid in ("item-spec", "item-d-doc"):
+                (build / "mineru-units" / f"{iid}.json").write_text("{}", encoding="utf-8")
+            for iid in ("item-cat", "item-ppt"):
+                (build / "reducto-units" / f"{iid}.json").write_text("{}", encoding="utf-8")
             (build / "page-check").mkdir(parents=True, exist_ok=True)
             (build / "page-check/todo.jsonl").write_text(
                 '{"key": "a|page 1"}\n{"key": "a|page 2"}\n{"key": "a|page 3"}\n', encoding="utf-8"
@@ -174,6 +186,37 @@ class KbNextTests(unittest.TestCase):
             (vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json").write_text('{"published_at": "2026-11-25"}', encoding="utf-8")
             st_done = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg), "--vault", str(vault)).stdout)
             self.assertEqual(st_done["stage"], "done")
+
+    def test_fast_mvp_and_resume_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg = make_package(root / "pkg")
+            out = root / "run"
+            cfg = root / "kb-config.json"
+            cfg.write_text(json.dumps({"project_id": "P-001", "company": "甲公司"}, ensure_ascii=False), encoding="utf-8")
+
+            self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
+            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--fast").stdout)
+            self.assertTrue(ap["fast_mvp"])
+            self.assertEqual(ap["cloud_approvals"], ["mineru"])
+            self.assertEqual(sorted(ap["deferred_items"]), ["item-cat", "item-ppt"])
+
+            # Simulate MinerU + pipeline done -> jumps straight to Stage 5 (skips page-check & Stage 4)
+            build = out / "04_知识库构建"
+            (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
+            (build / "routes.json").write_text("{}", encoding="utf-8")
+            (build / "mineru-units").mkdir(parents=True, exist_ok=True)
+            (build / "mineru-units/item-spec.json").write_text("{}", encoding="utf-8")
+            st_mvp = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
+            self.assertEqual(st_mvp["stage"], "stage5_curate_publish")
+
+            # Later: resume-full restores deferred catalogs/PPTs and returns cleanly to Stage 2 for Reducto
+            res = json.loads(self.run_cli("resume-full", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员").stdout)
+            self.assertEqual(res["restored_count"], 2)
+            self.assertEqual(res["cloud_approvals"], ["reducto"])
+            st_back = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
+            self.assertEqual(st_back["stage"], "stage2_extract")
+            self.assertEqual(sorted(st_back["ocr_pending"]["reducto_missing"]), ["item-cat", "item-ppt"])
 
 
 if __name__ == "__main__":

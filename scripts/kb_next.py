@@ -345,8 +345,14 @@ def render_stage1_plan_md(plan: dict[str, Any]) -> str:
 
 def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
                       overrides: dict[str, str], d_decisions_path: Path | None,
-                      fallback_mineru: bool) -> dict[str, Any]:
-    """One-shot apply: D-class decisions + sample-decisions.json + MinerU/Reducto approvals."""
+                      fallback_mineru: bool, fast_mvp: bool = False) -> dict[str, Any]:
+    """One-shot apply: D-class decisions + sample-decisions.json + MinerU/Reducto approvals.
+
+    With fast_mvp=True (快车道极简版), heavy Reducto-routed catalogs/PPTs are temporarily deferred
+    into config["deferred_items"] + excluded_items, and page_check is temporarily skipped so a usable
+    MVP (website + Word/Excel + regular MinerU PDFs + brief card) can publish in ~15 minutes.
+    Run `kb_next.py resume-full` later to bring back deferred files and run full page-check/governance.
+    """
     build = out / BUILD_DIRECTORY
     plan_path = build / PLAN_JSON
     if not plan_path.is_file():
@@ -388,6 +394,8 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     kinds_present: set[str] = set()
     used_methods: set[str] = set()
     item_kinds: dict[str, str] = {}
+    deferred: dict[str, dict[str, Any]] = {}
+    excluded = dict(config.get("excluded_items") or {})
 
     effective_files = list(plan.get("routed_files", []))
     for iid in d_applied["keep"]:
@@ -407,6 +415,10 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         method = overrides.get(iid, entry["method"])
         if fallback_mineru and method == "reducto":
             method = "mineru"
+        if fast_mvp and method == "reducto":
+            deferred[iid] = {"name": entry["name"], "kind": kind, "method": "reducto", "pages": entry.get("pages")}
+            excluded[iid] = "快车道极简版暂缓，二期补全"
+            continue
         kinds_present.add(kind)
         item_kinds[iid] = kind
         if kind in PAGED_KINDS and method in METHODS:
@@ -423,7 +435,7 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     write_json(build / DECISIONS, decisions)
     sync_reducto_primary(build, item_kinds, decisions)
 
-    # 3. Record cloud OCR approvals in kb-config.json
+    # 3. Record cloud OCR approvals and optional fast_mvp deferral in kb-config.json
     today = date.today().isoformat()
     if "mineru" in used_methods:
         mineru_cfg = dict(config.get("mineru") or {})
@@ -434,13 +446,76 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
         config["reducto"] = reducto_cfg
 
+    if fast_mvp:
+        config["excluded_items"] = excluded
+        config["deferred_items"] = deferred
+        config["page_check"] = {"skip": "快车道极简版暂跳过，二期补全"}
+        config["build_stage"] = "full"
+        write_json(build / STAGE4_MARKER, {"completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "fast_mvp": True})
+
     write_json(config_path, config)
     return {
         "applied": True,
+        "fast_mvp": fast_mvp,
         "approved_by": approved_by,
         "confirmed_kinds": sorted(kinds_present),
         "cloud_approvals": sorted(m for m in ("mineru", "reducto") if m in used_methods),
+        "deferred_count": len(deferred),
+        "deferred_items": list(deferred),
         "d_applied": d_applied,
+        "next_stage": "stage2_extract",
+    }
+
+
+def resume_full_from_fast(out: Path, config_path: Path, approved_by: str, fallback_mineru: bool = False) -> dict[str, Any]:
+    """Upgrade a fast-MVP vault to full build: restore deferred catalogs/PPTs, re-enable page-check & Stage 4."""
+    build = out / BUILD_DIRECTORY
+    config = load_config(config_path) if config_path.is_file() else {}
+    deferred: dict[str, dict[str, Any]] = dict(config.get("deferred_items") or {})
+    excluded = dict(config.get("excluded_items") or {})
+    decisions = load_decisions(build)
+    item_kinds: dict[str, str] = {}
+    used_methods: set[str] = set()
+
+    for iid, info in deferred.items():
+        excluded.pop(iid, None)
+        kind = info.get("kind", "catalog_pdf")
+        method = "mineru" if fallback_mineru else info.get("method", "reducto")
+        decisions[f"{FILE_PREFIX}{iid}"] = {"method": method}
+        existing = dict(decisions.get(kind) or {})
+        existing["status"] = CONFIRMED
+        existing.setdefault("method", method)
+        decisions[kind] = existing
+        item_kinds[iid] = kind
+        used_methods.add(method)
+
+    config["excluded_items"] = excluded
+    config.pop("deferred_items", None)
+    if (config.get("page_check") or {}).get("skip", "").startswith("快车道"):
+        config.pop("page_check", None)
+
+    today = date.today().isoformat()
+    if "reducto" in used_methods:
+        reducto_cfg = dict(config.get("reducto") or {})
+        reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "二期补全暂缓文件"})
+        config["reducto"] = reducto_cfg
+    if "mineru" in used_methods:
+        mineru_cfg = dict(config.get("mineru") or {})
+        mineru_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "二期补全暂缓文件"})
+        config["mineru"] = mineru_cfg
+
+    write_json(build / DECISIONS, decisions)
+    sync_reducto_primary(build, item_kinds, decisions)
+    write_json(config_path, config)
+    marker = build / STAGE4_MARKER
+    if marker.is_file() and load_json(marker).get("fast_mvp"):
+        marker.unlink()
+
+    return {
+        "resumed_full": True,
+        "restored_count": len(deferred),
+        "restored_items": list(deferred),
+        "cloud_approvals": sorted(used_methods),
         "next_stage": "stage2_extract",
     }
 
@@ -479,16 +554,32 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
             "next_chat_prompt": next_prompt("阶段 2：批量提取"),
         }
 
-    # Stage 2: Need extraction / pipeline
+    # Stage 2: Need extraction / OCR / pipeline
     docs_path = build / "docs.jsonl"
     routes_path = build / "routes.json"
-    if not docs_path.is_file() or not routes_path.is_file():
+    excluded = set(config.get("excluded_items") or {})
+    mineru_missing = [
+        k.removeprefix(FILE_PREFIX)
+        for k, v in decisions.items()
+        if k.startswith(FILE_PREFIX) and isinstance(v, dict) and v.get("method") == "mineru"
+        and k.removeprefix(FILE_PREFIX) not in excluded
+        and not (build / "mineru-units" / f"{k.removeprefix(FILE_PREFIX)}.json").is_file()
+    ]
+    reducto_missing = [
+        k.removeprefix(FILE_PREFIX)
+        for k, v in decisions.items()
+        if k.startswith(FILE_PREFIX) and isinstance(v, dict) and v.get("method") == "reducto"
+        and k.removeprefix(FILE_PREFIX) not in excluded
+        and not (build / "reducto-units" / f"{k.removeprefix(FILE_PREFIX)}.json").is_file()
+    ]
+    if not docs_path.is_file() or not routes_path.is_file() or mineru_missing or reducto_missing:
         return {
             "stage": "stage2_extract",
             "stage_name": "阶段 2：批量云端提取与抽块",
+            "ocr_pending": {"mineru_missing": mineru_missing, "reducto_missing": reducto_missing},
             "instruction": (
-                "按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run（有对应批准才跑），"
-                "再运行 run_pipeline.py --images all（sources_only）生成来源层与 page-check 待办。完成后停下，让用户开新对话进入阶段 3。"
+                "按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run（有对应未完成文件才跑），"
+                "再运行 run_pipeline.py --images all 生成来源层与 page-check 待办。"
             ),
             "next_chat_prompt": next_prompt("阶段 3：看图核对"),
         }
@@ -597,6 +688,13 @@ def main() -> int:
     p_apply.add_argument("--override", action="append", default=[], help="Override one file: <item_id>=<mineru|reducto|text|ai>")
     p_apply.add_argument("--d-decisions", help="Optional JSON/JSONL file with D-class keep/drop/ask_client decisions")
     p_apply.add_argument("--fallback-mineru", action="store_true", help="Downgrade all Reducto-recommended files to MinerU")
+    p_apply.add_argument("--fast", action="store_true", help="Fast MVP mode: defer heavy Reducto catalogs/PPTs and skip page-check for quick first publish")
+
+    p_resume = sub.add_parser("resume-full", help="Upgrade a --fast MVP build to full: restore deferred catalogs/PPTs and re-enable page-check")
+    p_resume.add_argument("--out", required=True, help="Run directory")
+    p_resume.add_argument("--config", required=True, help="kb-config.json")
+    p_resume.add_argument("--approved-by", required=True, help="Person approving phase-2 full build")
+    p_resume.add_argument("--fallback-mineru", action="store_true", help="Use MinerU instead of Reducto for restored files")
 
     p_status = sub.add_parser("status", help="Detect exact current stage and remaining progress from disk")
     p_status.add_argument("--out", required=True, help="Run directory")
@@ -633,7 +731,12 @@ def main() -> int:
             k, v = item.split("=", 1)
             overrides[k.strip()] = v.strip()
         d_path = Path(args.d_decisions).resolve() if args.d_decisions else None
-        result = apply_stage1_plan(out, Path(args.config).resolve(), args.approved_by, overrides, d_path, args.fallback_mineru)
+        result = apply_stage1_plan(out, Path(args.config).resolve(), args.approved_by, overrides, d_path, args.fallback_mineru, fast_mvp=args.fast)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "resume-full":
+        result = resume_full_from_fast(out, Path(args.config).resolve(), args.approved_by, args.fallback_mineru)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

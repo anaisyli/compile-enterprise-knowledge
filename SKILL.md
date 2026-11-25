@@ -1,6 +1,6 @@
 ---
 name: compile-enterprise-knowledge
-description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 Obsidian 知识库：来源层是净化后的原文，只删不改，每份带来源卡片；整理层是给人看的知识页，比如公司概况、产品大类、定制能力、面料工艺、FAQ，每条都链接回原文并经脚本核对。价格和客户信息按初筛规则删除；品牌、IP、冲突、待客户确认等风险内容不拦，标记后登记到 05_数据与审核 的 CUS/MAT/ANM 台账。也负责：用 MinerU 解析图片型画册（含首次设置 Token），读取客户官网，产品表逐格判断，建库、发布、检索和日常维护；按知识库缺口或文章大纲做外部调研（只查行业公共知识，入 20_外部公共知识）；给写作 Skill 按小板块取资料（kb_lookup.py）。只要用户提到把初筛包建库、转成 md 知识库、整理正式知识、把资料放进 Obsidian、生成 P-005 这种结构的知识库、用 MinerU 解析画册、抓客户官网进知识库、维护或更新知识库、按缺口外部调研、写文章时从知识库取资料，就使用本 Skill，即使没有提到它的名字。不要用它筛选原始资料（用 prepare-seo-knowledge-materials），也不要用它处理单篇文章的知识任务（用 manage-article-knowledge）。
+description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 Obsidian 知识库：来源层是净化后的原文，只删不改，每份带来源卡片；整理层是给人看的知识页，比如公司概况、产品大类、定制能力、面料工艺、FAQ，每条都链接回原文并经脚本核对。价格和客户信息按初筛规则删除；品牌、IP、冲突、待客户确认等风险内容不拦，标记后登记到 05_数据与审核 的 CUS/MAT/ANM 台账。也负责：用 MinerU / Reducto 解析 PDF 和 PPT（含首次设置 Token/Key），读取客户官网，产品表逐格判断，建库、发布、检索、月度体检和日常维护；按知识库缺口或文章大纲做外部调研（只查行业公共知识，入 20_外部公共知识）；给写作 Skill 按小板块取资料与引用核对（kb_lookup.py / check_article.py）。只要用户提到把初筛包建库、转成 md 知识库、整理正式知识、把资料放进 Obsidian、生成 P-005 这种结构的知识库、用 MinerU/Reducto 解析画册、抓客户官网进知识库、维护或月度体检知识库、按缺口外部调研、写文章时从知识库取资料，就使用本 Skill，即使没有提到它的名字。不要用它筛选原始资料（用 prepare-seo-knowledge-materials）。
 ---
 
 # 企业知识库编译
@@ -50,7 +50,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - 运行 `python scripts/kb_next.py plan --package <初筛包> --out <运行目录> --config <kb-config.json>`。脚本快速扫描所有 PDF/PPT 的页数与版面（PPT、产品画册、横版/图文设计密集 PDF 默认推荐 **Reducto**；Word 转的规整 PDF、规格书默认推荐 **MinerU** 免费额度；Word/Excel/TXT 本地直读），并输出《未处理 / 特殊文件清点》（压缩包、图纸、音视频、异常文件）。
    - **D 类前置捞回**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）快速初判为 `keep`（捞回并算入本轮提取页数）、`drop`（丢弃）或 `ask_client`（进第 4 阶段客户确认网页），绝不默默跳过可用 D 类文件。
    - 把 **① 5 项建库基础信息（首次）+ ② MinerU/Reducto 分流表与总页数 + ③ D 类初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
-   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准，然后按商定的节奏继续执行（或提示新开对话进入下一段）。
+   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT 与 `page-check`，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件即可）。确认后按商定的节奏继续执行（或提示新开对话进入下一段）。
 3. **阶段 2（批量云端提取 + 抽块）**：
    - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（`build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后停下并给出阶段 3 新对话 Prompt。
 4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
@@ -80,7 +80,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
    - 整份图纸类 PDF（尺寸图、六视图、装配图、效果图）按素材处理，每页转成图进 `90_素材`；画册或说明书里的尺寸图页仍走看图核对，选“尺寸图”后只记型号和图名，不抄标注。判错的在配置写 `drawing_items` / `not_drawing_items`。同名的 Word / PPT 和 PDF 只入库 Word / PPT 那份。规则见合同“来源层”。
 
-3. **先提取样例，确认后再批量提取**（这一步必须停下等用户）：
+3. **（手动样例模式，仅当用户明确要求先看样例再批量提取时使用；默认走上方 `kb_next.py` 阶段 1 自动分流一次确认）**：
    - 第 2 步开头的 `sample_gate.py` 按文件类型分类，每类挑一份做样例。没确认的类**只提取样例那一份**，AI 读图、看图核对、MinerU 也只做样例。规则见合同“来源层”的“处理计划与样例”。
    - 第一次跑完第 2 步就停下，不往下做。先把样例做完看图核对（第 7 步，只有样例的页），让“样例情况”有数。然后打开 `02_源资料/处理计划与样例.md`（运行目录里在 `04_知识库构建/vault/` 下），逐类告诉用户：有几份、在初筛包哪里、**怎么提取的**、**表格与合并单元格/多层表头情况**（skill 会如何处理：如 Excel 技术表/Word 合并表按 HTML `<table>` 保留跨行跨列，Excel 报价单展开竖向合并单元格，PDF/PPT 复杂多层表头建议对比 MinerU 与 Reducto）、样例是哪份、样例情况和建议，并把样例的净化原文和原件（“打开原件”）一起给用户对照看。
    - **PDF、PPT 由用户按样例选处理方式**（“处理方式”一列，不选就是文字层）。每页仍有分级展示（`page-triage.json`）：**A 文字页**、**B 图文页**、**C 难页**（没有文字层）、**D 冲突页**（两个来源款号或数字对不上，或文字层有而平台漏读）。处理方式决定怎么读和核对：
@@ -159,7 +159,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 13. **独立通读：** 让一个独立子 Agent 对照原件核对 `04_知识库构建/抽样核对.md`，并通读整理页和至少 15 份来源文档。只给它清单和初筛包路径，不告诉它规则。发现错误先修规则再重跑。
 
 14. **建库和发布：**
-    - 第一次发布前运行 `kb_project.py`，`--source-root` 填初筛包路径。它会列出五项基础信息并停下，用户回复“确认建库”后再加 `--confirm`。装了 manage 时，先跑它的 `initialize_project.py`。
+    - 第一次发布前运行 `kb_project.py`，`--source-root` 填初筛包路径。若阶段 1 确认卡里用户**已经核对并同意过五项基础信息**，可直接带 `--confirm` 初始化，不再二次停下打断；否则先列出五项基础信息等用户回复“确认建库”后再加 `--confirm`。
     - 用户确认后运行 `publish_vault.py --out <运行目录> --vault <项目目录>`。想先看会撤下、改名、新增什么，加 `--dry-run`。
     - 一次要让很多资料变成“已失效”时（超过 5 份且超过两成），发布会停下。这通常是官网没读到或少给了初筛包，先查清楚；用户确认确实要撤下，才加 `--allow-withdraw`。
 
@@ -215,17 +215,9 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 `research.py status` 看待调研、待抽检和过了复查日期的页；抽检后用 `research.py mark --page <页名> --status 有效|已失效` 记下。写入时会加知识库锁：另一台电脑正在发布或调研时退出码为 3，等它跑完再来。
 
-## 给写作 Skill 取资料（只读）
+## 给写作 Skill 取资料与引用核对
 
-规则见合同“写作取资料”。写作 Skill 不读整页、不回原文：
-
-1. 看 `01_工作台/写作目录.md`（或 `kb_lookup.py catalog --vault <知识库>`），按大纲挑“页名#小板块”或“页名#小板块 > 子节”。英文大纲对中文小板块，由写作 Skill 自己判断，不靠脚本猜。
-2. `kb_lookup.py pack --vault <知识库> --sections "…;…" --gaps "目录里找不到的大纲节;…" [--output 资料包.md]`。资料包分：速查卡、客户专属事实（可以代表公司写）、行业公共知识（只作背景和论据）、口径避坑（相关页的“需核实”）、缺口（标客户专属或公共知识，并到原文里搜一遍）。
-3. 公共知识缺口要补时走上面的“按文章”外部调研，collect 后再 pack 一次。
-4. 长表默认折叠，要整张加 `--full-tables`；要〔n〕出处加 `--with-sources`。
-5. 写完运行 `check_article.py --article <终稿> --pack <资料包> --vault <知识库>`，按“资料包里没有 / 只出现在口径避坑 / 只出现在未整理原文 / 竞品名称”改，剩下的写进交付说明；只提醒，不挡交付。
-
-写作方的完整规则在 [references/writer-guide.md](references/writer-guide.md)：各写作 Skill 只加一小段指向它（接入 Prompt 在 README“写作 Skill 怎么接入”），每次写文章现读。改写作方规则时只改 writer-guide，不要求各写作 Skill 重改。
+唯一规则来源在 [references/writer-guide.md](references/writer-guide.md)（包含范围锁、先锁 `大纲.md` 再用 `kb_lookup.py pack --task` 取带 `[K#]` 编号的资料包、行业公共知识缺口调研、写完用 `check_article.py --citations` 生成 `引用追溯.md` 并更新 `04_文章任务/00_文章台账.md`）。各写作 Skill 只加一小段指向 `writer-guide.md`（接入 Prompt 见 README），每次写文章现读，不在此重复维护两份规则。
 
 ## 发布后的知识库
 
@@ -266,13 +258,13 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 ## 只在这些情况停下
 
-- 第 3 步：有类型的样例还没被用户确认。先给用户看样例，确认后再批量提取。
+- 阶段 1 预检分流、D 类初判与云端页数（或手动样例模式下的样例）还没得到用户同意（通过 `kb_next.py apply-plan` 一次授权后，后续 MinerU / Reducto 上传不再二次停下）。
 - 输入不是通过校验的初筛包。
 - 校验报告“大部分资料读不到文字”：先补 pypdf 或 LibreOffice。
-- MinerU 上传、写入知识库目录，还没有得到用户同意。
+- MinerU / Reducto 上传或首次写入知识库目录，还没有得到用户同意。
 - 按缺口的外部调研清单，用户还没定调研哪些。
 - `verify_kb.py` 的错误修配置后仍无法消除。
-- Token 需要用户本人设置或更换。
+- Token / API Key 需要用户本人设置或更换。
 
 其他问题登记进台账后继续。
 
