@@ -61,11 +61,12 @@ def candidates(build: Path, package_paths: dict[str, Path], samples_only: bool =
                 reasons.append("样例试读：看 MinerU 的效果，再定这类文件怎么处理")
         else:
             method, source = method_and_source(kind, decisions, item_id)
-            if route["route"] == "kb" and method == "mineru":
+            left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" and method in {"text", "mineru"} else []
+            if (route["route"] == "kb" and method == "mineru"
+                    and (not route.get("ocr_pages") or left)):
                 reasons.append(f"这份文件按“{METHODS['mineru']}”处理" if source == "文件"
                                else f"这类（{TYPES.get(kind, ('', ''))[0]}）按“{METHODS['mineru']}”处理")
             # Files read by the model (no upload) or by Reducto keep their no-text pages away from MinerU.
-            left = remaining_ocr_pages(build, item_id, route.get("ocr_pages") or []) if route["route"] == "kb" and method in {"text", "mineru"} else []
             if left:
                 reasons.append(f"{len(left)} 页没有文字层或文字很少，还没人读过")
             if unreadable(route):
@@ -277,6 +278,9 @@ def main() -> int:
     if not chosen and scope.get("batch_scoped"):
         print(json.dumps({"done": 0, "outside_approval": outside_scope}, ensure_ascii=False))
         return 0
+    if not chosen:
+        print(json.dumps({"done": 0, "cached": 0, "failed": 0, "outside_approval": outside_scope}, ensure_ascii=False))
+        return 0
     ok, reason = approved(config)
     if not ok:
         print(json.dumps({"ok": False, "reason": reason, "plan": str(build / "mineru-plan.md")}, ensure_ascii=False))
@@ -311,7 +315,15 @@ def main() -> int:
         target = units_dir / f"{entry['item_id']}.json"
         previous = load_json(target) if target.is_file() else {}
         same_version = previous.get("source_hash") == entry["source_hash"]
-        if same_version and previous.get("source") == "mineru" and previous.get("units"):
+        required_pages = set(routes[entry["item_id"]].get("ocr_pages") or [])
+        covered_pages = {
+            int(match.group(1))
+            for unit in previous.get("units", [])
+            if (match := re.fullmatch(r"(?:page|slide) ([1-9]\d*) ocr", unit.get("locator", "")))
+            and ((unit.get("text") or "").strip() or unit.get("empty"))
+        }
+        if (same_version and previous.get("source") == "mineru" and previous.get("units")
+                and (not required_pages or required_pages.issubset(covered_pages))):
             report["cached"].append(entry["display_name"])
             continue
         if cached.is_file():
@@ -331,6 +343,14 @@ def main() -> int:
                 continue
             write_json(cached, units)
             report["done"].append(entry["display_name"])
+        covered_pages = {
+            int(match.group(1))
+            for unit in units
+            if (match := re.fullmatch(r"(?:page|slide) ([1-9]\d*) ocr", unit.get("locator", "")))
+            and ((unit.get("text") or "").strip() or unit.get("empty"))
+        }
+        units += [{"locator": f"page {number} ocr", "text": "", "empty": True, "engine": "mineru"}
+                  for number in sorted(required_pages - covered_pages)]
         # Pages the model read and MinerU did not stay; MinerU's reading replaces the rest.
         read = {unit["locator"] for unit in units}
         if same_version:

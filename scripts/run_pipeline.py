@@ -17,7 +17,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from build_progress import (PIPELINE_CHECKPOINT, VERIFY_REPORT, batch_id, curation_inputs,
-                            extracted_inputs, file_digest, package_digests, routing_inputs)
+                            extracted_inputs, file_digest, output_digests, package_digests,
+                            package_input_digests, routing_inputs)
 from kb_common import (BUILD_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, load_config, load_json, run_lock, sha256_file,
                        site_view_unset, write_json)
 from kb_state import STATE, config_base, json_object, record_adopted, restore
@@ -184,6 +185,17 @@ def main() -> int:
                 args.max_image_mb = str(info["max_image_mb"])
             if args.tiers is None and info.get("tiers"):
                 args.tiers = str(info["tiers"])
+    if not args.config:
+        # Reuse the run directory's saved config when resuming without --vault.
+        # Otherwise later stages would silently build with defaults while the
+        # publish step could still pick up the saved config.
+        previous_config = Path(previous["config_path"]) if previous.get("config_path") else None
+        candidates = [path for path in (out / "kb-config.json", build / "kb-config.json") if path.is_file()]
+        if previous_config and previous_config.is_file():
+            candidates.append(previous_config)
+        saved_config = max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+        if saved_config is not None:
+            args.config = str(saved_config)
     args.images = args.images or "xlsx"
     args.max_image_mb = args.max_image_mb or "5"
     args.tiers = args.tiers or "T1,T2"
@@ -207,15 +219,26 @@ def main() -> int:
     config_hash = sha256_file(config_path) if config_path and config_path.is_file() else None
     config = load_config(config_path if config_hash else None)
     packages = package_digests([Path(path) for path in args.package])
+    package_inputs = package_input_digests([Path(path) for path in args.package])
     mineru_dir = Path(args.ocr_text_dir).resolve() if args.ocr_text_dir else None
     source_inputs = extracted_inputs(build, mineru_dir)
     route_inputs = routing_inputs(build, config)
     if args.start_from != "extract" and previous and (
         previous.get("packages") != packages
+        or previous.get("package_inputs") != package_inputs
         or previous.get("routing") != route_inputs
         or previous.get("source_inputs") != source_inputs
     ):
-        print("初筛包、资料去向、表格设置或识别结果已变，改跑完整流水线并复用已有提取稿。")
+        changed = []
+        if previous.get("packages") != packages:
+            changed.append("初筛包清单")
+        if previous.get("package_inputs") != package_inputs:
+            changed.append("初筛包文件")
+        if previous.get("routing") != route_inputs:
+            changed.append("资料去向/表格设置")
+        if previous.get("source_inputs") != source_inputs:
+            changed.append("OCR/看图核对")
+        print(f"{'、'.join(changed)}已变，改跑完整流水线并复用已有提取稿。")
         args.start_from = "extract"
 
     def config_changed(script: str) -> bool:
@@ -286,20 +309,65 @@ def main() -> int:
         "batch_id": batch_id(config),
         "build_stage": config.get("build_stage", "full"),
         "packages": packages,
+        "package_inputs": package_inputs,
         "routing": route_inputs,
         "source_inputs": source_inputs,
         "config": config_hash,
         "config_path": str(config_path) if config_hash else None,
         "mineru_dir": str(mineru_dir) if mineru_dir else None,
+        "normalization_vault": str(Path(args.vault).resolve()) if args.vault else None,
     }
+    verification_snapshots: dict[str, object] | None = None
     for script, arguments in stages:
+        if script == "verify_kb.py" and args.vault:
+            from refresh_navigation import normalize_build
+            normalize_build(out, Path(args.vault).resolve())
+        if script == "verify_kb.py":
+            if package_input_digests([Path(path) for path in args.package]) != checkpoint["package_inputs"]:
+                print("初筛包输入在构建期间发生变化；这次结果作废，请重跑 run_pipeline.py。")
+                return 5
+            current_config = load_config(config_path if config_path and config_path.is_file() else None)
+            checkpoint["batch_id"] = batch_id(current_config)
+            checkpoint["routing"] = routing_inputs(build, current_config)
+            checkpoint["source_inputs"] = extracted_inputs(build, mineru_dir)
+            checkpoint["curation"] = curation_inputs(build)
+            checkpoint["validated_files"] = output_digests(out, checkpoint["build_stage"])
+            verification_snapshots = {
+                "routing": checkpoint["routing"],
+                "source_inputs": checkpoint["source_inputs"],
+                "package_inputs": checkpoint["package_inputs"],
+                "curation": checkpoint["curation"],
+                "validated_files": checkpoint["validated_files"],
+            }
+            write_json(checkpoint_path, checkpoint)
         code = step(script, *arguments)
         if config_changed(script):
             return 5
         if code:
             return code
+        if script == "verify_kb.py" and checkpoint["source_inputs"] != extracted_inputs(build, mineru_dir):
+            print("OCR 或看图核对文件在校验期间发生变化；这次校验结果作废，请重跑 run_pipeline.py。")
+            return 5
+        if script == "verify_kb.py" and verification_snapshots is not None:
+            final_config = load_config(config_path if config_path and config_path.is_file() else None)
+            current = {
+                "routing": routing_inputs(build, final_config),
+                "source_inputs": extracted_inputs(build, mineru_dir),
+                "package_inputs": package_input_digests([Path(path) for path in args.package]),
+                "curation": curation_inputs(build),
+                "validated_files": output_digests(out, checkpoint["build_stage"]),
+            }
+            labels = {"routing": "资料分流", "source_inputs": "OCR/看图核对", "package_inputs": "初筛包输入",
+                      "curation": "整理页原稿", "validated_files": "发布文件"}
+            changed = [labels[key] for key, value in verification_snapshots.items() if current[key] != value]
+            changed += ["初筛包清单"] if package_digests([Path(path) for path in args.package]) != checkpoint["packages"] else []
+            changed += ["授权批次"] if batch_id(final_config) != checkpoint["batch_id"] else []
+            if changed:
+                print(f"校验期间输入或发布文件发生变化（{'、'.join(changed)}）；这次校验结果作废，请重跑 run_pipeline.py。")
+                return 5
         if script == "page_check.py":
             # A mostly scanned package may fail verification until OCR fills its source layer.
+            checkpoint["source_inputs"] = extracted_inputs(build, mineru_dir)
             write_json(checkpoint_path, checkpoint)
     if (build / "run-info.json").is_file():
         info = load_json(build / "run-info.json")
@@ -308,6 +376,11 @@ def main() -> int:
     if config_hash and config_path != build / "kb-config.json":
         build.mkdir(parents=True, exist_ok=True)
         shutil.copy2(config_path, build / "kb-config.json")
+    build_config_hash = file_digest(build / "kb-config.json")
+    if build_config_hash != config_hash:
+        print("运行目录保存的 kb-config.json 与本次校验使用的配置不一致；这次结果作废，请检查配置后重跑。")
+        return 5
+    checkpoint["effective_config"] = build_config_hash
     write_json(checkpoint_path, {
         **checkpoint,
         "build_id": uuid4().hex,

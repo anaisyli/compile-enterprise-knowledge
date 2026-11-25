@@ -12,8 +12,10 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from build_progress import (PIPELINE_CHECKPOINT, VERIFY_REPORT, batch_id, extracted_inputs, file_digest,
+                            output_digests, package_digests, package_input_digests, routing_inputs)
 from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, cleanup_record, merge_ledger, parse_ledger, render_ledger, strip_fingerprints
-from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_json, load_jsonl, run_lock, write_json, write_jsonl, write_text
+from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_config, load_json, load_jsonl, run_lock, write_json, write_jsonl, write_text
 from pictures import INDEX, LIST_CSV, PUBLIC, CONFIRMED_MEDIA, retained_media, retained_section
 
 REGISTER = "02_源资料/源资料与可检索性台账.md"
@@ -226,6 +228,7 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
                     recovered[kind] = len(parse_ledger(texts[key])[1])
                     break
     texts[INDEX], texts[LIST_CSV] = material_texts(build, texts[INDEX], texts[LIST_CSV])
+    blocks_changed = False
     if (build / "blocks.jsonl").is_file() and (build / "docs.jsonl").is_file():
         vault_decisions = vault / "05_数据与审核/70_构建状态/review-decisions.json"
         build_decisions = build / "review-decisions.json"
@@ -235,7 +238,6 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
         decisions = load_json(decisions_path) if decisions_path.is_file() else {}
         drop_blocks = set(decisions.get("drop_blocks", []))
         blocks = load_jsonl(build / "blocks.jsonl")
-        blocks_changed = False
         for block in blocks:
             if (block["block_id"] in drop_blocks or block.get("part_of") in drop_blocks) and not block.get("reviewed_removal"):
                 if block["status"] in {"kept", "flagged", "pending_client"}:
@@ -303,6 +305,36 @@ def refresh(run: Path, vault: Path, apply: bool = False, recover: bool = False, 
                        "只维护生成页及台账历史，未提取、未发布。以下文件的旧版已备份：\n\n"
                        + "\n".join(f"- {key}" for key in changed) + "\n")
         write_json(build / "navigation-refresh.json", result)
+        checkpoint_path = build / PIPELINE_CHECKPOINT
+        checkpoint = load_json(checkpoint_path) if checkpoint_path.is_file() else {}
+        allowed_changes = set(keys) | set(STATUS_PAGES) | {CLEANUP}
+        report = load_json(build / VERIFY_REPORT) if (build / VERIFY_REPORT).is_file() else {}
+        config_path = build / "kb-config.json"
+        config = load_config(config_path) if config_path.is_file() else {}
+        mineru_dir = Path(checkpoint["mineru_dir"]) if checkpoint.get("mineru_dir") else build / "mineru-units"
+        package_paths = [Path(path) for path in checkpoint.get("packages", {})]
+        checkpoint_config = (file_digest(Path(checkpoint["config_path"]))
+                             if checkpoint.get("config_path") and Path(checkpoint["config_path"]).is_file()
+                             else file_digest(config_path))
+        inputs_current = (
+            checkpoint.get("batch_id") == batch_id(config)
+            and checkpoint.get("packages") == package_digests(package_paths)
+            and checkpoint.get("package_inputs") == package_input_digests(package_paths)
+            and checkpoint.get("routing") == routing_inputs(build, config)
+            and checkpoint.get("source_inputs") == extracted_inputs(build, mineru_dir)
+            and (checkpoint.get("config") is None or checkpoint.get("config") == checkpoint_config)
+        )
+        current_outputs = output_digests(run, checkpoint.get("build_stage", "full"))
+        old_outputs = checkpoint.get("validated_files")
+        changed_outputs = ({key for key in set(current_outputs) | set(old_outputs)
+                            if current_outputs.get(key) != old_outputs.get(key)} if isinstance(old_outputs, dict) else None)
+        # Navigation may refresh generated status pages after verification, but not changed source or curation output.
+        if (checkpoint.get("build_id") and report.get("verified") is True and not blocks_changed and not recovered
+                and not all_links and set(changed).issubset(allowed_changes)
+                and checkpoint.get("report") == file_digest(build / VERIFY_REPORT) and inputs_current
+                and changed_outputs is not None and changed_outputs.issubset(allowed_changes)):
+            checkpoint["validated_files"] = current_outputs
+            write_json(checkpoint_path, checkpoint)
     return result
 
 

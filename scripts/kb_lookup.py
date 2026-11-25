@@ -116,7 +116,7 @@ def load_rules(vault: Path | None = None) -> dict[str, Any]:
 def parse_page(path: Path, layer: str) -> Page | None:
     text = path.read_text(encoding="utf-8")
     fields = parse_frontmatter(text)
-    if fields.get("status") == "已失效":
+    if fields.get("status") == "已失效" or fields.get("source_refresh_required", "").casefold() == "true":
         return None
     body = text.split("\n---\n", 1)[-1] if text.startswith("---\n") else text
     title = next((m.group(1).strip() for m in re.finditer(r"(?m)^# (.+)$", body)), fields.get("title") or path.stem)
@@ -685,7 +685,7 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
         if not reuse and (vault / "02_源资料/knowledge-index.sqlite").is_file():
             # Material waiting for the client's answer is not used before the answer comes.
             hits = [h for h in search(vault, gap, FALLBACK_HITS * 3, None, None, ["原文"])
-                    if h["status"] not in {"待客户确认", "已失效"}][:FALLBACK_HITS]
+                    if h["status"] not in {"待客户确认", "已失效", "待重整"}][:FALLBACK_HITS]
         gap_rows.append({"gap": gap, "kind": kind, "reused": [f"{s.page.stem}#{s.name}" for s in reuse], "source_hits": hits})
     used_pages = list(dict.fromkeys(s.page for s in chosen))
     brief_page = next((p for p in pages if p.stem == BRIEF_STEM), None)

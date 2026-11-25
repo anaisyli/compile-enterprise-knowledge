@@ -16,6 +16,8 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from build_progress import (PIPELINE_CHECKPOINT, curation_inputs, extracted_inputs, output_digests,
+                            package_input_digests)
 from source_fidelity import reviewed_units
 from split_reviews import split_errors
 from sheet_layout import excel_date
@@ -282,6 +284,24 @@ def main() -> int:
     pages = {page["page_id"]: page for page in load_json(website / "pages.json")} if (website / "pages.json").is_file() else {}
     own_domains = {domain.casefold() for domain in config["own_domains"]}
     errors: list[str] = []
+    checkpoint_path = build / PIPELINE_CHECKPOINT
+    checkpoint = load_json(checkpoint_path) if checkpoint_path.is_file() else {}
+    expected_sources = checkpoint.get("source_inputs")
+    expected_package_inputs = checkpoint.get("package_inputs")
+    expected_curation = checkpoint.get("curation")
+    expected_outputs = checkpoint.get("validated_files")
+    initial_sources = extracted_inputs(build, ocr_dir)
+    initial_package_inputs = package_input_digests(packages)
+    initial_curation = curation_inputs(build)
+    initial_outputs = output_digests(run, config.get("build_stage", "full"))
+    if expected_sources is not None and expected_sources != initial_sources:
+        errors.append("看图核对或 OCR 输入与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
+    if expected_package_inputs is not None and expected_package_inputs != initial_package_inputs:
+        errors.append("初筛包输入与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
+    if expected_curation is not None and expected_curation != initial_curation:
+        errors.append("整理页原稿与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
+    if expected_outputs is not None and expected_outputs != initial_outputs:
+        errors.append("发布文件与流水线校验快照不一致；请重跑 run_pipeline.py 后再校验")
 
     # Every item in the package has a recorded fate.
     asset_ids = {asset["item_id"] for asset in assets}
@@ -500,7 +520,10 @@ def main() -> int:
     plan_path = build / "page-check" / "plan.json"
     check_plan = load_json(plan_path) if plan_path.is_file() else {}
     checked = load_json(build / "page-check" / "results.json") if (build / "page-check" / "results.json").is_file() else {}
-    waiting = check_plan.get("to_check", 0)
+    todo_path = build / "page-check" / "todo.jsonl"
+    todo_entries = load_jsonl(todo_path) if todo_path.is_file() else []
+    waiting = sum(checked.get(entry.get("key"), {}).get("review_digest") != entry.get("review_digest")
+                  for entry in todo_entries if entry.get("key"))
     skip = config.get("page_check", {}).get("skip") if isinstance(config.get("page_check"), dict) else None
     if check_plan.get("ok") is False:
         warnings.append(f"没做看图核对：{check_plan.get('reason')}")
@@ -565,6 +588,27 @@ def main() -> int:
     write_text(build / "抽样核对.md", "\n".join(lines) + "\n")
 
     withdrawn = sum(1 for path in clean.rglob("*.md") if parse_frontmatter(path.read_text(encoding="utf-8")).get("status") == "已失效")
+    final_sources = extracted_inputs(build, ocr_dir)
+    final_package_inputs = package_input_digests(packages)
+    final_curation = curation_inputs(build)
+    final_outputs = output_digests(run, config.get("build_stage", "full"))
+    if expected_sources is not None and expected_sources != final_sources:
+        message = "看图核对或 OCR 输入在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
+        if message not in errors:
+            errors.append(message)
+    if expected_package_inputs is not None and expected_package_inputs != final_package_inputs:
+        message = "初筛包输入在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
+        if message not in errors:
+            errors.append(message)
+    if expected_curation is not None and expected_curation != final_curation:
+        message = "整理页原稿在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
+        if message not in errors:
+            errors.append(message)
+    if expected_outputs is not None and expected_outputs != final_outputs:
+        message = "发布文件在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
+        if message not in errors:
+            errors.append(message)
+
     report: dict[str, Any] = {
         "verified": not errors,
         "build_stage": config.get("build_stage", "full"),

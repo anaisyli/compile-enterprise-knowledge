@@ -205,7 +205,8 @@ def store_ai_units(build: Path, by_item: dict[str, list[dict[str, Any]]]) -> Non
                                                          "source_hash": routes.get(item_id, {}).get("source_hash", "")}
         taken = {u["locator"] for u in record.get("units", []) if u.get("engine") != "ai"}
         kept = [u for u in record.get("units", []) if u.get("engine") != "ai" or u["locator"] not in {n["locator"] for n in units}]
-        record["units"] = sorted(kept + [u for u in units if u["locator"] not in taken and u.get("text", "").strip()],
+        record["units"] = sorted(kept + [u for u in units if u["locator"] not in taken
+                                         and (u.get("text", "").strip() or u.get("empty"))],
                                  key=lambda u: int(u["locator"].split()[1]) if u["locator"].split()[1].isdigit() else 0)
         record["ai_read_at"] = date.today().isoformat()
         write_json(path, record)

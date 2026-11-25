@@ -109,13 +109,13 @@ def build(project: Path) -> dict[str, Any]:
         fields = parse_frontmatter(text)
         if not fields.get("doc_id"):
             continue  # Hand-written notes are the reader's own; they are not indexed.
-        status = fields.get("status", "有效")
+        status = "待重整" if fields.get("source_refresh_required", "").casefold() == "true" else fields.get("status", "有效")
         relative = page.relative_to(project).as_posix()
         aliases = aliases_of(fields)
         connection.execute("insert into docs values (?,?,?,?,?,?,?,?,?)",
                            (fields["doc_id"], fields.get("title", page.stem), fields.get("tier"), fields.get("visibility"),
                             fields.get("module"), relative, status, layer_of(relative), "、".join(aliases)))
-        if status in {"已失效"}:
+        if status in {"已失效", "待重整"}:
             continue
         body = text.split("\n---\n", 1)[-1]
         names = " ".join([fields.get("title", page.stem), *aliases])
@@ -161,7 +161,7 @@ def search(project: Path, query: str, limit: int, visibility: str | None, tier: 
         return []
     connection = sqlite3.connect(local_copy(project))
     sql = ("select d.title, d.layer, d.tier, d.visibility, d.status, d.path, c.section, c.text "
-           "from chunks c join docs d on d.doc_id = c.doc_id where chunks match ?")
+           "from chunks c join docs d on d.doc_id = c.doc_id where chunks match ? and d.status != '待重整'")
     parameters: list[Any] = [" OR ".join(terms)]
     if visibility:
         sql += " and d.visibility = ?"

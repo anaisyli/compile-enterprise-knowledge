@@ -22,6 +22,7 @@ MinerU, when it may be used, reads better; this checks and fills gaps, it does n
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -99,7 +100,7 @@ RULES = """# 看图核对规则
 
 每张图写一行 JSON，存成本目录下的 answer-001.jsonl（可以分几个文件，可以分给几个子 Agent）：
 
-    {"key": "<todo.jsonl 里的 key>", "missing": "", "text_errors": "", "pairing": "", "unclear": false,
+    {"key": "<todo.jsonl 里的 key>", "review_digest": "<todo.jsonl 里的 review_digest>", "missing": "", "text_errors": "", "pairing": "", "unclear": false,
      "structure": "", "structured": "", "drawing_model": ""}
 
 写完运行 `page_check.py collect --out <运行目录>`，再重跑流水线。补进去的字会标 ⚠“AI 看图补充，待核对”。
@@ -121,6 +122,46 @@ def page_text(units: list[dict[str, str]], unit: str, number: int) -> str:
 
 def draft_sources(text: str) -> list[str]:
     return ["文字层"] + [name for name in ("MinerU 识别", "Reducto 识别", "AI 读图") if f"【{name}" in text]
+
+
+def review_digest(entry: dict[str, Any], source_hash: str) -> str:
+    image = Path(entry.get("image", ""))
+    snapshot = {
+        "key": entry.get("key"),
+        "source_hash": source_hash,
+        "unit": entry.get("unit"),
+        "page": entry.get("page"),
+        "text": entry.get("text", ""),
+        "reasons": entry.get("reasons", []),
+        "draft": entry.get("draft", []),
+        "grade": entry.get("grade"),
+        "image_hash": sha256_file(image) if image.is_file() else None,
+    }
+    data = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def preview_path(folder: Path, item_id: str, source_hash: str, unit: str, number: int, extension: str) -> Path:
+    kind = "i" if unit == "image" else "p"
+    source_key = source_hash[:16] if source_hash else "unversioned"
+    return folder / f"{item_id}-{source_key}-{kind}{number}{extension}"
+
+
+def invalidate_reviews(build: Path, results: dict[str, Any], stale: set[str]) -> None:
+    for key in stale:
+        entry = results.pop(key, {})
+        item_id, unit, page = entry.get("item_id"), entry.get("unit"), entry.get("page")
+        if not item_id or unit not in {"page", "slide", "image"} or not isinstance(page, int):
+            continue
+        path = build / "mineru-units" / f"{item_id}.json"
+        if not path.is_file():
+            continue
+        record = load_json(path)
+        removed = {f"{unit} {page} check", f"{unit} {page} drawing"}
+        record["units"] = [u for u in record.get("units", [])
+                           if not (u.get("engine") == "ai" and u.get("locator") in removed)]
+        write_json(path, record)
+    write_json(build / RESULTS, results)
 
 
 def code_pattern(prefixes: list[str]) -> re.Pattern[str]:
@@ -246,6 +287,12 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     pictures = folder / "pages"
     pictures.mkdir(parents=True, exist_ok=True)
     done = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
+    stale_sources = {key for key, result in done.items()
+                     if result.get("item_id") not in routes
+                     or not routes[result["item_id"]].get("source_hash")
+                     or result.get("source_hash") != routes[result["item_id"]].get("source_hash")}
+    if stale_sources:
+        invalidate_reviews(build, done, stale_sources)
     sampling_path = folder / "sampling.json"
     sampling = load_json(sampling_path) if sampling_path.is_file() else {}
     codes = code_pattern(config.get("style_prefixes", []))
@@ -309,11 +356,14 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 skipped.append(f"{name}：没装 LibreOffice，读不了里面的图")
                 continue
             for index, (member, data) in enumerate(word_pictures(source), start=1):
-                target = pictures / f"{item_id}-i{index}{Path(member).suffix.casefold()}"
-                if not target.is_file():
-                    target.write_bytes(data)
-                todo.append({"key": f"{item_id}|image {index}", "item_id": item_id, "unit": "image", "page": index, "name": name,
-                             "image": str(target), "text": "", "reasons": ["Word 里的图片"]})
+                target = preview_path(pictures, item_id, asset.get("source_hash", ""), "image", index,
+                                      Path(member).suffix.casefold())
+                target.write_bytes(data)
+                entry = {"key": f"{item_id}|image {index}", "item_id": item_id, "unit": "image", "page": index,
+                         "name": name, "image": str(target), "text": "", "reasons": ["Word 里的图片"],
+                         "draft": [], "source_hash": asset.get("source_hash", "")}
+                entry["review_digest"] = review_digest(entry, entry["source_hash"])
+                todo.append(entry)
             continue
         if suffix not in PAGED:
             continue
@@ -326,17 +376,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         # not skipped: OCR alone is not a visual check, it can miss labels or lose layout.
         no_text = set(route.get("ocr_pages") or [])
         unread = set(remaining_ocr_pages(build, item_id, sorted(no_text)))
-        # A page already checked against its picture is done, unless MinerU's draft came after that look.
-        looked_at: set[int] = set()
-        read_units = load_json(read_path).get("units", []) if read_path.is_file() else []
         mineru_pages = set(mineru_texts)
-        for u in read_units:
-            match = re.match(r"(?:page|slide) (\d+)", u.get("locator", ""))
-            if u.get("checked") and match:
-                number = int(match.group(1))
-                looked = done.get(f"{item_id}|{unit} {number}", {})
-                if number not in mineru_pages or "MinerU 识别" in looked.get("draft", []) or not looked:
-                    looked_at.add(number)
         try:
             document = pymupdf.open(long_path(source))
         except Exception as exc:  # A damaged file is reported, it does not stop the run.
@@ -350,7 +390,7 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                 if number in unread:
                     grades[str(number)] = {"grade": "C", "reasons": ["没有文字层，还没人读过"]}
                     continue
-                text = page_text(units, unit, number)
+                text = page_text([u for u in units if not u.get("checked")], unit, number)
                 native = native_text(units, unit, number)
                 seen = reducto.get(number)
                 found = reasons_for(page, text, codes)
@@ -415,14 +455,16 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
                     continue
                 chosen[[c[0] for c in chosen].index(number)] = (number, text, ["只有 Reducto 识别，含款号或数字，抽查"])
             for number, text, reasons in chosen:
-                if not reasons or number in looked_at:
+                if not reasons:
                     continue
-                target = pictures / f"{item_id}-p{number}.png"
+                target = preview_path(pictures, item_id, asset.get("source_hash", ""), unit, number, ".png")
                 if not target.is_file():
                     document[number - 1].get_pixmap(dpi=DPI).save(str(target))
-                todo.append({"key": f"{item_id}|{unit} {number}", "item_id": item_id, "unit": unit, "page": number, "name": name,
-                             "image": str(target), "text": text, "reasons": reasons, "draft": draft_sources(text),
-                             "grade": grades[str(number)]["grade"]})
+                entry = {"key": f"{item_id}|{unit} {number}", "item_id": item_id, "unit": unit, "page": number, "name": name,
+                         "image": str(target), "text": text, "reasons": reasons, "draft": draft_sources(text),
+                         "grade": grades[str(number)]["grade"], "source_hash": route.get("source_hash", "")}
+                entry["review_digest"] = review_digest(entry, entry["source_hash"])
+                todo.append(entry)
         if hold:
             skipped.append(hold)
         if waiting_reducto:
@@ -433,10 +475,12 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     if requested - included:
         raise ValueError(f"Explicit pages unavailable: {sorted(requested - included)}")
     # A page looked at before MinerU's draft came is looked at again with it; so is one Reducto now disagrees on.
-    todo = [t for t in todo if t["key"] not in done
-            or ("MinerU 识别" in t.get("draft", []) and "MinerU 识别" not in done[t["key"]].get("draft", []))
-            or ("Reducto 识别" in t.get("draft", []) and "Reducto 识别" not in done[t["key"]].get("draft", [])
-                and disagrees(t["reasons"]))]
+    stale = {entry["key"] for entry in todo if entry["key"] in done
+             and done[entry["key"]].get("review_digest") != entry["review_digest"]}
+    if stale:
+        invalidate_reviews(build, done, stale)
+        return plan(build, packages, config, text_dirs, include_pages)
+    todo = [entry for entry in todo if entry["key"] not in done]
     with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
         for entry in todo:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -444,7 +488,9 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     write_json(sampling_path, sampling)
     write_json(build / TRIAGE, {"grades": {g: f"{label}：{rule}" for g, (label, rule) in GRADES.items()}, "files": triage})
     totals = {g: sum(f["counts"][g] for f in triage.values()) for g in GRADES}
-    report = {"ok": True, "to_check": len(todo), "checked": len(done), "files": len({t["item_id"] for t in todo}), "skipped": skipped,
+    report = {"ok": True, "to_check": len(todo),
+              "checked": sum(bool(entry.get("review_digest")) for entry in done.values()),
+              "files": len({t["item_id"] for t in todo}), "skipped": skipped,
               "deferred": deferred, "grades": totals}
     write_json(folder / "plan.json", report)
     return report
@@ -485,17 +531,41 @@ def checked_entry(build: Path, key: str, previous: dict[str, Any], text_dirs: li
         return None
     if key != f"{item_id}|{unit} {number}":
         return None
+    route = load_json(build / "routes.json").get(item_id, {})
+    expected = route.get("source_hash")
     if item_id not in checked_sources:
-        route = load_json(build / "routes.json").get(item_id, {})
         source = Path(route.get("package", "")) / route.get("path", "")
-        expected = route.get("source_hash")
         checked_sources[item_id] = bool(expected and source.is_file() and sha256_file(source) == expected)
-    if not checked_sources[item_id]:
+    if not checked_sources[item_id] or previous.get("source_hash") != expected:
         return None
     units = load_units(unit_dirs(build, text_dirs), item_id)
     # A superseded visual addition cannot serve as evidence for its own replacement.
     text = page_text([u for u in units if not u.get("checked")], unit, number)
-    return {**previous, "key": key, "text": text}
+    entry = {**previous, "key": key, "text": text, "draft": draft_sources(text)}
+    image = Path(previous.get("image", ""))
+    kind = "i" if unit == "image" else "p"
+    candidates = sorted((build / FOLDER / "pages").glob(f"{item_id}-{expected[:16]}-{kind}{number}.*"))
+    if candidates:
+        image = candidates[0]
+        entry["image"] = str(image)
+    elif not image.is_file():
+        return None
+    entry["source_hash"] = expected
+    entry["review_digest"] = review_digest(entry, expected)
+    return entry
+
+
+def original_matches(entry: dict[str, Any], routes: dict[str, Any], checked: dict[str, bool]) -> bool:
+    item_id = entry.get("item_id")
+    if not item_id:
+        return False
+    if item_id not in checked:
+        route = routes.get(item_id, {})
+        source = Path(route.get("package", "")) / route.get("path", "")
+        expected = entry.get("source_hash")
+        checked[item_id] = bool(expected and expected == route.get("source_hash")
+                                and source.is_file() and sha256_file(source) == expected)
+    return checked[item_id]
 
 
 def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Path] | None = None,
@@ -505,6 +575,7 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
     results: dict[str, Any] = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
     rejected, by_item, answers = [], {}, {}
     reopened, checked_sources = {}, {}
+    routes = load_json(build / "routes.json")
     for path in sorted(answer_files if answer_files is not None else folder.glob("answer-*.jsonl")):
         for record in load_jsonl(path):
             key = record.get("key")
@@ -515,7 +586,12 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
                 if key not in reopened:
                     reopened[key] = checked_entry(build, key, results[key], text_dirs or [build / "package-text"], checked_sources)
                 entry = reopened[key]
-            if not entry or not all(isinstance(record.get(field, ""), str) for field in ("missing", "text_errors", "pairing", "structure", "structured")):
+            if (not entry or not original_matches(entry, routes, checked_sources)
+                    or not record.get("review_digest")
+                    or record.get("review_digest") != entry.get("review_digest")
+                    or review_digest(entry, entry.get("source_hash", "")) != entry.get("review_digest")
+                    or not all(isinstance(record.get(field, ""), str)
+                               for field in ("missing", "text_errors", "pairing", "structure", "structured"))):
                 rejected.append(record.get("key") or "（没有 key）")
                 continue
             answers[entry["key"]] = record
@@ -535,6 +611,8 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
         drawing_caption = f"{drawing_model} 的{drawing_name}" if dimension_drawing else ""
         results[key] = {"item_id": entry["item_id"], "unit": entry["unit"], "page": entry["page"],
                         "reasons": entry["reasons"], "added": bool(missing), "draft": entry.get("draft", ["文字层"]),
+                        "source_hash": entry.get("source_hash", ""), "review_digest": entry["review_digest"],
+                        "image": entry.get("image", ""),
                         "text_errors": "" if dimension_drawing else clean_note(record.get("text_errors", "")),
                         "pairing": "" if dimension_drawing else clean_note(record.get("pairing", "")),
                         "unclear": False if dimension_drawing else bool(record.get("unclear")),

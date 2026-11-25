@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import kb_state  # noqa: E402
+from build_progress import package_input_digests  # noqa: E402
 from kb_common import BUILD_DIRECTORY, write_json  # noqa: E402
 from test_package_only import PackageOnlyTests  # noqa: E402
 
@@ -122,6 +123,74 @@ class IncrementalRebuildTests(PackageOnlyTests):
         st3 = json.loads((out2 / BUILD_DIRECTORY / "package-text/extract-status.json").read_text(encoding="utf-8"))
         self.assertEqual(st3["items"]["a1"].get("page_images"), {"slide 1": "img-pptslide0001.png"})
 
+    def test_publish_refuses_files_changed_after_validation(self) -> None:
+        self.build_and_publish()
+        source = next((self.out / "03_净化md").rglob("*.md"))
+        source.write_text(source.read_text(encoding="utf-8") + "\npost-validation edit\n", encoding="utf-8")
+        result = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault), "--sources-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("发布文件发生变化", result.stdout + result.stderr)
+
+    def test_publish_refuses_visual_review_plan_changed_after_validation(self) -> None:
+        self.build_and_publish()
+        plan_path = self.out / BUILD_DIRECTORY / "page-check/plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["to_check"] = plan.get("to_check", 0) + 1
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        result = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault), "--sources-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OCR/看图核对", result.stdout + result.stderr)
+
+    def test_publish_refuses_original_file_changed_without_manifest_update(self) -> None:
+        self.build_and_publish()
+        source = self.package / "A-原文保留/营销宣传/公司知识库.docx"
+        source.write_bytes(source.read_bytes() + b"changed after validation")
+        result = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault), "--sources-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("初筛包输入", result.stdout + result.stderr)
+
+    def test_package_sidecars_are_part_of_the_build_input_snapshot(self) -> None:
+        before = package_input_digests([self.package])
+        triage = self.package / "审计记录/triage-results.json"
+        triage.write_text(triage.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        after = package_input_digests([self.package])
+        self.assertNotEqual(before, after)
+        self.assertTrue(any(key.endswith("triage-results.json") and before[key] != after[key] for key in before))
+
+    def test_sources_only_build_pauses_outdated_curated_pages_for_writers(self) -> None:
+        from test_package_only import make_docx, sha
+        from publish_vault import normalized_hash
+        import kb_lookup
+        import kb_index
+
+        self.build_and_publish()
+        relative = "03_正式知识/10_客户知识/20_公司信息/公司概况.md"
+        curated = self.vault / relative
+        curated.parent.mkdir(parents=True, exist_ok=True)
+        curated.write_text('---\ndoc_id: "KNOW-company"\ntitle: "公司概况"\nstatus: "有效"\n---\n\n# 公司概况\n\n旧公司事实。\n',
+                           encoding="utf-8")
+        receipt_path = self.vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["files"][relative] = normalized_hash(curated)
+        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+
+        source = self.package / "A-原文保留/营销宣传/公司知识库.docx"
+        make_docx(source, ["公司专注可持续户外服装开发。"])
+        manifest = json.loads((self.package / "审计记录/package-manifest.json").read_text(encoding="utf-8"))
+        next(asset for asset in manifest["assets"] if asset["item_id"] == "a1")["source_hash"] = sha(source)
+        write_json(self.package / "审计记录/package-manifest.json", manifest)
+        rebuilt = run_script("run_pipeline.py", "--package", str(self.package), "--out", str(self.out),
+                             "--config", str(self.config), "--images", "none")
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+        published = run_script("publish_vault.py", "--out", str(self.out), "--vault", str(self.vault), "--sources-only")
+        self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+        text = curated.read_text(encoding="utf-8")
+        self.assertIn("source_refresh_required: true", text)
+        self.assertIn("旧公司事实。", text)
+        self.assertEqual(kb_lookup.load_pages(self.vault), [])
+        kb_index.build(self.vault)
+        self.assertEqual(kb_index.search(self.vault, "旧公司事实", 5, None, None, ["客户知识"]), [])
+
     def test_from_guard_and_from_curate_skip_extraction(self) -> None:
         self.build_and_publish()
         out_guard = self.root / "run_guard"
@@ -150,6 +219,15 @@ class IncrementalRebuildTests(PackageOnlyTests):
         self.assertIn("== extract_blocks.py", rebuilt.stdout)
         routes = json.loads((out_revoked / BUILD_DIRECTORY / "routes.json").read_text(encoding="utf-8"))
         self.assertEqual(routes["a1"]["route"], "skip")
+
+    def test_from_curate_rebuilds_when_original_changes_without_manifest_update(self) -> None:
+        self.assertEqual(self.pipeline("--tiers", "T1,T2,T3", "--skip-t3-gate").returncode, 0)
+        source = self.package / "A-原文保留/营销宣传/公司知识库.docx"
+        source.write_bytes(source.read_bytes() + b"changed after screening")
+        result = self.pipeline("--from", "curate", "--tiers", "T1,T2,T3", "--skip-t3-gate")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("改跑完整流水线", result.stdout)
+        self.assertIn("hash_mismatch", result.stdout)
 
 
 if __name__ == "__main__":

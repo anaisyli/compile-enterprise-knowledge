@@ -491,7 +491,7 @@
   | AI 看图复核 | 本地文字层 + C 级页 AI 读图（不上传） | 有图片的页都看，其余无图页抽三成 |
 
   选了 MinerU 的，等这份的 MinerU 初稿出来才列（`plan.json` 的 `skipped` 写“等 MinerU 初稿”）；选了 Reducto 的，整份所有页等 Reducto 读完才列（写“等 Reducto 结果”）。选了 AI 或 Reducto 的文件，C 页不进 MinerU 计划。
-- `plan` 由流水线自动运行：把挑出的页画成图（100 dpi），和这一页**现在的初稿**一起写进 `04_知识库构建/page-check/todo.jsonl`，附规则 `README.md`。初稿是文字层，加上 MinerU 识别、AI 读图读出的内容，各段标【MinerU 识别】【AI 读图】；`draft` 记初稿来自哪里。已经核对过的页不再列出；核对时还没有 MinerU 初稿、后来有了的页，再列一次。没装 PyMuPDF 时不做，校验给提醒。
+- `plan` 由流水线自动运行：把挑出的页画成图（100 dpi），和这一页**现在的初稿**一起写进 `04_知识库构建/page-check/todo.jsonl`，附规则 `README.md`。初稿是文字层，加上 MinerU 识别、AI 读图读出的内容，各段标【MinerU 识别】【AI 读图】；`draft` 记初稿来自哪里。每条待办附 `review_digest`，答案必须逐字带回该值，确保答案对应看到的原件、图片、初稿和核对原因。以上任一项变化时，旧结果会重开并移除旧的看图补充；已核对的页不再列出。没装 PyMuPDF 时不做，校验给提醒。
 - AI 每页回答四项：`missing`（图上有、文字里没有的内容，逐字照抄）、`text_errors`（文字哪里和图上不一样）、`pairing`（一页多款时每款对应哪个款号）、`unclear`（原件本身看不出对应）。尺寸图另可选 `structure: 尺寸图`，只填 `drawing_model` 和 `structured` 图名；尺寸以原图为准，不抄尺寸、规格、孔位或角度，不配款号，`text_errors` 整项忽略（不标“以原图为准”、不登记 ANM），尺寸标注也不算作 `missing`。同页其他正文的漏字仍写 `missing`。
 - `collect` 之后：
   - `missing` 作为这一页的补充文字（定位 `page N check`，`engine: ai`，`checked: true`）存进 `mineru-units/`，标 ⚠“AI 看图补充，待核对”，登记 ANM。定位和 MinerU 的 `page N ocr` 分开，MinerU 读过的页上补的字和 MinerU 的内容并排保留，不会被 MinerU 覆盖。
@@ -635,7 +635,7 @@
 ## 知识库项目与发布
 
 - `kb_project.py`：`--source-root` 填初筛包路径。先列五项基础信息并停下，确认后加 `--confirm` 建目录，同时建 `01_工作台/00_知识库总览.md`。已有文件不覆盖。
-- `publish_vault.py` 正式发布使用完成校验的 `full` 构建。用户明确只发布来源层时加 `--sources-only`，保留以前已发布的整理页。发布收据记录构建编号和发布阶段。
+- `publish_vault.py` 正式发布使用完成校验的 `full` 构建。校验会绑定发布文件、整理页原稿、校验报告、配置、初筛包、OCR 和看图核对输入；发布前及校验期间的这些内容发生变化都要先重跑流水线。用户明确只发布来源层时加 `--sources-only`，保留以前已发布的整理页；来源层内容有变化时，收据内的整理页会增加 `source_refresh_required: true` 并从写作检索中排除，完整构建生成相应页面后恢复。发布收据记录构建编号和发布阶段。
 - 阶段 1 的 `apply-plan --dry-run` 使用拟定的 D 类决定、引擎覆盖和快车道参数。最终确认卡按这份预演填写，正式执行沿用这些参数。阶段 1 确认锁定本批初筛包清单和 OCR 文件版本。Reducto 的 `approved_page_counts` 按 `item_id` 记录批准的整份页数。初检时页数未知的文件等本地转换后用 `reducto_ocr.py plan` 确定，取得用户确认后再填入实际批准页数。
 - 发布时：
   - 来源层发布到 `02_源资料/10_净化原文/`，其他文件按 `04_知识库构建/vault/` 里的位置发布。

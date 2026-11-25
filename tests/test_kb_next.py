@@ -19,7 +19,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from build_progress import (PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT, batch_id,
-                            curation_inputs, extracted_inputs, file_digest, package_digests, routing_inputs)
+                            curation_inputs, extracted_inputs, file_digest, output_digests, package_digests,
+                            package_input_digests, routing_inputs)
 from kb_common import load_config, load_json, write_json
 
 
@@ -28,9 +29,10 @@ def record_pipeline(build: Path, config_path: Path, pkg: Path) -> None:
     write_json(build / PIPELINE_CHECKPOINT, {
         "build_id": "test-build", "batch_id": batch_id(config),
         "build_stage": config["build_stage"], "packages": package_digests([pkg]),
+        "package_inputs": package_input_digests([pkg]),
         "routing": routing_inputs(build, config), "source_inputs": extracted_inputs(build),
         "curation": curation_inputs(build), "report": file_digest(build / VERIFY_REPORT),
-        "config": file_digest(config_path),
+        "config": file_digest(config_path), "validated_files": output_digests(build.parent, config.get("build_stage", "full")),
     })
 
 
@@ -154,7 +156,7 @@ class KbNextTests(unittest.TestCase):
             write_json(pkg / "审计记录/package-manifest.json",
                        {"assets": [{"item_id": key, "path": path.name} for key, path in files.items()]})
             write_json(build / "routes.json", {
-                key: {"route": "kb", "display_name": path.name, "source_hash": sha(path), "ocr_pages": [1]}
+            key: {"route": "kb", "display_name": path.name, "source_hash": sha(path), "ocr_pages": [1, 2]}
                 for key, path in files.items()
             })
             write_json(build / "sample-decisions.json", {"文件:approved": {"method": "mineru"}, "文件:other": {"method": "text"}})
@@ -170,6 +172,29 @@ class KbNextTests(unittest.TestCase):
             extract.assert_called_once()
             self.assertEqual(extract.call_args.args[1], files["approved"])
             self.assertEqual(json.loads(stdout.getvalue())["outside_approval"], ["other"])
+            units = load_json(build / "mineru-units/approved.json")["units"]
+            self.assertIn({"locator": "page 2 ocr", "text": "", "empty": True, "engine": "mineru"}, units)
+
+    def test_ai_page_read_completes_mineru_missing_page_coverage(self) -> None:
+        from kb_next import missing_ocr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp) / "04_知识库构建"
+            routes = {"scan": {"route": "kb", "source_hash": "source-v1", "ocr_pages": [1, 2]}}
+            config = {"mineru": {"approved_item_ids": ["scan"]}}
+            decisions = {"文件:scan": {"method": "mineru"}}
+            write_json(build / "routes.json", routes)
+            write_json(build / "mineru-units/scan.json", {"source": "mineru", "source_hash": "source-v1",
+                       "units": [{"locator": "page 1 ocr", "text": "one", "engine": "mineru"}]})
+
+            missing, _ = missing_ocr(build, config, decisions, routes, {}, build / "mineru-units")
+            self.assertEqual(missing, ["scan"])
+
+            write_json(build / "mineru-units/scan.json", {"source": "ai", "source_hash": "source-v1",
+                       "units": [{"locator": "page 1 ocr", "text": "one", "engine": "mineru"},
+                                 {"locator": "page 2 ocr", "text": "two", "engine": "ai"}]})
+            missing, _ = missing_ocr(build, config, decisions, routes, {}, build / "mineru-units")
+            self.assertEqual(missing, [])
 
     def test_stage1_plan_auto_routing_d_class_and_unhandled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,19 +355,21 @@ class KbNextTests(unittest.TestCase):
             self.assertTrue(read_status()["needs_ocr_merge"])
             record_pipeline(build, cfg, pkg)
             (build / "page-check").mkdir(parents=True, exist_ok=True)
+            page_digests = {f"a|page {number}": f"digest-{number}" for number in range(1, 4)}
             (build / "page-check/todo.jsonl").write_text(
-                '{"key": "a|page 1"}\n{"key": "a|page 2"}\n{"key": "a|page 3"}\n', encoding="utf-8"
+                "".join(json.dumps({"key": key, "review_digest": digest}) + "\n"
+                        for key, digest in page_digests.items()), encoding="utf-8"
             )
-            (build / "page-check/results.json").write_text('{"a|page 1": {"added": false}}', encoding="utf-8")
+            write_json(build / "page-check/results.json", {
+                "a|page 1": {"added": False, "review_digest": page_digests["a|page 1"]}})
             st3 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st3["stage"], "stage3_page_check")
             self.assertEqual(st3["page_check"]["done"], 1)
             self.assertEqual(st3["page_check"]["remaining"], 2)
 
             # Complete all page-check items and refresh docs.jsonl -> Stage 4
-            (build / "page-check/results.json").write_text(
-                '{"a|page 1": {}, "a|page 2": {}, "a|page 3": {}}', encoding="utf-8"
-            )
+            write_json(build / "page-check/results.json", {
+                key: {"review_digest": digest} for key, digest in page_digests.items()})
             self.assertTrue(read_status()["page_check"]["needs_refresh"])
             record_pipeline(build, cfg, pkg)
             st4 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)

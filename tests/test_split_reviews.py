@@ -164,8 +164,11 @@ class SplitPipelineTests(Base):
 
     def test_a_split_old_transcript_enters_and_the_whole_one_reaches_the_vault(self) -> None:
         self.built()
+        snapshot = next(json.loads(line) for line in (self.build / "page-check/todo.jsonl").read_text(encoding="utf-8").splitlines()
+                        if json.loads(line)["key"] == "a1|page 1")
         (self.build / "page-check" / "answer-001.jsonl").write_text(json.dumps({
-            "key": "a1|page 1", "missing": "", "text_errors": "", "pairing": "", "unclear": False,
+            "key": "a1|page 1", "review_digest": snapshot["review_digest"],
+            "missing": "", "text_errors": "", "pairing": "", "unclear": False,
             "structure": "尺寸图", "structured": "安装尺寸图", "drawing_model": "NTX"}, ensure_ascii=False) + "\n",
             encoding="utf-8")
         self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
@@ -200,8 +203,11 @@ class SplitPipelineTests(Base):
 
     def test_an_unsplittable_page_stays_listed_for_a_person(self) -> None:
         self.built()
+        snapshot = next(json.loads(line) for line in (self.build / "page-check/todo.jsonl").read_text(encoding="utf-8").splitlines()
+                        if json.loads(line)["key"] == "a1|page 1")
         (self.build / "page-check" / "answer-001.jsonl").write_text(json.dumps({
-            "key": "a1|page 1", "missing": "", "text_errors": "", "pairing": "", "unclear": False,
+            "key": "a1|page 1", "review_digest": snapshot["review_digest"],
+            "missing": "", "text_errors": "", "pairing": "", "unclear": False,
             "structure": "尺寸图", "structured": "安装尺寸图", "drawing_model": "NTX"}, ensure_ascii=False) + "\n",
             encoding="utf-8")
         run("page_check.py", "collect", "--out", str(self.out))

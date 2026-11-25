@@ -8,7 +8,7 @@
     {"name": "公司优势", "keywords": ["优势", "advantage", "why choose", "为什么选择", "strength", "competitive", "one-stop", "一站式", "快速", "fast delivery", "low moq", "小单"], "how": "看官网 Why Choose Us，或向客户要卖点"},
     {"name": "生产设备与工艺", "keywords": ["设备", "机器", "machine", "equipment", "织机", "loom", "车间", "workshop", "流水线", "生产流程", "production process", "cutting", "sewing", "裁剪", "缝制", "印花", "printing", "embroider", "绣花"], "how": "向客户要车间、设备照片和工序说明"},
     {"name": "质量保证", "keywords": ["质量", "品质", "quality", "qc", "检验", "检测", "inspection", "inspect", "test", "测试", "质检", "aql"], "how": "向客户要质检流程和检测项目"},
-    {"name": "资质认证", "keywords": ["认证", "证书", "certif", "bsci", "oeko", "sedex", "wrap", "gots", "grs", "iso 9001", "iso9001", "sgs", "intertek", "验厂", "audit", "专利", "patent"], "how": "向客户要证书扫描件或审核报告"},
+    {"name": "资质认证", "keywords": ["认证", "证书", "资质", "许可证", "license", "certif", "bsci", "oeko", "sedex", "wrap", "gots", "grs", "iso 9001", "iso9001", "iso 14001", "iso14001", "iso 20000", "iso20000", "iso 27000", "iso27000", "iso 27001", "iso27001", "iso 45001", "iso45001", "ce", "fcc", "rohs", "tuv", "sgs", "intertek", "特种设备", "验厂", "audit", "专利", "patent"], "how": "向客户要资质证书、生产许可证扫描件或审核报告"},
     {"name": "销售市场", "keywords": ["出口", "export", "市场", "market", "国家", "countries", "欧美", "europe", "america", "北美", "欧洲", "日本", "japan", "australia", "middle east", "客户遍布"], "how": "向客户确认主要出口国家和客户类型"}
   ],
   "product": [

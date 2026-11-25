@@ -68,7 +68,10 @@ def vault_body(vault: Path) -> str:
     text = []
     for root in ("03_正式知识/10_客户知识", "03_正式知识/20_外部公共知识"):
         for page in sorted((vault / root).rglob("*.md")) if (vault / root).is_dir() else []:
-            text.append(re.sub(r"!?\[\[[^\]]*\]\]", " ", page.read_text(encoding="utf-8", errors="replace")))
+            page_text = page.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^source_refresh_required:\s*true\s*$", page_text.split("\n---\n", 1)[0]):
+                continue
+            text.append(re.sub(r"!?\[\[[^\]]*\]\]", " ", page_text))
     return "\n".join(text)
 
 

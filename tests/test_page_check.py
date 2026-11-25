@@ -8,13 +8,14 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_extensions import Base, run  # noqa: E402
-from page_check import collect, laid_out, plan  # noqa: E402
+from page_check import checked_entry, collect, laid_out, plan  # noqa: E402
 from kb_common import sha256_file  # noqa: E402
 
 
@@ -28,16 +29,23 @@ class CheckedRevisionTests(unittest.TestCase):
         self.folder.mkdir(parents=True)
         self.source = self.root / "source.pdf"
         self.source.write_bytes(b"unchanged original")
+        source_hash = sha256_file(self.source)
+        image = self.folder / "pages" / f"a1-{source_hash[:16]}-p1.png"
+        image.parent.mkdir(parents=True)
+        image.write_bytes(b"reviewed page image")
         self.save("routes.json", {"a1": {"package": str(self.root), "path": self.source.name,
-                                         "source_hash": sha256_file(self.source)}})
+                                         "source_hash": source_hash}})
         self.save("package-text/a1.json", {"units": [{"locator": "page 1", "text": "Valve DN50"}]})
         self.save("mineru-units/a1.json", {"units": [{"locator": "page 1 check", "text": "OLD",
                                                     "engine": "ai", "checked": True}]})
         self.save("page-check/results.json", {"a1|page 1": {"item_id": "a1", "unit": "page", "page": 1,
-                    "reasons": ["抽查"], "draft": ["文字层"], "unclear": True}})
+                    "reasons": ["抽查"], "draft": ["文字层"], "unclear": True,
+                    "source_hash": source_hash, "image": str(image)}})
         (self.folder / "todo.jsonl").write_text("", encoding="utf-8")
         self.answer = self.folder / "answer-revised.jsonl"
-        self.record = {"key": "a1|page 1", "missing": "", "unclear": False,
+        previous = json.loads((self.folder / "results.json").read_text(encoding="utf-8"))["a1|page 1"]
+        entry = checked_entry(self.build, "a1|page 1", previous, [self.build / "package-text"], {})
+        self.record = {"key": "a1|page 1", "review_digest": entry["review_digest"], "missing": "", "unclear": False,
                        "structure": "表格", "structured": "| Valve | DN50 |"}
         self.write_answer()
 
@@ -149,8 +157,9 @@ class PageCheckTests(Base):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
     def answer(self, **fields) -> None:
+        snapshot = next(entry for entry in self.todo() if entry["key"] == "a1|page 1")
         record = {"key": "a1|page 1", "missing": "", "text_errors": "", "pairing": "", "unclear": False,
-                  "structure": "", "structured": "", "drawing_model": "", **fields}
+                  "review_digest": snapshot["review_digest"], "structure": "", "structured": "", "drawing_model": "", **fields}
         (self.build / "page-check" / "answer-001.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
         self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
 
@@ -223,7 +232,8 @@ class PageCheckTests(Base):
 
     def test_revised_answers_add_only_the_final_page_transcription(self) -> None:
         self.pipeline()
-        first = {"key": "a1|page 1", "missing": "NTX S-099 WRONG DRAFT", "text_errors": "", "pairing": "", "unclear": False}
+        digest = self.todo()[0]["review_digest"]
+        first = {"key": "a1|page 1", "review_digest": digest, "missing": "NTX S-099 WRONG DRAFT", "text_errors": "", "pairing": "", "unclear": False}
         final = {**first, "missing": "NTX S-100 SHERPA VEST", "unclear": True}
         folder = self.build / "page-check"
         (folder / "answer-001.jsonl").write_text(json.dumps(first) + "\n", encoding="utf-8")
@@ -256,13 +266,18 @@ class PageCheckTests(Base):
             units.append({"locator": f"page {number}", "text": text})
         document.save(str(self.package / "A/Catalog.pdf"))
         document.close()
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        next(asset for asset in manifest["assets"] if asset["item_id"] == "a1")["source_hash"] = sha256_file(
+            self.package / "A/Catalog.pdf")
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         (self.text / "a1.json").write_text(json.dumps({"item_id": "a1", "units": units}), encoding="utf-8")
         self.assertEqual(self.pipeline().returncode, 0)
         picked = self.todo()
         self.assertEqual(len(picked), 3)
         folder = self.build / "page-check"
         (folder / "answer-001.jsonl").write_text(
-            "".join(json.dumps({"key": entry["key"], "missing": "", "text_errors": "", "pairing": "", "unclear": False}) + "\n"
+            "".join(json.dumps({"key": entry["key"], "review_digest": entry["review_digest"], "missing": "", "text_errors": "", "pairing": "", "unclear": False}) + "\n"
                     for entry in picked),
             encoding="utf-8",
         )
@@ -271,6 +286,62 @@ class PageCheckTests(Base):
         self.assertEqual(self.todo(), [])
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual(self.todo(), [])
+
+    def test_word_picture_review_has_a_source_bound_digest_and_can_be_collected(self) -> None:
+        source = self.package / "A/Catalog.docx"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("word/document.xml", "<document/>")
+            archive.writestr("word/media/image1.png", b"\x89PNG\r\n\x1a\n" + b"image" * 5000)
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        asset = next(entry for entry in manifest["assets"] if entry["item_id"] == "a1")
+        asset.update(path="A/Catalog.docx", display_name="Catalog.docx", source_hash=sha256_file(source))
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+        built = self.pipeline()
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        entry = self.todo()[0]
+        self.assertEqual(entry["key"], "a1|image 1")
+        self.assertIn(entry["source_hash"][:16], Path(entry["image"]).name)
+        answer = {"key": entry["key"], "review_digest": entry["review_digest"], "missing": "Product label",
+                  "text_errors": "", "pairing": "", "unclear": False}
+        answer_path = self.build / "page-check/answer-word.jsonl"
+        answer_path.write_text(json.dumps(answer) + "\n", encoding="utf-8")
+
+        collected = run("page_check.py", "collect", "--out", str(self.out))
+        self.assertEqual(collected.returncode, 0, collected.stdout + collected.stderr)
+        results = json.loads((self.build / "page-check/results.json").read_text(encoding="utf-8"))
+        self.assertEqual(results[entry["key"]]["review_digest"], entry["review_digest"])
+
+    def test_changed_pdf_source_gets_a_new_preview_and_reopens_its_old_review(self) -> None:
+        self.assertEqual(self.pipeline().returncode, 0)
+        old = self.todo()[0]
+        old_image = Path(old["image"])
+        old_bytes = old_image.read_bytes()
+        self.answer(missing="SHERPA JACKET")
+
+        import pymupdf
+        document = pymupdf.open()
+        page = document.new_page(width=960, height=540)
+        page.draw_rect(pymupdf.Rect(40, 40, 400, 400), color=(1, 0, 0), fill=(1, 0, 0))
+        page.insert_text((40, 480), "UPDATED CATALOG", fontsize=18)
+        source = self.package / "A/Catalog.pdf"
+        document.save(str(source))
+        document.close()
+        manifest_path = self.package / "审计记录/package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        next(asset for asset in manifest["assets"] if asset["item_id"] == "a1")["source_hash"] = sha256_file(source)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+        rebuilt = self.pipeline()
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+        current = self.todo()[0]
+        self.assertNotEqual(current["source_hash"], old["source_hash"])
+        self.assertNotEqual(current["image"], old["image"])
+        self.assertNotEqual(Path(current["image"]).read_bytes(), old_bytes)
+        self.assertNotEqual(current["review_digest"], old["review_digest"])
+        self.assertNotIn(old["key"], json.loads((self.build / "page-check/results.json").read_text(encoding="utf-8")))
 
     def test_unchecked_pages_are_reported_and_half_done_fails(self) -> None:
         self.pipeline()
@@ -298,6 +369,37 @@ class PageCheckTests(Base):
                              encoding="utf-8")
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual(self.todo(), [])
+
+    def test_machine_draft_change_reopens_visual_review_and_rejects_old_answer(self) -> None:
+        self.pipeline()
+        old = self.todo()[0]
+        answer = self.build / "page-check" / "answer-old.jsonl"
+        answer.write_text(json.dumps({"key": old["key"], "review_digest": old["review_digest"],
+                                      "missing": "NTX S-099", "text_errors": "", "pairing": "",
+                                      "unclear": False}) + "\n", encoding="utf-8")
+        self.answer(missing="NTX S-099")
+        self.assertEqual(run("page_check.py", "collect", "--out", str(self.out)).returncode, 0)
+        (self.build / "page-check/answer-001.jsonl").unlink()
+        self.assertIn("a1|page 1", json.loads((self.build / "page-check/results.json").read_text(encoding="utf-8")))
+
+        routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
+        ocr = self.build / "mineru-units/a1.json"
+        ocr.parent.mkdir(parents=True, exist_ok=True)
+        ocr.write_text(json.dumps({"item_id": "a1", "source": "mineru", "source_hash": routes["a1"]["source_hash"],
+                                   "units": [{"locator": "page 1 ocr", "text": "SHERPA JACKET NTX S-099", "engine": "mineru"}]}),
+                       encoding="utf-8")
+        self.assertEqual(self.pipeline().returncode, 0)
+        current = self.todo()[0]
+        self.assertIn("MinerU 识别", current["draft"])
+        self.assertNotEqual(current["review_digest"], old["review_digest"])
+        self.assertNotIn("a1|page 1", json.loads((self.build / "page-check/results.json").read_text(encoding="utf-8")))
+        units = json.loads(ocr.read_text(encoding="utf-8"))["units"]
+        self.assertFalse(any(unit.get("locator") == "page 1 check" for unit in units))
+
+        collected = run("page_check.py", "collect", "--out", str(self.out))
+        report = json.loads(collected.stdout)
+        self.assertEqual(report["rejected"], ["a1|page 1"])
+        self.assertEqual(report["left"], 1)
 
     def test_the_reviewer_sees_minerus_draft_and_what_it_adds_is_kept_beside_it(self) -> None:
         ocr = self.build / "mineru-units"

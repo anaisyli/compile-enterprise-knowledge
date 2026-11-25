@@ -63,7 +63,7 @@ SECTIONS = [
     ("contact", "联系我们", "Contact Us", r"(?i)contact|联系"),
     ("about-factory", "工厂与生产", "Factory", r"(?i)工厂|factory|车间|workshop|生产线|production|装柜|发货|出货|warehouse|仓库"),
     ("about-rnd", "研发", "R&D", r"(?i)研发|r\s*&\s*d|research|专利|patent|实验室|\blab\b"),
-    ("about-certs", "资质认证", "Certificates", r"(?i)证书|资质|认证|certif|\biso\b|\bce\b|\bfcc\b|\brohs\b"),
+    ("about-certs", "资质认证", "Certificates", r"(?i)证书|资质|认证|许可证|certif|\blicense\b|\biso\b|\bce\b|\bfcc\b|\brohs\b"),
     ("about-exhibitions", "展会", "Exhibitions", r"(?i)展会|exhibition|(?<![a-z])[il]se\s*20\d\d|\bexpo\b|\bfair\b|canton"),
     ("about-profile", "企业介绍", "Company Profile", r"(?i)公司简介|公司介绍|关于我们|\babout\b|公司照片|公司视频|展厅|团队|\bteam\b|企业介绍|品牌故事|why\s*\w*"),
 ]

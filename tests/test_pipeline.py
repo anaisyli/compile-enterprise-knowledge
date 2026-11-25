@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -374,6 +375,33 @@ class PipelineTests(unittest.TestCase):
         result = self.verify()
         self.assertEqual(result.returncode, 1)
         self.assertIn("source line lost", result.stdout)
+
+    def test_verifier_rejects_changed_visual_review_snapshot(self) -> None:
+        self.assertEqual(self.run_pipeline().returncode, 0)
+        path = self.build / "page-check" / "plan.json"
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        plan["to_check"] = plan.get("to_check", 0) + 1
+        path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+        result = self.verify()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("看图核对或 OCR 输入与流水线快照不一致", result.stdout)
+
+    def test_saved_run_config_is_used_when_config_flag_is_omitted(self) -> None:
+        self.build.mkdir(parents=True)
+        saved_config = self.build / "kb-config.json"
+        saved_config.write_bytes(self.config.read_bytes())
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "run_pipeline.py"), "--package", str(self.package),
+             "--text-dir", str(self.text), "--out", str(self.out), "--images", "none",
+             "--tiers", "T1,T2,T3,T4", "--skip-t3-gate"],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        checkpoint = json.loads((self.build / "pipeline-checkpoint.json").read_text(encoding="utf-8"))
+        expected = hashlib.sha256(saved_config.read_bytes()).hexdigest()
+        self.assertEqual(checkpoint["config"], expected)
+        self.assertEqual(checkpoint["effective_config"], expected)
 
     def test_number_near_a_contact_label_is_not_a_phone_unless_it_follows_it(self) -> None:
         sys.path.insert(0, str(SCRIPTS))

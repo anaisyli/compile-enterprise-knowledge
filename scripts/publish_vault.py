@@ -24,10 +24,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from build_progress import PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT
+from build_progress import (PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT, batch_id, curation_inputs,
+                            extracted_inputs, file_digest, output_digests, package_digests,
+                            package_input_digests, routing_inputs)
 from governance import merge_ledger
 from kb_common import (BUILD_DIRECTORY, CLEAN_DIRECTORY, LOCK_HOLDER, SITE_VIEW_ROOT, SKILL_VERSION, frontmatter, load_json,
-                       parse_frontmatter, run_lock, site_view_enabled, site_view_unset, vault_lock, write_json, write_text)
+                       load_config, parse_frontmatter, run_lock, site_view_enabled, site_view_unset, vault_lock, write_json, write_text)
 from kb_index import build as build_index
 from kb_state import STATE, save as save_state
 from pictures import LAYOUT as PICTURE_LAYOUT, STATE as PICTURE_NAMES, UNSEEN_FOLDER
@@ -203,6 +205,20 @@ def tombstone(old_text: str, stamp: str) -> str:
                       "> 内容不再使用，旧版本见 05_数据与审核/60_版本归档。", ""])
 
 
+def mark_source_refresh_required(path: Path) -> bool:
+    """Keep old curated prose available while removing it from active retrieval."""
+    text = path.read_text(encoding="utf-8")
+    match = re.match(r"(?s)^(---\n.*?\n---\n)(.*)$", text)
+    if not match:
+        return False
+    metadata, body = match.groups()
+    if re.search(r"(?m)^source_refresh_required:\s*true\s*$", metadata):
+        return False
+    metadata = metadata[:-4] + "source_refresh_required: true\n---\n"
+    write_text(path, metadata + body)
+    return True
+
+
 def archive(vault: Path, key: str, stamp: str, archived: list[str], move: bool = False) -> None:
     target, backup = vault / key, vault / ARCHIVE / stamp / key
     backup.parent.mkdir(parents=True, exist_ok=True)
@@ -295,7 +311,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vault", required=True, help="Project folder made by kb_project.py")
     parser.add_argument("--manage-skill", help="Optional manage-article-knowledge directory")
     parser.add_argument("--allow-withdraw", action="store_true", help="Publish even when many documents would become 已失效")
-    parser.add_argument("--sources-only", action="store_true", help="Explicitly publish a source-layer build, preserving existing curated pages")
+    parser.add_argument("--sources-only", action="store_true", help="Explicitly publish a source-layer build and preserve existing curated pages")
     parser.add_argument("--dry-run", action="store_true",
                         help="Write nothing: list what would become 已失效, be archived, renamed, added or changed")
     return parser.parse_args()
@@ -361,10 +377,36 @@ def main() -> int:
     checkpoint_path = build / PIPELINE_CHECKPOINT
     checkpoint = load_json(checkpoint_path) if checkpoint_path.is_file() else {}
     config_path = build / "kb-config.json"
-    config = load_json(config_path) if config_path.is_file() else {}
+    config = load_config(config_path) if config_path.is_file() else {}
     build_stage = report.get("build_stage", config.get("build_stage", "full"))
     if (build_stage == "sources_only") != args.sources_only:
         raise SystemExit("来源层构建须显式加 --sources-only 发布。正式发布请先设为 full 并完成整理和校验。")
+    mineru_dir = Path(checkpoint["mineru_dir"]) if checkpoint.get("mineru_dir") else build / "mineru-units"
+    package_paths = [Path(path) for path in checkpoint.get("packages", {})]
+    checkpoint_config_path = Path(checkpoint["config_path"]) if checkpoint.get("config_path") else config_path
+    input_checks = {
+        "授权批次": checkpoint.get("batch_id") == batch_id(config),
+        "初筛包": checkpoint.get("packages") == package_digests(package_paths),
+        "初筛包输入": checkpoint.get("package_inputs") == package_input_digests(package_paths),
+        "资料分流": checkpoint.get("routing") == routing_inputs(build, config),
+        "OCR/看图核对": checkpoint.get("source_inputs") == extracted_inputs(build, mineru_dir),
+        "整理页原稿": checkpoint.get("curation") == curation_inputs(build),
+        "校验报告": checkpoint.get("report") == file_digest(build / VERIFY_REPORT),
+        "配置": checkpoint.get("config") == file_digest(checkpoint_config_path),
+        "运行配置": checkpoint.get("effective_config") == file_digest(config_path),
+    }
+    if not all(input_checks.values()):
+        changed_inputs = "、".join(key for key, current in input_checks.items() if not current)
+        if not input_checks["资料分流"]:
+            current = routing_inputs(build, config)
+            previous = checkpoint.get("routing", {})
+            changed_parts = [key for key in set(current) | set(previous) if current.get(key) != previous.get(key)]
+            if "settings" in changed_parts:
+                old_settings, new_settings = previous.get("settings", {}), current.get("settings", {})
+                changed_parts.extend(f"settings.{key}" for key in set(old_settings) | set(new_settings)
+                                     if old_settings.get(key) != new_settings.get(key))
+            changed_inputs += "（分流项：" + "、".join(changed_parts) + "）"
+        raise SystemExit(f"校验后初筛包、配置、OCR 或看图核对结果发生变化（{changed_inputs}）。请重跑 run_pipeline.py 再发布。")
     if not args.sources_only and (config.get("stage_authorization") or {}).get("batch_id"):
         from kb_next import detect_status
         status = detect_status(run, [], None, None)
@@ -396,12 +438,27 @@ def main() -> int:
     if unsure:
         warnings.append(f"旧版发布记录无法分辨格式调整和人工修改：{unsure} 个文件按新内容发布，被替换的旧版都在本次归档里")
 
-    from refresh_navigation import STATUS_PAGES, normalize_build
-    normalize_build(run, vault)
+    from refresh_navigation import STATUS_PAGES, obsidian_prefix
+    if obsidian_prefix(vault) and checkpoint.get("normalization_vault") != str(vault):
+        raise SystemExit("知识库位于 Obsidian 库的子目录，校验时需用 --vault 指定该知识库，以核对完整路径的链接。")
     planned = planned_files(run)
     if args.sources_only:
         formal = "03_正式知识/10_客户知识/"
         planned = {key: path for key, path in planned.items() if not key.startswith(formal)}
+    validated_files = checkpoint.get("validated_files")
+    if not isinstance(validated_files, dict):
+        raise SystemExit("本次构建没有校验后的发布文件清单。请重跑 run_pipeline.py 再发布。")
+    current_files = output_digests(run, build_stage)
+    if current_files != validated_files:
+        changed = sorted(set(current_files) | set(validated_files))
+        changed = [key for key in changed if current_files.get(key) != validated_files.get(key)]
+        raise SystemExit("校验通过后，发布文件发生变化或构建与知识库不匹配。请重跑 run_pipeline.py；变化文件："
+                         + "、".join(changed[:8]))
+    source_keys = {key for key in previous if key.startswith(SOURCE.as_posix() + "/")}
+    planned_source_keys = {key for key in planned if key.startswith(SOURCE.as_posix() + "/")}
+    source_layer_changed = source_keys != planned_source_keys or any(
+        normalized_hash(planned[key]) != previous.get(key) for key in planned_source_keys & source_keys
+    )
     # The site view is made only when switched on. Pages published before and not made now leave
     # for the archive, said out loud; with no setting at all, nothing is decided for the person.
     build_config = load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}
@@ -561,6 +618,20 @@ def main() -> int:
             written[key] = normalized_hash(target)
         else:
             archive(vault, key, stamp, archived, move=True)
+    if args.sources_only and source_layer_changed:
+        formal = "03_正式知识/10_客户知识/"
+        for key in sorted(previous):
+            if not key.startswith(formal) or not key.endswith(".md"):
+                continue
+            target = vault / key
+            if not target.is_file():
+                continue
+            if re.search(r"(?m)^source_refresh_required:\s*true\s*$", target.read_text(encoding="utf-8")):
+                continue
+            archive(vault, key, stamp, archived)
+            mark_source_refresh_required(target)
+            written[key] = normalized_hash(target)
+        warnings.append("来源层已变化，既有整理页已标记为待重新整理并从写作取料中排除；完整构建后可恢复有效状态。")
     for old_page in (OLD_TODO, OLD_REGISTER):
         path = vault / old_page
         # Pages earlier versions of this skill wrote, now replaced by the overview and the register.
@@ -594,7 +665,8 @@ def main() -> int:
     state = save_state(run, vault)
     if checkpoint.get("build_id"):
         write_json(vault / STATE / PIPELINE_CHECKPOINT, {
-            key: checkpoint[key] for key in ("build_id", "packages", "routing", "source_inputs")
+            key: checkpoint[key] for key in ("build_id", "packages", "routing", "source_inputs",
+                                             "package_inputs", "validated_files", "normalization_vault") if key in checkpoint
         })
     warnings += kept_warnings(state["kept_newer_in_vault"])
     warnings += state["removed"]

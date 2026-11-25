@@ -31,7 +31,8 @@ from typing import Any
 from uuid import uuid4
 
 from build_progress import (PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT, batch_id, curation_inputs,
-                            extracted_inputs, file_digest, package_digests, routing_inputs)
+                            extracted_inputs, file_digest, output_digests, package_digests,
+                            package_input_digests, routing_inputs)
 from extract_blocks import (AUDIO_FILES, DESIGN_FILES, PICTURE_FILES, VIDEO_FILES,
                             configured_route, format_pairs, is_catalog)
 from kb_common import (BUILD_DIRECTORY, MANIFEST_NAME, TRIAGE_NAME, file_extension,
@@ -670,6 +671,18 @@ def resume_full_from_fast(out: Path, config_path: Path, approved_by: str,
 
 def missing_ocr(build: Path, config: dict, decisions: dict, routes: dict,
                 triage: dict, mineru_dir: Path) -> tuple[list[str], list[str]]:
+    def read_pages(folder: Path, item_id: str, source_hash: str) -> set[int]:
+        path = folder / f"{item_id}.json"
+        record = load_json(path) if path.is_file() else {}
+        if record.get("source_hash") != source_hash:
+            return set()
+        pages = set()
+        for unit in record.get("units", []):
+            match = re.fullmatch(r"(?:page|slide) ([1-9]\d*) ocr", unit.get("locator", ""))
+            if match and ((unit.get("text") or "").strip() or unit.get("empty")):
+                pages.add(int(match.group(1)))
+        return pages
+
     pending = {"mineru": [], "reducto": []}
     for engine, missing in pending.items():
         scope = config.get(engine) or {}
@@ -686,7 +699,17 @@ def missing_ocr(build: Path, config: dict, decisions: dict, routes: dict,
             folder = mineru_dir if engine == "mineru" else build / "reducto-units"
             path = folder / f"{iid}.json"
             record = load_json(path) if path.is_file() else {}
-            if not route or record.get("source") != engine or record.get("source_hash") != route.get("source_hash"):
+            if not route or not route.get("source_hash"):
+                missing.append(iid)
+                continue
+            if engine == "mineru" and route.get("ocr_pages"):
+                pages = set(route["ocr_pages"])
+                covered = (read_pages(mineru_dir, iid, route["source_hash"])
+                           | read_pages(build / "reducto-units", iid, route["source_hash"]))
+                if pages.difference(covered):
+                    missing.append(iid)
+                continue
+            if record.get("source") != engine or record.get("source_hash") != route.get("source_hash"):
                 missing.append(iid)
                 continue
             if engine == "reducto":
@@ -720,6 +743,7 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
             known_packages = load_json(plan_path).get("packages")
         packages = [Path(path) for path in (known_packages or [])]
     manifests = package_digests(packages)
+    package_inputs = package_input_digests(packages)
     confirmed_any = any(isinstance(v, dict) and v.get("status") == CONFIRMED for k, v in decisions.items() if not k.startswith(FILE_PREFIX))
 
     def next_prompt(stage_label: str) -> str:
@@ -757,6 +781,7 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
     mineru_dir = Path(checkpoint["mineru_dir"]) if checkpoint.get("mineru_dir") else build / "mineru-units"
     source_inputs = extracted_inputs(build, mineru_dir)
     checkpoint_current = (checkpoint.get("batch_id") == current_batch and checkpoint.get("packages") == manifests
+                          and checkpoint.get("package_inputs") == package_inputs
                           and checkpoint.get("routing") == routing_inputs(build, config))
     has_routes = routes_path.is_file() and triage_path.is_file() and checkpoint_current
     mineru_missing, reducto_missing = missing_ocr(build, config, decisions, routes if has_routes else {}, triage, mineru_dir)
@@ -796,13 +821,18 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
     results_path = build / "page-check/results.json"
     if not pc_skip:
         todo_entries = load_jsonl(todo_path) if todo_path.is_file() else []
-        todo_keys = {e["key"] for e in todo_entries if e.get("key")}
+        todo_digests = {e["key"]: e.get("review_digest") for e in todo_entries if e.get("key")}
+        todo_keys = set(todo_digests)
         results = load_json(results_path) if results_path.is_file() else {}
-        done_count = len(todo_keys & set(results))
-        left_count = len(todo_keys - set(results))
+        completed = {key for key, digest in todo_digests.items()
+                     if digest and results.get(key, {}).get("review_digest") == digest}
+        completed.update(key for key, result in results.items()
+                         if result.get("review_digest") and key not in todo_keys)
+        done_count = len(completed)
+        left_count = len(todo_keys - completed)
         if left_count > 0 or needs_pc_refresh:
             inst = (
-                f"当前看图核对进度：{done_count}/{len(todo_keys)} 页已完成，剩余 {left_count} 页。"
+                f"当前看图核对进度：{done_count}/{done_count + left_count} 页已完成，剩余 {left_count} 页。"
                 "请一口气核对完剩余页面（页多时分给子 Agent 并行），但每核对完 20-30 页必须立刻写 answer-*.jsonl 并运行 "
                 "page_check.py collect 落盘，防止中途中断重来！全部完成后重跑 run_pipeline.py，再按阶段 1 商定节奏继续或停下换新对话。"
                 if left_count > 0 else
@@ -811,7 +841,7 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
             return {
                 "stage": "stage3_page_check",
                 "stage_name": "阶段 3：看图核对（增量落盘，断点续跑）",
-                "page_check": {"total": len(todo_keys), "done": done_count, "remaining": left_count, "needs_refresh": needs_pc_refresh},
+                "page_check": {"total": done_count + left_count, "done": done_count, "remaining": left_count, "needs_refresh": needs_pc_refresh},
                 "instruction": inst,
                 "next_chat_prompt": next_prompt("阶段 3/4：续跑看图核对或进入待办消化"),
             }
@@ -854,7 +884,8 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
                      and checkpoint.get("report") == file_digest(report_path)
                      and checkpoint.get("config") == file_digest(config_path)
                      and checkpoint.get("curation") == curation_inputs(build)
-                     and checkpoint.get("build_stage") == "full")
+                     and checkpoint.get("build_stage") == "full"
+                     and checkpoint.get("validated_files") == output_digests(out, "full"))
     receipt_path = vault / RECEIPT_PATH if vault else None
     receipt = load_json(receipt_path) if receipt_path and receipt_path.is_file() else {}
     receipt_ok = bool(verify_ok and checkpoint.get("build_id") and receipt.get("build_id") == checkpoint["build_id"]

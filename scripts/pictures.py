@@ -53,7 +53,7 @@ PUBLIC, CHECK, INTERNAL = "可用于官网", "待核对", "内部"
 NUMBERED, FROM_SOURCE, FROM_AI = "编号", "原文", "AI看图"
 # Read on a document's title or a folder's name only, never on page text: a page that mentions
 # ISO 5211 (a valve flange standard) is not a certificate. ISO counts only as a certification number.
-CERTIFICATE = re.compile(r"(?i)certif|证书|认证|资质|\bISO\s?(?:9001|14001|45001|13485|22000|27001|50001)\b|\bBSCI\b|OEKO|"
+CERTIFICATE = re.compile(r"(?i)certif|证书|认证|资质|许可证|\blicense\b|\bISO\s?(?:9001|14001|20000|27000|27001|45001|13485|22000|50001)\b|\bBSCI\b|OEKO|"
                          r"\bSGS\b|\bGRS\b|test report|检测报告")
 FACTORY = re.compile(r"(?i)factory|workshop|warehouse|production line|工厂|车间|厂房|生产线|仓库")
 MEANINGLESS_ALT = re.compile(r"(?i)^(?:img|image|picture|photo|pic|dsc|banner|logo|icon)?[\s_\-]*\d*$|\.(?:jpe?g|png|webp|gif)$")

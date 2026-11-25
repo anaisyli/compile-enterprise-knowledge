@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from kb_common import BUILD_DIRECTORY, load_json, write_json, write_text
+from kb_common import BUILD_DIRECTORY, load_json, load_jsonl, write_json, write_jsonl, write_text
 from legacy_migrations import move_legacy_vault_dirs
 
 
@@ -32,7 +32,8 @@ WEBSITE = "02_源资料/30_官网快照"
 FILES = [
     "kb-config.json", "run-info.json", "review-decisions.json", "governance-ids.json", "client-notes.jsonl",
     "cell-review/decisions.jsonl", "cell-review/sheet-columns.json", "cell-review/t3-audit.json",
-    "page-check/results.json", "page-check/sampling.json", "sample-decisions.json", "reviewed-pages.json",
+    "page-check/plan.json", "page-check/todo.jsonl", "page-check/results.json", "page-check/sampling.json",
+    "sample-decisions.json", "reviewed-pages.json",
     # Picture names stay once given, and the AI's picture names are not redone.
     "picture-names.json", "picture-names/answers.json",
     # Which naming rules the picture names follow, and whether the one-time move to them was published.
@@ -99,7 +100,7 @@ def pairs(build: Path, vault: Path) -> list[tuple[Path, Path]]:
         if (build / "assets" / name).is_file() or (vault_assets / name).is_file():
             found.append((build / "assets" / name, vault_assets / name))
     # The checked transcript, its exact page image and the machine draft travel together.
-    for directory in ("reviewed-page-images", "mineru-drafts"):
+    for directory in ("reviewed-page-images", "mineru-drafts", "page-check/pages"):
         for root in (build / directory, vault / STATE / directory):
             for item in root.rglob("*") if root.is_dir() else []:
                 if item.is_file():
@@ -404,6 +405,20 @@ def restore(run: Path, vault: Path) -> dict[str, Any]:
     copied = sum(copy_newer(v, b, kept, removed) for b, v in pairs(build, vault))
     copied += merge_pages(vault / WEBSITE / "pages.json", build / "website" / "pages.json")
     copied += merge_extract_status(vault / STATE / "package-text" / "extract-status.json", build / "package-text" / "extract-status.json")
+    todo_path = build / "page-check/todo.jsonl"
+    if todo_path.is_file():
+        entries = load_jsonl(todo_path)
+        changed = False
+        for entry in entries:
+            image = entry.get("image")
+            if not image:
+                continue
+            local = build / "page-check/pages" / Path(image).name
+            if local.is_file() and image != str(local):
+                entry["image"] = str(local)
+                changed = True
+        if changed:
+            write_jsonl(todo_path, entries)
     vault_config = json_object(vault / STATE / "kb-config.json")
     run_config_after = json_object(build / "kb-config.json")
     if vault_config is not None and run_config_after is not None:

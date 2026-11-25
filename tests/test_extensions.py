@@ -547,6 +547,36 @@ class VaultTests(Base):
         self.assertTrue((vault / "02_源资料/源资料与可检索性台账.md").is_file())
         self.assertTrue((vault / "05_数据与审核/30_异常与待决定/30_源文与事实异常/01_源文与事实异常台账.md").is_file())
 
+    def test_publish_rejects_changed_report_and_effective_config(self) -> None:
+        self.assertEqual(self.pipeline().returncode, 0)
+        vault = self.make_vault()
+        report_path = self.build / "校验结果.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["warnings"].append("后加的报告内容")
+        report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+        result = self.publish(vault)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("校验报告", result.stdout + result.stderr)
+
+        self.assertEqual(self.pipeline().returncode, 0)
+        config_path = self.build / "kb-config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["products"] = [{"name": "post-validation change"}]
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        result = self.publish(vault)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("运行配置", result.stdout + result.stderr)
+
+    def test_publish_rejects_curation_edits_after_validation(self) -> None:
+        self.assertEqual(self.pipeline().returncode, 0)
+        vault = self.make_vault()
+        curation_dir = self.build / "curation" / "validation-test"
+        curation_dir.mkdir(parents=True)
+        (curation_dir / "page.md").write_text("# 新增的未校验整理稿\n", encoding="utf-8")
+        result = self.publish(vault)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("整理页原稿", result.stdout + result.stderr)
+
     def test_withdrawn_document_leaves_a_record_and_the_old_version_is_archived(self) -> None:
         self.pipeline()
         vault = self.make_vault()
