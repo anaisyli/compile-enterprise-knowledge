@@ -59,7 +59,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - 全部核对完后重跑 `run_pipeline.py` 刷新来源层，停下并给出阶段 4 新对话 Prompt。
 5. **阶段 4（自动消化待办 + 同时生成内部决策网页和客户确认网页）**：
    - 按下方“处理这个项目的待办”由 Agent 先自主消化全部可判定的 CUS/MAT/ANM 与待审 D 类文档，重跑 `run_pipeline.py --from guard` 刷新台账。
-   - 然后**同时导出并生成两份离线 HTML 网页**（有对应待办才生成）：
+   - 然后**同时导出并生成两份离线 HTML 网页**（有对应待办才生成；需本机已安装 `customer-confirmation-webpage` Skill，未安装时降级保留导出的 `--webpage-json` / CSV 与文字清单，并提醒用户安装 `https://github.com/anaisyli/customer-confirmation-webpage`）：
      1. 内部待办决策网页：`governance_state.py review --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode internal`；
      2. 客户确认网页：`governance_state.py cus-export --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode customer`。
    - 运行 `python scripts/kb_next.py mark-stage4 --out <运行目录> --internal-html "<路径>" --customer-html "<路径>"`，把两份 HTML 路径和极简摘要交给用户，停下并给出阶段 5 新对话 Prompt。

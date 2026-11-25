@@ -25,7 +25,7 @@
 | **阶段 1：预检分流与一次确认** | **只判断 + 算总页数**（不提取、不整理）：PPT / 画册 / 横版或设计密集 PDF 默认推 **Reducto**，Word 转的规整 PDF / 规格书默认推 **MinerU（免费）**；**前置初判全部 D 类文件**（捞回可用资料并计入页数）；列出《未处理 / 特殊文件清点》 | 看一眼分流页数、D 类捞回建议和 5 项建库信息，回 **“同意，按推荐开跑”**（一次性完成分流、D 类与上传授权） |
 | **阶段 2：批量提取与抽块** | 抓官网 + 跑 MinerU / Reducto API + 抽块生成来源层和待核对页清单 | 跑完按提示**新开对话** |
 | **阶段 3：看图核对** | 一口气核对完 `page-check` 全部页面（页多时自动分给子 Agent 并行），**每 20–30 页增量落盘一次**，中途断了绝不重来 | 跑完按提示**新开对话** |
-| **阶段 4：自动消化待办 + 双网页** | Agent 自动消化 90% 的 CUS / MAT / ANM 与待审 D 类，并**同时生成内部待办决策网页 HTML 和客户确认网页 HTML** | 内部网页勾选回填（如有）；把客户网页发给客户 |
+| **阶段 4：自动消化待办 + 双网页** | Agent 自动消化 90% 的 CUS / MAT / ANM 与待审 D 类，并配合 [customer-confirmation-webpage](https://github.com/anaisyli/customer-confirmation-webpage) **同时生成内部待办决策网页 HTML 和客户确认网页 HTML**（未装该 Skill 时降级输出文字清单与 CSV/JSON） | 内部网页勾选回填（如有）；把客户网页发给客户 |
 | **阶段 5：整理正式知识与发布** | 按主题逐个写整理页并落盘 + 速查卡 + 独立子 Agent 抽样通读 + 发布进 Obsidian + 输出最终《未处理 / 特殊文件清点》 | **收库上线**，开始写文章 |
 
 **开工建库 Prompt（不用填运行目录，AI 会自动在本机本地盘创建临时目录）：**
@@ -176,7 +176,7 @@
 
 ## 七、安装与首次准备（新电脑一次性配置）
 
-### 1. 基础环境（必装）
+### 1. 基础环境与配套 Skill（必装）
 
 1. 安装 **Python 3.10+**，并安装 PDF 读取依赖：
    ```bash
@@ -184,7 +184,8 @@
    ```
    （PyMuPDF 用于版面分流预检、画册/PPT 分栏读取与原页截图。）
 2. 如需读取旧版 `.xls` / `.doc` / `.ppt` 或生成 PPT 幻灯片截图，安装 **LibreOffice**（非默认路径时可设环境变量 `LIBREOFFICE_PATH` 指向 `soffice.exe`）。
-3. 运行自检确认环境正常：
+3. **配套安装网页生成 Skill（推荐，阶段 4 双网页用）**：安装 [customer-confirmation-webpage](https://github.com/anaisyli/customer-confirmation-webpage)（用于把阶段 4 导出的内部待办和客户 CUS 打包成带原件截图的离线单文件 HTML；未安装时仍可正常输出文字清单与 CSV/JSON）。
+4. 运行自检确认环境正常：
    ```bash
    python scripts/check_tools.py
    ```
