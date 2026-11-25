@@ -126,9 +126,16 @@ class KbNextTests(unittest.TestCase):
             ap_data = json.loads(ap.stdout)
             self.assertEqual(ap_data["d_applied"]["keep"], ["item-d-doc"])
             self.assertEqual(ap_data["d_applied"]["drop"], ["item-zip"])
+            self.assertEqual(ap_data["d_still_undecided"], [])
+            self.assertEqual(ap_data["build_stage"], "sources_only")
+            # item-spec (3p) + rescued D-class item-d-doc (2p) = 5 MinerU pages
+            self.assertEqual(ap_data["effective_pages"]["mineru_pages"], 5)
+            self.assertEqual(ap_data["effective_pages"]["reducto_pages"], 9)
             self.assertEqual(ap_data["cloud_approvals"], ["mineru", "reducto"])
 
             updated_cfg = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(updated_cfg["build_stage"], "sources_only")
+            self.assertEqual(updated_cfg["stage_authorization"]["approved_by"], "测试员")
             self.assertTrue(updated_cfg["mineru"]["approved"])
             self.assertTrue(updated_cfg["reducto"]["approved"])
             self.assertIn("item-d-doc", updated_cfg["d_keep"])

@@ -34,7 +34,7 @@ from kb_common import (BUILD_DIRECTORY, MANIFEST_NAME, TRIAGE_NAME, file_extensi
                        load_config, load_json, load_jsonl, long_path, run_lock,
                        unapproved_d, write_json, write_text)
 from mineru_client import probe as probe_mineru
-from reducto_client import probe as probe_reducto
+from reducto_client import KEY_PAGE as REDUCTO_KEY_PAGE, PRICING_PAGE as REDUCTO_PRICING_PAGE, probe as probe_reducto
 from samples import (CONFIRMED, DECISIONS, FILE_PREFIX, METHODS, PAGED_KINDS,
                      kind_of, load_decisions, sync_reducto_primary)
 
@@ -298,8 +298,9 @@ def render_stage1_plan_md(plan: dict[str, Any]) -> str:
         + f"；本机 Token：{cred['mineru_message']}",
         f"- **Reducto（按页计费，PPT / 画册 / 复杂设计排版）**：{s['reducto_files']} 份，共 **{s['reducto_pages']}** 页"
         + (f"（另有 {s['reducto_unknown_pages']} 份页数待定）" if s["reducto_unknown_pages"] else "")
-        + f"；本机 Key：{cred['reducto_message']}",
+        + f"；本机 Key：{cred['reducto_message']}（套餐/计费见 {REDUCTO_PRICING_PAGE} ，余额见 {REDUCTO_KEY_PAGE} ）",
         f"- **本地直读（Word / Excel / TXT / 单图）**：{s['local_files']} 份（不上传云端）",
+        "- 注：若下方 D 类文件有捞回（`keep`）的 PDF/PPT，其页数需一并计入上述总页数再给用户确认。",
     ]
     if s["reducto_files"] and not cred["reducto_ok"]:
         lines.append("- ⚠ **提示**：有文件建议使用 Reducto，但本机未配置 Reducto Key；可先双击 `scripts/setup_reducto.cmd` 配置，或在确认时加 `--fallback-mineru` 全部降级为 MinerU。")
@@ -435,7 +436,7 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     write_json(build / DECISIONS, decisions)
     sync_reducto_primary(build, item_kinds, decisions)
 
-    # 3. Record cloud OCR approvals and optional fast_mvp deferral in kb-config.json
+    # 3. Record cloud OCR approvals, stage_authorization, and build_stage in kb-config.json
     today = date.today().isoformat()
     if "mineru" in used_methods:
         mineru_cfg = dict(config.get("mineru") or {})
@@ -446,23 +447,45 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
         config["reducto"] = reducto_cfg
 
+    config["stage_authorization"] = {
+        "approved_by": approved_by,
+        "approved_at": today,
+        "scope": "阶段1一次确认：建库5项基础信息与写入目标目录、本批云端分流页数、D类去向、整理层生成与首次发布",
+    }
+
     if fast_mvp:
         config["excluded_items"] = excluded
         config["deferred_items"] = deferred
         config["page_check"] = {"skip": "快车道极简版暂跳过，二期补全"}
         config["build_stage"] = "full"
         write_json(build / STAGE4_MARKER, {"completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "fast_mvp": True})
+    else:
+        # Standard path runs Stage 2-4 in sources_only so run_pipeline.py does not curate prematurely.
+        config["build_stage"] = "sources_only"
+
+    decided_d = set(config.get("d_keep") or []) | set(config.get("d_drop") or []) | set(config.get("ask_client") or {})
+    d_still_undecided = [d["item_id"] for d in plan.get("d_undecided", []) if d["item_id"] not in decided_d]
+    eff_mineru = [e for e in effective_files if e["item_id"] not in deferred and (overrides.get(e["item_id"], e["method"]) == "mineru" or (fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"))]
+    eff_reducto = [e for e in effective_files if e["item_id"] not in deferred and not fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"]
 
     write_json(config_path, config)
     return {
         "applied": True,
         "fast_mvp": fast_mvp,
         "approved_by": approved_by,
+        "build_stage": config["build_stage"],
         "confirmed_kinds": sorted(kinds_present),
         "cloud_approvals": sorted(m for m in ("mineru", "reducto") if m in used_methods),
+        "effective_pages": {
+            "mineru_files": len(eff_mineru),
+            "mineru_pages": sum(e.get("pages") or 0 for e in eff_mineru),
+            "reducto_files": len(eff_reducto),
+            "reducto_pages": sum(e.get("pages") or 0 for e in eff_reducto),
+        },
         "deferred_count": len(deferred),
         "deferred_items": list(deferred),
         "d_applied": d_applied,
+        "d_still_undecided": d_still_undecided,
         "next_stage": "stage2_extract",
     }
 
@@ -493,6 +516,7 @@ def resume_full_from_fast(out: Path, config_path: Path, approved_by: str, fallba
     config.pop("deferred_items", None)
     if (config.get("page_check") or {}).get("skip", "").startswith("快车道"):
         config.pop("page_check", None)
+    config["build_stage"] = "sources_only"
 
     today = date.today().isoformat()
     if "reducto" in used_methods:
@@ -602,7 +626,7 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
                 "instruction": (
                     f"当前看图核对进度：{done_count}/{len(todo_keys)} 页已完成，剩余 {left_count} 页。"
                     "请一口气核对完剩余页面（页多时分给子 Agent 并行），但每核对完 20-30 页必须立刻写 answer-*.jsonl 并运行 "
-                    "page_check.py collect 落盘，防止中途中断重来！全部完成后重跑 run_pipeline.py，再停下让用户开新对话进入阶段 4。"
+                    "page_check.py collect 落盘，防止中途中断重来！全部完成后重跑 run_pipeline.py，再按阶段 1 商定节奏继续或停下换新对话。"
                 ),
                 "next_chat_prompt": next_prompt("阶段 3/4：续跑看图核对或进入待办消化"),
             }
@@ -627,7 +651,7 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
                 "然后同时导出并生成两份离线 HTML 网页（有对应事项才生成）："
                 "1) 内部待办决策网页（governance_state.py review --webpage-json → customer-confirmation-webpage --mode internal）；"
                 "2) 客户确认网页（governance_state.py cus-export --webpage-json → customer-confirmation-webpage --mode customer）。"
-                "完成后运行 kb_next.py mark-stage4 --out <运行目录>，停下把两份网页路径交给用户，提示开新对话进入阶段 5。"
+                "完成后运行 kb_next.py mark-stage4 --out <运行目录>，把两份网页路径交给用户；按阶段 1 商定节奏继续阶段 5，或在此停下提示开新对话。"
             ),
             "next_chat_prompt": next_prompt("阶段 5：整理正式知识与发布"),
         }

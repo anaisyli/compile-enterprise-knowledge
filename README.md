@@ -35,9 +35,9 @@
 
 **急着写文章？快车道极简版（MVP）Prompt：**
 ```text
-用 compile-enterprise-knowledge 先出极简可用版（--fast），把 <初筛包路径> 建库发布到 <知识库路径>，官网是 https://www.example.com 。先用官网、Word/Excel 和规整 PDF 快速上线速查卡与核心页，重画册和看图核对暂缓。
+用 compile-enterprise-knowledge 先出极简可用版（--fast），把 <初筛包路径> 建库发布到 <知识库路径>，官网是 https://www.example.com 。先用官网、Word/Excel 和规整 PDF 快速上线速查卡与核心页；重画册/PPT、看图核对以及阶段 4 的 CUS/MAT/ANM 深度治理与双网页暂缓到二期补全。
 ```
-> 以后有空补全重画册时，只需说一句：“把 `<知识库路径>` 里快车道暂缓的重画册和看图核对补全（`kb_next.py resume-full`）”，旧文件冻结不重提。
+> 以后有空补全时，只需说一句：“把 `<知识库路径>` 里快车道暂缓的重画册、看图核对和待办治理补全（`kb_next.py resume-full`）”，旧文件冻结不重提。
 
 **每段完成后 / 中途中断后的万能续跑 Prompt（直接复制上一轮 AI 给你的续跑句，或新开对话发下面这句）：**
 ```text
@@ -141,7 +141,7 @@
 
 | 存放位置 | 放什么 | 说明 |
 | :--- | :--- | :--- |
-| **Windows Server 共享盘** | `01_Obsidian知识库/`（各项目知识库，含自动沉淀的 `04_文章任务/` 与 `70_构建状态/`）、`02_项目资料与归档/`（初筛包、客户确认 HTML 与回传 JSON/CSV、最终文章交付包） | 全团队共享的长期资产；月度体检直接扫 `01_Obsidian知识库/` |
+| **Windows Server 共享盘** | **本 Skill 重建必需**：`01_Obsidian知识库/`（各项目知识库，含 `04_文章任务/` 与 `70_构建状态/`）和 `02_项目资料与归档/` 里的初筛包；**团队业务归档（非重建必需，建议留痕）**：客户确认 HTML 与回传 JSON/CSV、最终文章交付包 | 全团队共享；月度体检直接扫 `01_Obsidian知识库/` |
 | **本机本地硬盘（SSD）** | 建库运行目录（`--out`，如 `D:\KB-Workspace\P-001_run`）、初筛 `_working/`、临时内部决策/体检 HTML | **不要把 `--out` 建在共享盘上**；正式发布进知识库后随时可删 |
 
 ### 打包发给同事（跨电脑修复原件链接）
@@ -212,7 +212,7 @@
 
 1. 打开 <https://studio.reducto.ai/> 登录（新账号一般赠送 15,000 credits），点击 **API Keys → Create new API key**，只复制 Key 本身。
 2. 进入本 Skill 的 `scripts/` 目录，**双击运行 `setup_reducto.cmd`**，看到提示后直接按 **Enter** 自动读取并联网校验（只查任务列表，不消耗额度）。
-3. **完全退出并重启 Codex / Claude Code** 生效。每次上传前均需人工确认页数并批准后才会调用。
+3. **完全退出并重启 Codex / Claude Code** 生效。走阶段 1 一次确认（`kb_next.py apply-plan`）或手动单跑 `reducto_ocr.py plan` 批准页数后才会调用上传。
 
 ## 测试
 

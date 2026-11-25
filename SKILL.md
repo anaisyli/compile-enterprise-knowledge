@@ -7,7 +7,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 把已通过校验的初筛包编译成可长期使用的知识库，分两层：
 
-- **来源层**（`02_源资料/10_净化原文`）：由脚本搬运原文，只删不改，用来追溯。
+- **来源层**（`02_源资料/10_净化原文`）：由脚本搬运原文，不改写语义、按规则删除敏感项（表格保留结构，OCR 与 AI 看图补充均显式标注来源），用来追溯。
 - **整理层**（`03_正式知识/10_客户知识`）：由 AI 归纳、去重、组织，给人看，写文章时也直接从这里取资料。整理时不加原文没有的事实，每条都标出处，由脚本核对；每段可用原文都要有去处（整理覆盖账本）。
 - **外部公共知识**（`03_正式知识/20_外部公共知识`，证据在 `02_源资料/50_外部调研证据`）：外部调研整理的行业公共知识，只作背景和论据，不代表客户。归 `research.py` 管，建库和发布都不动它。
 
@@ -17,7 +17,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 - 只有原文摘录，人看不懂；只有 AI 归纳，没法追溯。所以两层都要：整理层每条都链接到来源层的原文段落。
 - **删除和标记分开处理：**
-  - 价格、成本、数量、联系方式、订单号、竞品、可能的客户名，是初筛定好要删的，照删，删了什么记进《内容清理记录》。
+  - 价格、成本、数量、联系方式、订单号、竞品、可能的终端买家/下游客户名，是初筛定好要删的，照删，删了什么记进《内容清理记录》（本公司自身名称允许保留）。
   - 拿不准的内容不拦，比如品牌、明星、IP 名，检测报告页，前后说法不一致的公司数据，标 ⚠ 后入库，登记 ANM。
   - 待客户确认的内容也入库，标 🕒，登记 CUS，整理页在回复前不引用。
 - **来源级别不等于已核实：** T1 只说明来源是官方发布物，不保证每句话都对。所以有冲突或会过期的说法，整理页要写“需核实”。
@@ -49,20 +49,20 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 2. **阶段 1（只判断 + 算总页数 + 自动捞回 D 类 + 给出执行节奏，不提取、不整理）**：
    - 运行 `python scripts/kb_next.py plan --package <初筛包> --out <运行目录> --config <kb-config.json>`。脚本快速扫描所有 PDF/PPT 的页数与版面（PPT、产品画册、横版/图文设计密集 PDF 默认推荐 **Reducto**；Word 转的规整 PDF、规格书默认推荐 **MinerU** 免费额度；Word/Excel/TXT 本地直读），并输出《未处理 / 特殊文件清点》（压缩包、图纸、音视频、异常文件）。
    - **D 类前置捞回**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）快速初判为 `keep`（捞回并算入本轮提取页数）、`drop`（丢弃）或 `ask_client`（进第 4 阶段客户确认网页），绝不默默跳过可用 D 类文件。
-   - 把 **① 5 项建库基础信息（首次）+ ② MinerU/Reducto 分流表与总页数 + ③ D 类初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
-   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT 与 `page-check`，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件即可）。确认后按商定的节奏继续执行（或提示新开对话进入下一段）。
+   - 把 **① 5 项建库基础信息（首次）+ ② MinerU（免费）/ Reducto（按页计费，附计费与余额链接）最终分流表与总页数（已计入建议捞回的 D 类页数）+ ③ D 类全量初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
+   - **一次确认的明确授权范围**：用户回复“同意，按推荐开跑”即同时授权：① 5 项建库基础信息与首次写入知识库目录；② 本批 MinerU / Reducto 外发页数；③ 本批 D 类去向；④ 整理层生成（`apply-plan` 自动写入 `stage_authorization`）；⑤ 商定的执行节奏。之后运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性落盘（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT、`page-check` 与阶段 4 待办双网页，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件与完整核对/治理即可）。确认后按商定的节奏继续执行。
 3. **阶段 2（批量云端提取 + 抽块）**：
-   - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（`build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后停下并给出阶段 3 新对话 Prompt。
+   - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（常规路径已由 `apply-plan` 自动设为 `build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后按阶段 1 商定节奏继续下一阶段，或在此停下给出下一段新对话 Prompt。
 4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
    - 本阶段一口气核对完 `page-check/todo.jsonl` 里的全部剩余页面（页多时分给子 Agent 并行，不再每批停下来问用户“要不要继续”）。
    - **硬性防中断规则**：每核对完 **20–30 页**，必须立刻写一个 `answer-batch-N.jsonl` 并立即运行 `python scripts/page_check.py collect --out <运行目录>` 把结果增量写入 `page-check/results.json`（已核对页永久落盘，即使中途断网或超时，新对话跑 `kb_next.py status` 也会精确显示 `已完成 X/总 Y 页`，从第 X+1 页接着看，绝不重来）。
-   - 全部核对完后重跑 `run_pipeline.py` 刷新来源层，停下并给出阶段 4 新对话 Prompt。
+   - 全部核对完后重跑 `run_pipeline.py` 刷新来源层，按阶段 1 商定节奏继续阶段 4，或在此停下给出新对话 Prompt。
 5. **阶段 4（自动消化待办 + 同时生成内部决策网页和客户确认网页）**：
    - 按下方“处理这个项目的待办”由 Agent 先自主消化全部可判定的 CUS/MAT/ANM 与待审 D 类文档，重跑 `run_pipeline.py --from guard` 刷新台账。
    - 然后**同时导出并生成两份离线 HTML 网页**（有对应待办才生成；需本机已安装 `customer-confirmation-webpage` Skill，未安装时降级保留导出的 `--webpage-json` / CSV 与文字清单，并提醒用户安装 `https://github.com/anaisyli/customer-confirmation-webpage`）：
      1. 内部待办决策网页：`governance_state.py review --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode internal`；
      2. 客户确认网页：`governance_state.py cus-export --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode customer`。
-   - 运行 `python scripts/kb_next.py mark-stage4 --out <运行目录> --internal-html "<路径>" --customer-html "<路径>"`，把两份 HTML 路径和极简摘要交给用户，停下并给出阶段 5 新对话 Prompt。
+   - 运行 `python scripts/kb_next.py mark-stage4 --out <运行目录> --internal-html "<路径>" --customer-html "<路径>"`，把两份 HTML 路径和极简摘要交给用户；按阶段 1 商定节奏继续阶段 5（如存在必须人拍板的高风险内部待办或上下文已长，则在此停下并给出阶段 5 新对话 Prompt）。
 6. **阶段 5（整理正式知识 + 独立通读 + 发布上线）**：
    - 将 `build_stage` 设为 `full`，按主题逐个写完整理页并落盘（最后写速查卡 `brief`）→ `curate.py check` → `run_pipeline.py` 直到 `verified: true` → 派独立子 Agent 抽样通读 → `publish_vault.py` 发布进知识库 → 输出最终《未处理 / 特殊文件清点》（含压缩包、异常文件、未引用有效原文与覆盖账本未处理段数）。
 
@@ -113,7 +113,7 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
    - 保留的文档整份先“待审”。看过原文没问题才批准（`approve_docs`）；个别段不能用就删这几段（`drop_blocks`）；拿不准的不要批准，只有客户能定的转 `ask_client`。
    - 规格参数里的面板、芯片、平台、元器件品牌（BOE、MediaTek、Google EDLA 等）不算要拦的第三方品牌；代言、授权、IP、竞品才算。
 
-6. **MinerU**（用户给某类选了“MinerU 整份 + AI 核对”，或者有页没有文字层时；规则见合同“MinerU”）：
+6. **MinerU / Reducto 手动独立运行**（走上方 `kb_next.py` 阶段 1 已通过 `apply-plan` 一次授权的，直接跑 `run` 即可，不再重复 `plan` 停顿；以下仅用于事后单独补跑或手动模式；规则见合同“MinerU”“Reducto”）：
    1. 运行 `mineru_ocr.py plan <共用参数>`，把 `mineru-plan.md` 给用户看。只有用户同意后，才在配置里写批准记录，不要替用户写。
    2. 运行 `mineru_ocr.py run`，再重跑第 2 步。
    - 用户要把已入库、还没走过 MinerU 的 PDF/PPT 整批补跑时，`plan` 和 `run` 都加 `--missing`。不要另写脚本挑文件或改批准范围；配置已有 `approved_item_ids` 时，用户同意后才把计划里的编号加进去。覆盖与缺口页的“PDF 和 PPT 怎么读的”有各种方式的份数。
@@ -270,8 +270,8 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 ## 边界
 
-- 不修改原件、初筛包和人工补充的文件；台账里人填的内容不覆盖。
-- 知识库里不写原文件的真实路径和客户名，文件名只脱敏不隐藏。
+- 不修改原件、初筛包中的客户原文件（仅允许在初筛包 `审计记录/` 下写入脱敏对照表与“打开原件”硬链接/副本）和人工补充的文件；台账里人填的内容不覆盖。
+- 知识库里不写原文件的真实路径和终端买家/下游客户名（本公司自身名称允许保留），文件名只脱敏不隐藏。
 - 整理页不写原文没有的事实，不把宣传语当事实，不替冲突的说法选边。
 - 竞品、SEO 运营、财务和排除类资料不进库。
 - 建库时不读登记域名以外的网站，不跟外链。只有外部调研读外部网页，而且只读调研需要的、符合来源规则的网页；结果只进 `20_外部公共知识`，不写进客户知识，不用来证明客户的能力、规格、认证或案例。
