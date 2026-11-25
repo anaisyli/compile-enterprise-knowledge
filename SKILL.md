@@ -41,6 +41,33 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 下面的 `<共用参数>` 是 `--package <初筛包> --out <运行目录> --config <kb-config.json>`；已经发布过的项目再加 `--vault <项目目录>`。各步的细节规则在合同对应小节，这里只写要做的事和要停下的地方。
 
+### 推荐主路径：5 阶段短跑 + 磁盘断点续跑（`kb_next.py`，防长对话迷失）
+
+**新建库或用户说“继续推进这个项目”时，优先走 `kb_next.py` 5 阶段短跑**（每段只做当前阶段的事，跑完主动停下并吐出下一段**可直接复制到新对话的 1 句续跑 Prompt**，彻底避免单次长对话反复压缩失忆；如果中途超时或中断，新对话运行 `kb_next.py status` 从磁盘精确续跑，绝不重来）：
+
+1. **先查进度**：运行 `python scripts/kb_next.py status --out <运行目录> [--package <初筛包>] [--config <kb-config.json>] [--vault <知识库>]`，严格按返回的 `stage` 执行当前阶段。
+2. **阶段 1（只判断 + 算总页数 + 自动捞回 D 类，不提取、不整理）**：
+   - 运行 `python scripts/kb_next.py plan --package <初筛包> --out <运行目录> --config <kb-config.json>`。脚本快速扫描所有 PDF/PPT 的页数与版面（PPT、产品画册、横版/图文设计密集 PDF 默认推荐 **Reducto**；Word 转的规整 PDF、规格书默认推荐 **MinerU** 免费额度；Word/Excel/TXT 本地直读），并输出《未处理 / 特殊文件清点》（压缩包、图纸、音视频、异常文件）。
+   - **D 类前置捞回**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）快速初判为 `keep`（捞回并算入本轮提取页数）、`drop`（丢弃）或 `ask_client`（进第 4 阶段客户确认网页），绝不默默跳过可用 D 类文件。
+   - 把 **① 5 项建库基础信息（首次）+ ② MinerU/Reducto 分流表与总页数 + ③ D 类初判建议 + ④ 未处理/特殊文件清点** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
+   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准，然后停下并提示用户**新开对话进入阶段 2**。
+3. **阶段 2（批量云端提取 + 抽块）**：
+   - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（`build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后停下并给出阶段 3 新对话 Prompt。
+4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
+   - 本阶段一口气核对完 `page-check/todo.jsonl` 里的全部剩余页面（页多时分给子 Agent 并行，不再每批停下来问用户“要不要继续”）。
+   - **硬性防中断规则**：每核对完 **20–30 页**，必须立刻写一个 `answer-batch-N.jsonl` 并立即运行 `python scripts/page_check.py collect --out <运行目录>` 把结果增量写入 `page-check/results.json`（已核对页永久落盘，即使中途断网或超时，新对话跑 `kb_next.py status` 也会精确显示 `已完成 X/总 Y 页`，从第 X+1 页接着看，绝不重来）。
+   - 全部核对完后重跑 `run_pipeline.py` 刷新来源层，停下并给出阶段 4 新对话 Prompt。
+5. **阶段 4（自动消化待办 + 同时生成内部决策网页和客户确认网页）**：
+   - 按下方“处理这个项目的待办”由 Agent 先自主消化全部可判定的 CUS/MAT/ANM 与待审 D 类文档，重跑 `run_pipeline.py --from guard` 刷新台账。
+   - 然后**同时导出并生成两份离线 HTML 网页**（有对应待办才生成）：
+     1. 内部待办决策网页：`governance_state.py review --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode internal`；
+     2. 客户确认网页：`governance_state.py cus-export --out <运行目录> --webpage-json` → 调用 `customer-confirmation-webpage --mode customer`。
+   - 运行 `python scripts/kb_next.py mark-stage4 --out <运行目录> --internal-html "<路径>" --customer-html "<路径>"`，把两份 HTML 路径和极简摘要交给用户，停下并给出阶段 5 新对话 Prompt。
+6. **阶段 5（整理正式知识 + 独立通读 + 发布上线）**：
+   - 将 `build_stage` 设为 `full`，按主题逐个写完整理页并落盘（最后写速查卡 `brief`）→ `curate.py check` → `run_pipeline.py` 直到 `verified: true` → 派独立子 Agent 抽样通读 → `publish_vault.py` 发布进知识库 → 输出最终《未处理 / 特殊文件清点》（含压缩包、异常文件、未引用有效原文与覆盖账本未处理段数）。
+
+*(下面的分步细则仍是各阶段底层执行的详细规范，需要单独手动执行某一步时照常适用。)*
+
 1. **读官网**（配置里登记了官网时）：运行 `fetch_website.py --out <运行目录> --config <kb-config.json>`，已发布过的项目加 `--vault <项目目录>`，先接上库里的官网快照。只读登记的域名，JS 页面用浏览器读取后用 `--browser-capture` 导入。
    - 一页可用正文都没读到时，脚本退出码为 4，原因写在 `website/fetch-report.json`。不要接着建库：先查网址和网络，或者用浏览器保存页面后导入；确定不要官网，就从配置的 `websites` 里删掉。
    - 这次没读到、但以前存过快照时，沿用快照，并在 MAT 台账里登记。
