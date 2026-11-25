@@ -41,16 +41,16 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 
 下面的 `<共用参数>` 是 `--package <初筛包> --out <运行目录> --config <kb-config.json>`；已经发布过的项目再加 `--vault <项目目录>`。各步的细节规则在合同对应小节，这里只写要做的事和要停下的地方。
 
-### 推荐主路径：5 阶段短跑 + 磁盘断点续跑（`kb_next.py`，防长对话迷失）
+### 推荐主路径：5 个磁盘断点 + Agent 自定执行节奏（`kb_next.py`，兼顾省心与防迷失）
 
-**新建库或用户说“继续推进这个项目”时，优先走 `kb_next.py` 5 阶段短跑**（每段只做当前阶段的事，跑完主动停下并吐出下一段**可直接复制到新对话的 1 句续跑 Prompt**，彻底避免单次长对话反复压缩失忆；如果中途超时或中断，新对话运行 `kb_next.py status` 从磁盘精确续跑，绝不重来）：
+**新建库或用户说“继续推进这个项目”时，优先用 `kb_next.py` 管进度**。下面 5 个阶段是**磁盘断点**，不是死板的强制停顿：阶段 1 必须停下给用户一次确认；确认之后，**由执行 Agent 根据本批资料量（文件数、总页数、D 类数量）和自身上下文/子 Agent 能力，在阶段 1 主动提出最稳妥的执行节奏**——资料少可直接合并 2–5 一口气跑完发布，中等体量可合并 2+3 或 2+3+4 后再换新对话跑 5，大画册/多文件项目按 5 段逐段开新对话推进。运行中如发现上下文变长，Agent 可在任意阶段边界主动停下并吐出下一段续跑 Prompt；中途断了，新对话运行 `kb_next.py status` 从磁盘精确续跑，绝不重来。
 
-1. **先查进度**：运行 `python scripts/kb_next.py status --out <运行目录> [--package <初筛包>] [--config <kb-config.json>] [--vault <知识库>]`，严格按返回的 `stage` 执行当前阶段。
-2. **阶段 1（只判断 + 算总页数 + 自动捞回 D 类，不提取、不整理）**：
+1. **先查进度**：运行 `python scripts/kb_next.py status --out <运行目录> [--package <初筛包>] [--config <kb-config.json>] [--vault <知识库>]`，按返回的 `stage` 接上当前未完成的阶段。
+2. **阶段 1（只判断 + 算总页数 + 自动捞回 D 类 + 给出执行节奏，不提取、不整理）**：
    - 运行 `python scripts/kb_next.py plan --package <初筛包> --out <运行目录> --config <kb-config.json>`。脚本快速扫描所有 PDF/PPT 的页数与版面（PPT、产品画册、横版/图文设计密集 PDF 默认推荐 **Reducto**；Word 转的规整 PDF、规格书默认推荐 **MinerU** 免费额度；Word/Excel/TXT 本地直读），并输出《未处理 / 特殊文件清点》（压缩包、图纸、音视频、异常文件）。
    - **D 类前置捞回**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）快速初判为 `keep`（捞回并算入本轮提取页数）、`drop`（丢弃）或 `ask_client`（进第 4 阶段客户确认网页），绝不默默跳过可用 D 类文件。
-   - 把 **① 5 项建库基础信息（首次）+ ② MinerU/Reducto 分流表与总页数 + ③ D 类初判建议 + ④ 未处理/特殊文件清点** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
-   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准，然后停下并提示用户**新开对话进入阶段 2**。
+   - 把 **① 5 项建库基础信息（首次）+ ② MinerU/Reducto 分流表与总页数 + ③ D 类初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
+   - 用户回复同意后，运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru]` 一次性写入 D 类决定、`sample-decisions.json` 和 MinerU/Reducto 上传批准，然后按商定的节奏继续执行（或提示新开对话进入下一段）。
 3. **阶段 2（批量云端提取 + 抽块）**：
    - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（`build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后停下并给出阶段 3 新对话 Prompt。
 4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
