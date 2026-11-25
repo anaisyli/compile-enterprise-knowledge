@@ -346,7 +346,9 @@ def render_stage1_plan_md(plan: dict[str, Any]) -> str:
 
 def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
                       overrides: dict[str, str], d_decisions_path: Path | None,
-                      fallback_mineru: bool, fast_mvp: bool = False) -> dict[str, Any]:
+                      fallback_mineru: bool, fast_mvp: bool = False,
+                      evidence: str = "", dry_run: bool = False,
+                      allow_undecided_d: bool = False) -> dict[str, Any]:
     """One-shot apply: D-class decisions + sample-decisions.json + MinerU/Reducto approvals.
 
     With fast_mvp=True (快车道极简版), heavy Reducto-routed catalogs/PPTs are temporarily deferred
@@ -433,9 +435,6 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
             existing["method"] = "reducto" if (kind in {"catalog_pdf", "ppt"} and not fallback_mineru) else "mineru"
         decisions[kind] = existing
 
-    write_json(build / DECISIONS, decisions)
-    sync_reducto_primary(build, item_kinds, decisions)
-
     # 3. Record cloud OCR approvals, stage_authorization, and build_stage in kb-config.json
     today = date.today().isoformat()
     if "mineru" in used_methods:
@@ -450,6 +449,7 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     config["stage_authorization"] = {
         "approved_by": approved_by,
         "approved_at": today,
+        "evidence": evidence.strip() or "用户在阶段1确认卡片后回复同意按推荐开跑",
         "scope": "阶段1一次确认：建库5项基础信息与写入目标目录、本批云端分流页数、D类去向、整理层生成与首次发布",
     }
 
@@ -458,7 +458,6 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         config["deferred_items"] = deferred
         config["page_check"] = {"skip": "快车道极简版暂跳过，二期补全"}
         config["build_stage"] = "full"
-        write_json(build / STAGE4_MARKER, {"completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "fast_mvp": True})
     else:
         # Standard path runs Stage 2-4 in sources_only so run_pipeline.py does not curate prematurely.
         config["build_stage"] = "sources_only"
@@ -468,9 +467,22 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     eff_mineru = [e for e in effective_files if e["item_id"] not in deferred and (overrides.get(e["item_id"], e["method"]) == "mineru" or (fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"))]
     eff_reducto = [e for e in effective_files if e["item_id"] not in deferred and not fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"]
 
-    write_json(config_path, config)
+    if d_still_undecided and not allow_undecided_d and not dry_run:
+        raise SystemExit(
+            f"尚有 {len(d_still_undecided)} 份 D 类文件未初判：{', '.join(d_still_undecided[:10])}。"
+            "请先补齐 --d-decisions 再执行 apply-plan（确需暂缓时加 --allow-undecided-d）。"
+        )
+
+    if not dry_run:
+        write_json(build / DECISIONS, decisions)
+        sync_reducto_primary(build, item_kinds, decisions)
+        if fast_mvp:
+            write_json(build / STAGE4_MARKER, {"completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "fast_mvp": True})
+        write_json(config_path, config)
+
     return {
-        "applied": True,
+        "applied": not dry_run,
+        "dry_run": dry_run,
         "fast_mvp": fast_mvp,
         "approved_by": approved_by,
         "build_stage": config["build_stage"],
@@ -713,6 +725,9 @@ def main() -> int:
     p_apply.add_argument("--d-decisions", help="Optional JSON/JSONL file with D-class keep/drop/ask_client decisions")
     p_apply.add_argument("--fallback-mineru", action="store_true", help="Downgrade all Reducto-recommended files to MinerU")
     p_apply.add_argument("--fast", action="store_true", help="Fast MVP mode: defer heavy Reducto catalogs/PPTs and skip page-check for quick first publish")
+    p_apply.add_argument("--evidence", default="", help="Verbatim user confirmation message stored in stage_authorization.evidence")
+    p_apply.add_argument("--dry-run", action="store_true", help="Preview effective_pages and d_still_undecided without writing any files")
+    p_apply.add_argument("--allow-undecided-d", action="store_true", help="Allow apply-plan even when some D-class items are not decided yet")
 
     p_resume = sub.add_parser("resume-full", help="Upgrade a --fast MVP build to full: restore deferred catalogs/PPTs and re-enable page-check")
     p_resume.add_argument("--out", required=True, help="Run directory")
@@ -755,7 +770,11 @@ def main() -> int:
             k, v = item.split("=", 1)
             overrides[k.strip()] = v.strip()
         d_path = Path(args.d_decisions).resolve() if args.d_decisions else None
-        result = apply_stage1_plan(out, Path(args.config).resolve(), args.approved_by, overrides, d_path, args.fallback_mineru, fast_mvp=args.fast)
+        result = apply_stage1_plan(
+            out, Path(args.config).resolve(), args.approved_by, overrides, d_path,
+            args.fallback_mineru, fast_mvp=args.fast, evidence=args.evidence,
+            dry_run=args.dry_run, allow_undecided_d=args.allow_undecided_d,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

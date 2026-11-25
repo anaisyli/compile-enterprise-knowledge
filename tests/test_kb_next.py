@@ -114,14 +114,26 @@ class KbNextTests(unittest.TestCase):
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
 
-            # Apply plan + rescue D-class doc + drop archive
+            # Without --d-decisions, apply-plan refuses to silently drop undecided D-class files
+            blocked = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("尚有 2 份 D 类文件未初判", blocked.stderr)
+
+            # Dry-run previews effective_pages with rescued D-class files without writing anything
             d_file = root / "d-dec.jsonl"
             d_file.write_text(
                 json.dumps({"item_id": "item-d-doc", "decision": "keep"}) + "\n"
                 + json.dumps({"item_id": "item-zip", "decision": "drop"}) + "\n",
                 encoding="utf-8",
             )
-            ap = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--d-decisions", str(d_file))
+            dry = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--d-decisions", str(d_file), "--dry-run").stdout)
+            self.assertFalse(dry["applied"])
+            self.assertTrue(dry["dry_run"])
+            self.assertEqual(dry["effective_pages"]["mineru_pages"], 5)
+            self.assertFalse((out / "04_知识库构建/sample-decisions.json").exists())
+
+            # Real apply-plan writes decisions + verbatim evidence
+            ap = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "同意，按推荐开跑", "--d-decisions", str(d_file))
             self.assertEqual(ap.returncode, 0, ap.stderr)
             ap_data = json.loads(ap.stdout)
             self.assertEqual(ap_data["d_applied"]["keep"], ["item-d-doc"])
@@ -136,6 +148,7 @@ class KbNextTests(unittest.TestCase):
             updated_cfg = json.loads(cfg.read_text(encoding="utf-8"))
             self.assertEqual(updated_cfg["build_stage"], "sources_only")
             self.assertEqual(updated_cfg["stage_authorization"]["approved_by"], "测试员")
+            self.assertEqual(updated_cfg["stage_authorization"]["evidence"], "同意，按推荐开跑")
             self.assertTrue(updated_cfg["mineru"]["approved"])
             self.assertTrue(updated_cfg["reducto"]["approved"])
             self.assertIn("item-d-doc", updated_cfg["d_keep"])
@@ -203,7 +216,7 @@ class KbNextTests(unittest.TestCase):
             cfg.write_text(json.dumps({"project_id": "P-001", "company": "甲公司"}, ensure_ascii=False), encoding="utf-8")
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
-            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--fast").stdout)
+            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--fast", "--allow-undecided-d").stdout)
             self.assertTrue(ap["fast_mvp"])
             self.assertEqual(ap["cloud_approvals"], ["mineru"])
             self.assertEqual(sorted(ap["deferred_items"]), ["item-cat", "item-ppt"])

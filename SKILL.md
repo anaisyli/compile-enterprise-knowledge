@@ -1,6 +1,6 @@
 ---
 name: compile-enterprise-knowledge
-description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 Obsidian 知识库：来源层是净化后的原文，只删不改，每份带来源卡片；整理层是给人看的知识页，比如公司概况、产品大类、定制能力、面料工艺、FAQ，每条都链接回原文并经脚本核对。价格和客户信息按初筛规则删除；品牌、IP、冲突、待客户确认等风险内容不拦，标记后登记到 05_数据与审核 的 CUS/MAT/ANM 台账。也负责：用 MinerU / Reducto 解析 PDF 和 PPT（含首次设置 Token/Key），读取客户官网，产品表逐格判断，建库、发布、检索、月度体检和日常维护；按知识库缺口或文章大纲做外部调研（只查行业公共知识，入 20_外部公共知识）；给写作 Skill 按小板块取资料与引用核对（kb_lookup.py / check_article.py）。只要用户提到把初筛包建库、转成 md 知识库、整理正式知识、把资料放进 Obsidian、生成 P-005 这种结构的知识库、用 MinerU/Reducto 解析画册、抓客户官网进知识库、维护或月度体检知识库、按缺口外部调研、写文章时从知识库取资料，就使用本 Skill，即使没有提到它的名字。不要用它筛选原始资料（用 prepare-seo-knowledge-materials）。
+description: 编译并维护两层企业 Obsidian 知识库（来源层净化原文 + 整理层正式知识页，含 CUS/MAT/ANM 治理与 5 阶段断点续跑）。配套负责：MinerU/Reducto 解析 PDF/PPT、官网抓取、按缺口外部调研（入 20_外部公共知识）、月度只读体检，以及供写作 Skill 按小板块取料与引用核对（kb_lookup.py / check_article.py）。用于初筛包建库、整理正式知识、更新维护或月度体检企业知识库；不要用于筛选原始资料（用 prepare-seo-knowledge-materials）。
 ---
 
 # 企业知识库编译
@@ -48,9 +48,9 @@ description: 把 prepare-seo-knowledge-materials 产出的初筛包建成两层 
 1. **先查进度**：运行 `python scripts/kb_next.py status --out <运行目录> [--package <初筛包>] [--config <kb-config.json>] [--vault <知识库>]`，按返回的 `stage` 接上当前未完成的阶段。
 2. **阶段 1（只判断 + 算总页数 + 自动捞回 D 类 + 给出执行节奏，不提取、不整理）**：
    - 运行 `python scripts/kb_next.py plan --package <初筛包> --out <运行目录> --config <kb-config.json>`。脚本快速扫描所有 PDF/PPT 的页数与版面（PPT、产品画册、横版/图文设计密集 PDF 默认推荐 **Reducto**；Word 转的规整 PDF、规格书默认推荐 **MinerU** 免费额度；Word/Excel/TXT 本地直读），并输出《未处理 / 特殊文件清点》（压缩包、图纸、音视频、异常文件）。
-   - **D 类前置捞回**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）快速初判为 `keep`（捞回并算入本轮提取页数）、`drop`（丢弃）或 `ask_client`（进第 4 阶段客户确认网页），绝不默默跳过可用 D 类文件。
-   - 把 **① 5 项建库基础信息（首次）+ ② MinerU（免费）/ Reducto（按页计费，附计费与余额链接）最终分流表与总页数（已计入建议捞回的 D 类页数）+ ③ D 类全量初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
-   - **一次确认的明确授权范围**：用户回复“同意，按推荐开跑”即同时授权：① 5 项建库基础信息与首次写入知识库目录；② 本批 MinerU / Reducto 外发页数；③ 本批 D 类去向；④ 整理层生成（`apply-plan` 自动写入 `stage_authorization`）；⑤ 商定的执行节奏。之后运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性落盘（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT、`page-check` 与阶段 4 待办双网页，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件与完整核对/治理即可）。确认后按商定的节奏继续执行。
+   - **D 类前置捞回与页数预演**：若 `stage1-plan.json` 列出未决定的 D 类文件，AI 必须先按文件名、目录和初筛说明（必要时抽看首页/前几行，不做全量提取）完成全量初判并写进 `d-decisions.jsonl`，再运行 `kb_next.py apply-plan ... --d-decisions d-decisions.jsonl --dry-run` 得到含捞回 D 类页数的准确 `effective_pages` 和 `d_still_undecided`（未全判时正式 `apply-plan` 会拦截报错）。
+   - 把 **① 5 项建库基础信息（首次）+ ② MinerU（免费）/ Reducto（按页计费，附计费与余额链接）最终分流表与 `effective_pages` 总页数 + ③ D 类全量初判建议 + ④ 未处理/特殊文件清点 + ⑤ 建议执行节奏（合并哪几步、全合并直通或逐段推进，及理由）** 合成一张简明卡片一次给用户确认（不再强制让用户逐份对照看样例）。
+   - **一次确认的明确授权范围**：用户回复“同意，按推荐开跑”即同时授权：① 5 项建库基础信息与首次写入知识库目录；② 本批 MinerU / Reducto 外发页数；③ 本批 D 类去向；④ 整理层生成（`apply-plan` 自动写入含用户原话 `evidence` 的 `stage_authorization`）；⑤ 商定的执行节奏。之后运行 `python scripts/kb_next.py apply-plan --out <运行目录> --config <kb-config.json> --approved-by "<用户>" --evidence "<用户回复原话>" [--d-decisions <jsonl>] [--override item_id=method] [--fallback-mineru] [--fast]` 一次性落盘（若用户急着写文章要**快车道极简版 MVP**，加 `--fast` 暂缓重画册/PPT、`page-check` 与阶段 4 待办双网页，先用官网+Word/Excel+规整 PDF 快速发布速查卡与核心页；后续补全时运行 `kb_next.py resume-full` 恢复暂缓文件与完整核对/治理即可）。确认后按商定的节奏继续执行。
 3. **阶段 2（批量云端提取 + 抽块）**：
    - 抓官网（如有）→ 按已批准的分流方案跑 `mineru_ocr.py run` / `reducto_ocr.py run` → 跑 `run_pipeline.py <共用参数> --images all`（常规路径已由 `apply-plan` 自动设为 `build_stage: sources_only`）生成来源层和 `page-check/todo.jsonl`。完成后按阶段 1 商定节奏继续下一阶段，或在此停下给出下一段新对话 Prompt。
 4. **阶段 3（看图核对 `page-check` 一口气看完，但每 20–30 页增量落盘防重来）**：
