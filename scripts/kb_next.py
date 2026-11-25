@@ -363,12 +363,28 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     plan = load_json(plan_path)
     config = load_config(config_path) if config_path.is_file() else {}
 
+    if allow_undecided_d and not fast_mvp:
+        raise SystemExit("--allow-undecided-d 仅限 --fast 快车道模式使用；常规模式必须先完成全部 D 类初判。")
+    if not dry_run and not approved_by.strip():
+        raise SystemExit("正式执行 apply-plan 必须提供 --approved-by \"<确认人>\"。")
+    if not dry_run and not evidence.strip():
+        raise SystemExit("正式执行 apply-plan 必须提供 --evidence \"<用户确认原话>\"，不能省略或由脚本代写原话。")
+
     # 1. Apply D-class decisions if provided
     d_applied = {"keep": [], "drop": [], "ask_client": []}
     d_by_id = {d["item_id"]: d for d in plan.get("d_undecided", [])}
     if d_decisions_path and d_decisions_path.is_file():
         raw_text = d_decisions_path.read_text(encoding="utf-8").strip()
         records = json.loads(raw_text) if raw_text.startswith("[") else [json.loads(ln) for ln in raw_text.splitlines() if ln.strip()]
+        seen_decisions: dict[str, str] = {}
+        for rec in records:
+            iid = rec.get("item_id")
+            dec = rec.get("decision")
+            if not iid or dec not in {"keep", "drop", "ask_client"}:
+                continue
+            if iid in seen_decisions and seen_decisions[iid] != dec:
+                raise SystemExit(f"D 类决定冲突：{iid} 同时指定了 {seen_decisions[iid]} 和 {dec}，请保留唯一决定。")
+            seen_decisions[iid] = dec
         d_keep = list(config.get("d_keep") or [])
         d_drop = list(config.get("d_drop") or [])
         ask_client = dict(config.get("ask_client") or {})
@@ -377,17 +393,31 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
             dec = rec.get("decision")
             if not iid or dec not in {"keep", "drop", "ask_client"}:
                 continue
+            # Ensure mutual exclusion across d_keep / d_drop / ask_client.
             if dec == "keep":
+                if iid in d_drop:
+                    d_drop.remove(iid)
+                ask_client.pop(iid, None)
                 if iid not in d_keep:
                     d_keep.append(iid)
-                d_applied["keep"].append(iid)
+                if iid not in d_applied["keep"]:
+                    d_applied["keep"].append(iid)
             elif dec == "drop":
+                if iid in d_keep:
+                    d_keep.remove(iid)
+                ask_client.pop(iid, None)
                 if iid not in d_drop:
                     d_drop.append(iid)
-                d_applied["drop"].append(iid)
+                if iid not in d_applied["drop"]:
+                    d_applied["drop"].append(iid)
             elif dec == "ask_client":
+                if iid in d_keep:
+                    d_keep.remove(iid)
+                if iid in d_drop:
+                    d_drop.remove(iid)
                 ask_client[iid] = rec.get("reason") or "阶段 1 初判需客户确认归属或使用范围"
-                d_applied["ask_client"].append(iid)
+                if iid not in d_applied["ask_client"]:
+                    d_applied["ask_client"].append(iid)
         config["d_keep"] = d_keep
         config["d_drop"] = d_drop
         config["ask_client"] = ask_client
@@ -445,9 +475,6 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         reducto_cfg = dict(config.get("reducto") or {})
         reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
         config["reducto"] = reducto_cfg
-
-    if not dry_run and not evidence.strip():
-        raise SystemExit("正式执行 apply-plan 必须提供 --evidence \"<用户确认原话>\"，不能省略或由脚本代写原话。")
 
     config["stage_authorization"] = {
         "approved_by": approved_by,
@@ -614,14 +641,21 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
         and not (build / "reducto-units" / f"{k.removeprefix(FILE_PREFIX)}.json").is_file()
     ]
     if not docs_path.is_file() or not routes_path.is_file() or mineru_missing or reducto_missing:
+        has_routes = routes_path.is_file() and (build / "page-triage.json").is_file()
+        step_hint = (
+            "先运行 run_pipeline.py --images all（生成 routes.json 与 page-triage.json），"
+            "再按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run，"
+            "最后重跑一次 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
+            if not has_routes else
+            "routes.json 与 page-triage.json 已就绪；请运行 mineru_ocr.py run / reducto_ocr.py run 补齐未完成 OCR，"
+            "然后重跑 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
+        )
         return {
             "stage": "stage2_extract",
             "stage_name": "阶段 2：批量云端提取与抽块",
+            "routes_ready": has_routes,
             "ocr_pending": {"mineru_missing": mineru_missing, "reducto_missing": reducto_missing},
-            "instruction": (
-                "按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run（有对应未完成文件才跑），"
-                "再运行 run_pipeline.py --images all 生成来源层与 page-check 待办。"
-            ),
+            "instruction": step_hint,
             "next_chat_prompt": next_prompt("阶段 3：看图核对"),
         }
 
@@ -725,7 +759,7 @@ def main() -> int:
     p_apply = sub.add_parser("apply-plan", help="Stage 1 confirm: write D-class decisions, sample-decisions.json, and cloud OCR approvals")
     p_apply.add_argument("--out", required=True, help="Run directory")
     p_apply.add_argument("--config", required=True, help="kb-config.json")
-    p_apply.add_argument("--approved-by", required=True, help="Person who approved the Stage 1 plan")
+    p_apply.add_argument("--approved-by", default="", help="Person who approved the Stage 1 plan (required unless --dry-run)")
     p_apply.add_argument("--override", action="append", default=[], help="Override one file: <item_id>=<mineru|reducto|text|ai>")
     p_apply.add_argument("--d-decisions", help="Optional JSON/JSONL file with D-class keep/drop/ask_client decisions")
     p_apply.add_argument("--fallback-mineru", action="store_true", help="Downgrade all Reducto-recommended files to MinerU")

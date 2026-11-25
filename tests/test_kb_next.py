@@ -114,6 +114,11 @@ class KbNextTests(unittest.TestCase):
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
 
+            # --allow-undecided-d is rejected in standard (non-fast) mode
+            bad_allow = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "同意", "--allow-undecided-d")
+            self.assertNotEqual(bad_allow.returncode, 0)
+            self.assertIn("仅限 --fast", bad_allow.stderr)
+
             # Without --evidence, formal apply-plan refuses to fabricate verbatim approval text
             no_ev = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员")
             self.assertNotEqual(no_ev.returncode, 0)
@@ -124,14 +129,27 @@ class KbNextTests(unittest.TestCase):
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("尚有 2 份 D 类文件未初判", blocked.stderr)
 
-            # Dry-run previews effective_pages with rescued D-class files without writing anything
+            # Conflicting D-class decisions (same item_id both keep and drop) are rejected
+            bad_d = root / "bad-d.jsonl"
+            bad_d.write_text(
+                json.dumps({"item_id": "item-d-doc", "decision": "keep"}) + "\n"
+                + json.dumps({"item_id": "item-d-doc", "decision": "drop"}) + "\n",
+                encoding="utf-8",
+            )
+            conflict = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--d-decisions", str(bad_d), "--dry-run")
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertIn("D 类决定冲突", conflict.stderr)
+
+            # Dry-run works WITHOUT --approved-by or --evidence and previews effective_pages without writing anything
             d_file = root / "d-dec.jsonl"
             d_file.write_text(
                 json.dumps({"item_id": "item-d-doc", "decision": "keep"}) + "\n"
                 + json.dumps({"item_id": "item-zip", "decision": "drop"}) + "\n",
                 encoding="utf-8",
             )
-            dry = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--d-decisions", str(d_file), "--dry-run").stdout)
+            dry_res = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--d-decisions", str(d_file), "--dry-run")
+            self.assertEqual(dry_res.returncode, 0, dry_res.stderr)
+            dry = json.loads(dry_res.stdout)
             self.assertFalse(dry["applied"])
             self.assertTrue(dry["dry_run"])
             self.assertEqual(dry["effective_pages"]["mineru_pages"], 5)
@@ -161,9 +179,11 @@ class KbNextTests(unittest.TestCase):
             self.assertIn("item-d-doc", updated_cfg["d_keep"])
             self.assertIn("item-zip", updated_cfg["d_drop"])
 
-            # After apply -> Stage 2
+            # After apply -> Stage 2 (routes not ready yet: must run run_pipeline.py before OCR)
             st2 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st2["stage"], "stage2_extract")
+            self.assertFalse(st2["routes_ready"])
+            self.assertIn("先运行 run_pipeline.py", st2["instruction"])
 
             # Simulate docs/routes WITHOUT OCR outputs -> STILL Stage 2 (catches unfinished MinerU/Reducto!)
             build = out / "04_知识库构建"
