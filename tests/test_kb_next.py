@@ -114,8 +114,13 @@ class KbNextTests(unittest.TestCase):
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
 
+            # Without --evidence, formal apply-plan refuses to fabricate verbatim approval text
+            no_ev = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员")
+            self.assertNotEqual(no_ev.returncode, 0)
+            self.assertIn("--evidence", no_ev.stderr)
+
             # Without --d-decisions, apply-plan refuses to silently drop undecided D-class files
-            blocked = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员")
+            blocked = self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "同意")
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("尚有 2 份 D 类文件未初判", blocked.stderr)
 
@@ -142,7 +147,9 @@ class KbNextTests(unittest.TestCase):
             self.assertEqual(ap_data["build_stage"], "sources_only")
             # item-spec (3p) + rescued D-class item-d-doc (2p) = 5 MinerU pages
             self.assertEqual(ap_data["effective_pages"]["mineru_pages"], 5)
+            self.assertEqual(ap_data["effective_pages"]["mineru_unknown_pages"], 0)
             self.assertEqual(ap_data["effective_pages"]["reducto_pages"], 9)
+            self.assertEqual(ap_data["effective_pages"]["reducto_unknown_pages"], 0)
             self.assertEqual(ap_data["cloud_approvals"], ["mineru", "reducto"])
 
             updated_cfg = json.loads(cfg.read_text(encoding="utf-8"))
@@ -216,7 +223,7 @@ class KbNextTests(unittest.TestCase):
             cfg.write_text(json.dumps({"project_id": "P-001", "company": "甲公司"}, ensure_ascii=False), encoding="utf-8")
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
-            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--fast", "--allow-undecided-d").stdout)
+            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "先出极简版", "--fast", "--allow-undecided-d").stdout)
             self.assertTrue(ap["fast_mvp"])
             self.assertEqual(ap["cloud_approvals"], ["mineru"])
             self.assertEqual(sorted(ap["deferred_items"]), ["item-cat", "item-ppt"])

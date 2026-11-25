@@ -11,7 +11,7 @@ and an AI agent never runs a multi-hour single conversation that loses context:
   Stage 2 (extract):  Batch MinerU/Reducto OCR + pipeline through source layer & page-check todo.
   Stage 3 (page_check): Complete all page-check items in one stage, flushing collect every 20-30 pages
       so an interrupted run resumes from the exact remaining pages with zero repeated work.
-  Stage 4 (governance): Agent auto-digests 90% of CUS/MAT/ANM and generates BOTH internal-decision HTML
+  Stage 4 (governance): Agent auto-digests all decidable CUS/MAT/ANM and generates BOTH internal-decision HTML
       and customer-confirmation HTML together.
   Stage 5 (curate_publish): Write curation pages & brief card (flushing per topic), independent readthrough,
       publish to vault, and report final unhandled-files inventory.
@@ -446,10 +446,13 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
         config["reducto"] = reducto_cfg
 
+    if not dry_run and not evidence.strip():
+        raise SystemExit("正式执行 apply-plan 必须提供 --evidence \"<用户确认原话>\"，不能省略或由脚本代写原话。")
+
     config["stage_authorization"] = {
         "approved_by": approved_by,
         "approved_at": today,
-        "evidence": evidence.strip() or "用户在阶段1确认卡片后回复同意按推荐开跑",
+        "evidence": evidence.strip(),
         "scope": "阶段1一次确认：建库5项基础信息与写入目标目录、本批云端分流页数、D类去向、整理层生成与首次发布",
     }
 
@@ -491,8 +494,10 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
         "effective_pages": {
             "mineru_files": len(eff_mineru),
             "mineru_pages": sum(e.get("pages") or 0 for e in eff_mineru),
+            "mineru_unknown_pages": sum(1 for e in eff_mineru if e.get("pages") is None),
             "reducto_files": len(eff_reducto),
             "reducto_pages": sum(e.get("pages") or 0 for e in eff_reducto),
+            "reducto_unknown_pages": sum(1 for e in eff_reducto if e.get("pages") is None),
         },
         "deferred_count": len(deferred),
         "deferred_items": list(deferred),
