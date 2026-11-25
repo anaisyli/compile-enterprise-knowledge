@@ -35,7 +35,7 @@ import split_reviews
 from ai_read import package_files, pdf_of, store_ai_units
 from guard_blocks import HARD_PATTERNS
 from kb_common import (BUILD_DIRECTORY, load_config, load_json, load_jsonl, load_units, long_path, is_drawing_dimension_line,
-                       mineru_page_units, remaining_ocr_pages, run_lock, sha256_file, suppress_drawing_dimensions,
+                       mineru_page_units, remaining_ocr_pages, run_lock, sha256_file,
                        unit_dirs, write_json, write_text)
 from legacy_migrations import has_legacy_reviewed_pages
 from office import convert_office
@@ -333,12 +333,6 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
         suffix = asset["file"].suffix.casefold()
         # The reviewer sees what the build will publish: text layer plus what MinerU or the model read.
         units = load_units(unit_dirs(build, text_dirs), item_id)
-        drawing_pages = {f"{entry.get('unit', 'page')} {entry.get('page')}"
-                         for key, entry in done.items() if entry.get("dimension_drawing") and entry.get("item_id") == item_id}
-        units = suppress_drawing_dimensions(
-            units + [{"locator": f"{page} drawing", "text": done[f"{item_id}|{page}"].get("drawing_caption", ""),
-                      "dimension_drawing": True, "drawing_model_confirmed": done[f"{item_id}|{page}"].get("drawing_model_confirmed", False)}
-                     for page in drawing_pages if f"{item_id}|{page}" in done])
         reducto = compare(build, item_id)
         reducto_record = record_of(build, item_id)
         reducto_read = set(reducto_record.get("pages_read", [])) if reducto_record.get("source_hash") == asset.get("source_hash") else set()

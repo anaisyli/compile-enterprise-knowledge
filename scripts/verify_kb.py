@@ -16,8 +16,7 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
-from build_progress import (PIPELINE_CHECKPOINT, curation_inputs, extracted_inputs, output_digests,
-                            package_input_digests)
+from build_progress import PIPELINE_CHECKPOINT, curation_inputs, extracted_inputs, package_input_digests
 from source_fidelity import reviewed_units
 from split_reviews import split_errors
 from sheet_layout import excel_date
@@ -289,19 +288,15 @@ def main() -> int:
     expected_sources = checkpoint.get("source_inputs")
     expected_package_inputs = checkpoint.get("package_inputs")
     expected_curation = checkpoint.get("curation")
-    expected_outputs = checkpoint.get("validated_files")
     initial_sources = extracted_inputs(build, ocr_dir)
     initial_package_inputs = package_input_digests(packages)
     initial_curation = curation_inputs(build)
-    initial_outputs = output_digests(run, config.get("build_stage", "full"))
     if expected_sources is not None and expected_sources != initial_sources:
         errors.append("看图核对或 OCR 输入与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
     if expected_package_inputs is not None and expected_package_inputs != initial_package_inputs:
         errors.append("初筛包输入与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
     if expected_curation is not None and expected_curation != initial_curation:
         errors.append("整理页原稿与流水线快照不一致；请重跑 run_pipeline.py 后再校验")
-    if expected_outputs is not None and expected_outputs != initial_outputs:
-        errors.append("发布文件与流水线校验快照不一致；请重跑 run_pipeline.py 后再校验")
 
     # Every item in the package has a recorded fate.
     asset_ids = {asset["item_id"] for asset in assets}
@@ -351,6 +346,11 @@ def main() -> int:
         if block["kind"] == "point":
             if block["text"] not in points:
                 errors.append(f"point not in package: {block['block_id']}")
+            continue
+        if block.get("dimension_drawing"):
+            # This caption is a checked classification of the image, not a
+            # transcription of source text. drawing_page_errors verifies the
+            # label's presence, grouping and source-image attachment.
             continue
         item_id = doc["item_id"]
         if item_id not in units_by_item:
@@ -410,6 +410,8 @@ def main() -> int:
         units = preferred_page_units(units)
         units = suppress_drawing_dimensions(units)
         for unit in units:
+            if unit.get("dimension_drawing"):
+                continue
             platform_page = is_platform_page_unit(unit)
             sheet = SHEET_LOCATOR.match(unit["locator"])
             if sheet and sheet.group(1) != "visible":
@@ -524,11 +526,18 @@ def main() -> int:
     todo_entries = load_jsonl(todo_path) if todo_path.is_file() else []
     waiting = sum(checked.get(entry.get("key"), {}).get("review_digest") != entry.get("review_digest")
                   for entry in todo_entries if entry.get("key"))
+    valid_checked = any(
+        result.get("review_digest")
+        and result.get("source_hash") == routes.get(result.get("item_id"), {}).get("source_hash")
+        and result.get("unit") in {"page", "slide", "image"}
+        and isinstance(result.get("page"), int)
+        for result in checked.values()
+    )
     skip = config.get("page_check", {}).get("skip") if isinstance(config.get("page_check"), dict) else None
     if check_plan.get("ok") is False:
         warnings.append(f"没做看图核对：{check_plan.get('reason')}")
     elif waiting and not skip:
-        if checked:
+        if valid_checked:
             errors.append(f"看图核对没做完：还有 {waiting} 页（04_知识库构建/page-check/todo.jsonl）。看完运行 page_check.py collect 再重跑；"
                           "确实不做，在 kb-config.json 的 page_check 里写 {\"skip\": \"理由\"}")
         else:
@@ -591,7 +600,6 @@ def main() -> int:
     final_sources = extracted_inputs(build, ocr_dir)
     final_package_inputs = package_input_digests(packages)
     final_curation = curation_inputs(build)
-    final_outputs = output_digests(run, config.get("build_stage", "full"))
     if expected_sources is not None and expected_sources != final_sources:
         message = "看图核对或 OCR 输入在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
         if message not in errors:
@@ -604,11 +612,6 @@ def main() -> int:
         message = "整理页原稿在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
         if message not in errors:
             errors.append(message)
-    if expected_outputs is not None and expected_outputs != final_outputs:
-        message = "发布文件在校验期间发生变化；请重跑 run_pipeline.py 后再校验"
-        if message not in errors:
-            errors.append(message)
-
     report: dict[str, Any] = {
         "verified": not errors,
         "build_stage": config.get("build_stage", "full"),

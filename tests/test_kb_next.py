@@ -225,6 +225,41 @@ class KbNextTests(unittest.TestCase):
             self.assertEqual(data["summary"]["d_undecided"], 2)  # zip + d-doc
             self.assertTrue((out / "04_知识库构建/stage1-plan.md").is_file())
 
+    def test_d_class_drawing_pdf_routes_to_asset_not_reducto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg = make_package(root / "pkg")
+            make_pdf(pkg / "D-待定/CAD三视图/塔库-彩色.pdf", pages=1, landscape=True, text="")
+            manifest_path = pkg / "审计记录/package-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["assets"].append({
+                "item_id": "item-d-cad", "path": "D-待定/CAD三视图/塔库-彩色.pdf",
+                "display_name": "塔库-彩色.pdf", "decision": "D", "tier": "T2",
+            })
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            out = root / "run"
+            cfg = root / "kb-config.json"
+            cfg.write_text(json.dumps({"project_id": "P-001", "company": "甲公司"}, ensure_ascii=False), encoding="utf-8")
+
+            plan = json.loads(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg), "--json").stdout)
+            d_by_id = {d["item_id"]: d for d in plan["d_undecided"]}
+            self.assertEqual(d_by_id["item-d-cad"]["recommended_method"], "asset")
+            self.assertEqual(d_by_id["item-d-cad"]["pages"], 0)
+
+            d_file = root / "d.jsonl"
+            d_file.write_text(
+                json.dumps({"item_id": "item-d-doc", "decision": "keep"}) + "\n"
+                + json.dumps({"item_id": "item-zip", "decision": "drop"}) + "\n"
+                + json.dumps({"item_id": "item-d-cad", "decision": "keep"}) + "\n",
+                encoding="utf-8",
+            )
+            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg),
+                                         "--approved-by", "测试员", "--evidence", "同意", "--d-decisions", str(d_file)).stdout)
+            self.assertEqual(ap["effective_pages"]["reducto_pages"], 9)
+            saved_cfg = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertIn("item-d-cad", saved_cfg.get("drawing_items", []))
+            self.assertNotIn("item-d-cad", saved_cfg.get("reducto", {}).get("approved_item_ids", []))
+
     def test_apply_plan_and_five_stage_checkpoint_progression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -113,7 +113,7 @@ class RerunTests(Base):
         self.assertEqual(self.publish().returncode, 0)
         gaps = (self.vault / "05_数据与审核/20_知识库覆盖与缺口/01_知识库覆盖与缺口.md").read_text(encoding="utf-8")
         self.assertIn("| 发展历程 | 1 段 | 1 份 | 有原文没整理 |", gaps)
-        self.assertIn("| 资质认证 | 0 段 | 0 份 | 缺 | 向客户要证书扫描件或审核报告 |", gaps)
+        self.assertIn("| 资质认证 | 0 段 | 0 份 | 缺 | 向客户要资质证书、生产许可证扫描件或审核报告 |", gaps)
         self.assertIn("小板块：", (self.vault / "01_工作台/00_知识库总览.md").read_text(encoding="utf-8"))
 
     def test_written_heading_counts_as_covered(self) -> None:

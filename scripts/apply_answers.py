@@ -30,7 +30,7 @@ from kb_common import BUILD_DIRECTORY, MANIFEST_NAME, POINTS_NAME, load_json, lo
 KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
 DROP = {"不用", "不可以", "删除", "不同意", "否", "drop", "no", "n"}
 JSON_KEEP_DECISIONS = {"keep", "yes", "whole", "approve", "allow"}
-JSON_DROP_DECISIONS = {"drop", "no", "exclude", "reject"}
+JSON_DROP_DECISIONS = {"drop", "no", "exclude", "reject", "deny"}
 ANSWER_COLUMN = "回答（保留 / 不用 / 文字）"
 QUESTION_COLUMN = "要确认的问题"
 SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -181,6 +181,12 @@ def read_feedback_json(path: Path) -> list[dict[str, Any]]:
         applicability = (entry.get("applicability") or "").strip()
         note = (entry.get("note") or "").strip()
         low = decision.casefold()
+        whole_item_permission = (
+            entry.get("sourceLocation") in WHOLE_FILE
+            and low in JSON_KEEP_DECISIONS | JSON_DROP_DECISIONS
+            and not has_values
+            and not applicability
+        )
         # Only a clean whole-item yes/no without extra scope or correction values auto-applies as binary 保留/不用.
         if low in JSON_KEEP_DECISIONS and not has_values and not applicability:
             answer = "保留"
@@ -200,7 +206,10 @@ def read_feedback_json(path: Path) -> list[dict[str, Any]]:
         for tid in target_ids:
             if tid:
                 rows.append({"编号": tid, ANSWER_COLUMN: answer, "_json_note": extra_note, "_json_raw": answer_text,
-                             "_from_json": True, "_force_note": low in {"partial", "pending", "exception", "revise"} or has_values or bool(applicability)})
+                             "_from_json": True,
+                             "_binary_permission": whole_item_permission,
+                             "_force_note": (low in {"partial", "pending", "exception", "revise"}
+                                             or has_values or bool(applicability)) and not whole_item_permission})
     return rows
 
 
@@ -272,7 +281,10 @@ def main() -> int:
         if not answer or not record:
             continue
         decision = normalized(answer)
-        if not record.get("item_id") or record.get("answer_type") == "text" or row.get("_force_note"):
+        binary_permission = bool(row.get("_binary_permission"))
+        if (not record.get("item_id")
+                or (record.get("answer_type") == "text" and not binary_permission)
+                or row.get("_force_note")):
             # Which fabric, which year, or partial scope from webpage JSON: a person decides, the build does not.
             notes.append({"id": record["id"], "question": record["question"], "answer": answer,
                           **({"note": row["_json_note"]} if row.get("_json_note") else {}),

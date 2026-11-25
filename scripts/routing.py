@@ -51,7 +51,7 @@ VIDEO_FILES = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".flv", ".webm"}
 AUDIO_FILES = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
-DRAWING_NAME = re.compile(r"(?i)尺寸|六视图|三视图|视图|装配|图纸|效果图|外观图|结构图|dimension|drawing|render")
+DRAWING_NAME = re.compile(r"(?i)尺寸|六视图|三视图|视图|装配|图纸|效果图|外观图|结构图|\bcad\b|dimension|drawing|render")
 NOT_DRAWING = re.compile(r"(?i)说明书|手册|技术参数|参数表|manual|guide|datasheet|brochure|画册|catalog")
 DRAWING_PAGES = 3
 DRAWING_MAX_PAGES = 6

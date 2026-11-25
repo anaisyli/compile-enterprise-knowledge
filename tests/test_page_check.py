@@ -347,9 +347,12 @@ class PageCheckTests(Base):
         self.pipeline()
         report = json.loads((self.build / "校验结果.json").read_text(encoding="utf-8"))
         self.assertTrue(any("还没做看图核对" in w for w in report["warnings"]))
-        # Another page waiting while one is done: the check is unfinished.
+        # A valid source-bound review outside the current plan means review work
+        # has started, so the remaining selected page must be completed.
+        source_hash = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["a1"]["source_hash"]
         (self.build / "page-check" / "results.json").write_text(json.dumps({"a1|page 9": {
             "item_id": "a1", "unit": "page", "page": 9, "reasons": [], "added": False,
+            "source_hash": source_hash, "review_digest": "previously-accepted-review",
             "text_errors": "", "pairing": "", "unclear": False}}), encoding="utf-8")
         result = self.pipeline()
         self.assertEqual(result.returncode, 1)
@@ -365,8 +368,7 @@ class PageCheckTests(Base):
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual([entry["key"] for entry in self.todo()], ["a1|page 1"])
 
-        unit_path.write_text(json.dumps({"units": [{"locator": "page 1 ocr", "text": "SHERPA JACKET", "checked": True}]}),
-                             encoding="utf-8")
+        self.answer()
         self.assertEqual(self.pipeline().returncode, 0)
         self.assertEqual(self.todo(), [])
 

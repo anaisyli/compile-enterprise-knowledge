@@ -33,8 +33,8 @@ from uuid import uuid4
 from build_progress import (PIPELINE_CHECKPOINT, RECEIPT_PATH, VERIFY_REPORT, batch_id, curation_inputs,
                             extracted_inputs, file_digest, output_digests, package_digests,
                             package_input_digests, routing_inputs)
-from extract_blocks import (AUDIO_FILES, DESIGN_FILES, PICTURE_FILES, VIDEO_FILES,
-                            configured_route, format_pairs, is_catalog)
+from extract_blocks import (AUDIO_FILES, DESIGN_FILES, DRAWING_MAX_PAGES, DRAWING_NAME, NOT_DRAWING,
+                            PICTURE_FILES, VIDEO_FILES, configured_route, format_pairs, is_catalog)
 from kb_common import (BUILD_DIRECTORY, MANIFEST_NAME, TRIAGE_NAME, file_extension,
                        load_config, load_json, load_jsonl, long_path, run_lock,
                        unapproved_d, write_json, write_text)
@@ -118,13 +118,30 @@ def inspect_pdf_layout(path: Path) -> dict[str, Any]:
         doc.close()
 
 
-def recommend_method(path: Path | None, suffix: str, catalog: bool) -> dict[str, Any]:
-    """Recommend mineru vs reducto vs local based on file type and quick layout features."""
+def is_drawing_pdf(relpath: str, item_id: str, pages: int | None, config: dict[str, Any]) -> bool:
+    """Whole drawing/CAD/dimension PDFs go straight to 90_素材 as images, never to Reducto/MinerU."""
+    if item_id in set(config.get("not_drawing_items") or []):
+        return False
+    if item_id in set(config.get("drawing_items") or []):
+        return True
+    named = " ".join(Path(relpath).parts[-3:])
+    if NOT_DRAWING.search(named):
+        return False
+    if pages is not None and pages > DRAWING_MAX_PAGES:
+        return False
+    return bool(DRAWING_NAME.search(named))
+
+
+def recommend_method(path: Path | None, suffix: str, catalog: bool, relpath: str = "",
+                     item_id: str = "", config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Recommend mineru vs reducto vs asset vs local based on file type and quick layout features."""
     if suffix in {".pptx", ".ppt"}:
         pages = count_pptx_slides(path) if (path and path.is_file() and suffix == ".pptx") else None
         return {"method": "reducto", "pages": pages, "reason": "PPT 排版与图文自由度高，适合 Reducto"}
     if suffix == ".pdf":
         layout = inspect_pdf_layout(path) if (path and path.is_file()) else {"pages": None, "landscape_ratio": 0.0, "visual_ratio": 0.0, "inspected": False}
+        if is_drawing_pdf(relpath, item_id, layout.get("pages"), config or {}):
+            return {"method": "asset", "pages": 0, "reason": "尺寸图/CAD 图纸类 PDF，直接转图存入 90_素材，不上传 Reducto/MinerU", "layout": layout}
         if layout.get("error"):
             return {"method": "mineru", "pages": None, "reason": f"PDF 预检异常（{layout['error']}），默认先列 MinerU", "error": layout["error"]}
         if catalog:
@@ -203,9 +220,12 @@ def build_stage1_plan(packages: list[Path], out: Path, config: dict[str, Any]) -
 
         if decision == "D" and route.get("reason") == "unresolved_item":
             catalog = is_catalog(asset, route.get("tier", "T2"), config.get("doc_titles", {}))
-            rec = recommend_method(file_path, suffix, catalog) if suffix in {".pdf", ".pptx", ".ppt"} else {"method": "local", "pages": 0, "reason": ""}
+            rec = (recommend_method(file_path, suffix, catalog, relpath=rel, item_id=item_id, config=config)
+                   if suffix in {".pdf", ".pptx", ".ppt"} else {"method": "local", "pages": 0, "reason": ""})
             if name.startswith("~$") or name == ".DS_Store":
                 hint = "系统/Office 临时文件：建议丢弃 (drop)"
+            elif rec["method"] == "asset":
+                hint = "尺寸图/CAD 图纸 PDF：捞回后直接转图存入 90_素材，不上传 Reducto/MinerU（需确认展示边界时选 ask_client）"
             elif suffix in PICTURE_FILES | DESIGN_FILES | VIDEO_FILES | AUDIO_FILES:
                 hint = "图片/设计稿/音视频：如属公司资料建议捞回进素材库 (keep)"
             else:
@@ -226,7 +246,11 @@ def build_stage1_plan(packages: list[Path], out: Path, config: dict[str, Any]) -
                 continue
             catalog = is_catalog(asset, route.get("tier", "T2"), config.get("doc_titles", {}))
             kind = kind_of(name, "产品画册" if catalog else "", route.get("tier", ""))
-            rec = recommend_method(file_path, suffix, catalog)
+            rec = recommend_method(file_path, suffix, catalog, relpath=rel, item_id=item_id, config=config)
+            if rec["method"] == "asset":
+                unhandled["media_kept"].append({"item_id": item_id, "name": name, "folder": Path(rel).parent.as_posix(),
+                                                "reason": rec["reason"]})
+                continue
             if rec.get("error"):
                 unhandled["errors"].append({"item_id": item_id, "name": name, "reason": rec["error"]})
             routed_files.append({
@@ -441,8 +465,13 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     excluded = dict(config.get("excluded_items") or {})
 
     effective_files = list(plan.get("routed_files", []))
+    drawing_items = list(config.get("drawing_items") or [])
     for iid in d_applied["keep"]:
         d_item = d_by_id.get(iid)
+        if d_item and d_item.get("recommended_method") == "asset":
+            if iid not in drawing_items:
+                drawing_items.append(iid)
+            continue
         if d_item and d_item.get("recommended_method") in {"mineru", "reducto", "ai", "local"}:
             suffix = d_item.get("suffix", "")
             kind = kind_of(d_item["name"], "", "")
@@ -530,6 +559,8 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
             write_json(build / STAGE4_MARKER, {"batch_id": batch_id(config), "fast_mvp": True})
         else:
             (build / STAGE4_MARKER).unlink(missing_ok=True)
+        if drawing_items:
+            config["drawing_items"] = drawing_items
         write_json(config_path, config)
 
     return {
