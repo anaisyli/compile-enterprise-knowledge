@@ -156,7 +156,7 @@ LINK = re.compile(r"!?\[\[([^\]]+?)\]\]")
 
 
 def slim(text: str, with_sources: bool, full_tables: bool, where: str, notes: dict[str, str],
-         rows: int = TABLE_ROWS) -> str:
+         rows: int = TABLE_ROWS, refetch_counter: list[int] | None = None) -> str:
     """The text a writer needs: no picture embeds, no link syntax, the notice line gone, long tables folded."""
     def link(match: re.Match[str]) -> str:
         if match.group(0).startswith("!"):
@@ -184,7 +184,7 @@ def slim(text: str, with_sources: bool, full_tables: bool, where: str, notes: di
         lines.append(LINK.sub(link, line).rstrip())
     out = drop_empty_columns("\n".join(lines))
     if not full_tables:
-        out = fold_tables(out, where, rows)
+        out = fold_tables(out, where, rows, refetch_counter)
     out = re.sub(r"表格出处：\s*$", "", out, flags=re.M)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
@@ -212,19 +212,37 @@ def drop_empty_columns(text: str) -> str:
     return "\n".join(out[:-1])
 
 
-def refetch(where: str) -> str:
+def refetch_slot(counter: list[int] | None) -> tuple[str, str]:
+    """Return a unique letters-only --id-prefix and output filename per folded table in the same pack."""
+    if counter is None:
+        return "R", "资料包-补读.md"
+    counter[0] += 1
+    idx = counter[0]
+    if idx == 1:
+        return "R", "资料包-补读.md"
+    # Letters-only prefix so citation regex [A-Za-z]+\d+ matches cleanly: RB, RC, ... RZ, RAA, ...
+    n = idx - 1
+    letters = []
+    while n > 0:
+        n, rem = divmod(n, 26)
+        letters.append(chr(ord("A") + rem))
+    return "R" + "".join(reversed(letters)), f"资料包-补读-{idx}.md"
+
+
+def refetch(where: str, counter: list[int] | None = None) -> str:
     """The command that brings one folded table back whole, ready to copy."""
+    prefix, filename = refetch_slot(counter)
     return (f"要写表里的具体数值时，先补读整张表：`kb_lookup.py pack --vault <知识库> --sections \"{where}\" --full-tables "
-            f"--no-brief --id-prefix R --output <本篇工作目录>/资料包-补读.md`，只写表里有的数")
+            f"--no-brief --id-prefix {prefix} --output <本篇工作目录>/{filename}`，只写表里有的数")
 
 
-def fold_tables(text: str, where: str, limit: int = TABLE_ROWS) -> str:
+def fold_tables(text: str, where: str, limit: int = TABLE_ROWS, counter: list[int] | None = None) -> str:
     def html(match: re.Match[str]) -> str:
         rows = re.findall(r"(?is)<tr\b.*?</tr>", match.group(0))
         if len(rows) - 1 <= limit:
             return match.group(0)
         head = [re.sub(r"(?s)<[^>]+>", "", c).strip() for c in re.findall(r"(?is)<t[hd]\b[^>]*>(.*?)</t[hd]>", rows[0])]
-        return f"（表格共 {len(rows) - 1} 行，已折叠；列：{' / '.join(h for h in head if h)[:200]}。{refetch(where)}）"
+        return f"（表格共 {len(rows) - 1} 行，已折叠；列：{' / '.join(h for h in head if h)[:200]}。{refetch(where, counter)}）"
 
     text = re.sub(r"(?is)<table\b.*?</table>", html, text)
     out, run = [], []
@@ -233,7 +251,7 @@ def fold_tables(text: str, where: str, limit: int = TABLE_ROWS) -> str:
             run.append(line)
             continue
         if len(run) - 2 > limit:
-            out.extend([run[0], run[1], f"（表格共 {len(run) - 2} 行，已折叠，这里只列表头。{refetch(where)}）"])
+            out.extend([run[0], run[1], f"（表格共 {len(run) - 2} 行，已折叠，这里只列表头。{refetch(where, counter)}）"])
         else:
             out.extend(run)
         run = []
@@ -676,6 +694,7 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
         notes: dict[str, dict[str, str]] = {}
         facts: list[dict[str, Any]] = []
         counter = [0]
+        refetch_counter = [0]
         lines = []
         if brief and brief_page:
             page_notes: dict[str, str] = {}
@@ -683,7 +702,7 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
             for s in brief_page.sections:
                 if s.h2 == CHECK_HEADING:
                     continue
-                slimmed = slim(s.text, with_sources, full_tables, f"{brief_page.stem}#{s.name}", page_notes, rows)
+                slimmed = slim(s.text, with_sources, full_tables, f"{brief_page.stem}#{s.name}", page_notes, rows, refetch_counter)
                 numbered = number_block(s.text, slimmed, "速查卡", brief_page.stem, s.name, counter, id_prefix, facts)
                 parts.append(f"### {s.name}\n\n{numbered}")
             lines.extend(["## 速查卡", "", "\n\n".join(parts), ""])
@@ -698,7 +717,7 @@ def pack(vault: Path, specs: list[str], gaps: list[str], query: str | None, with
             tag = "【行业公共知识：只作背景和论据，不能写成客户能力】" if page.layer == "外部公共知识" else ""
             page_notes = notes.setdefault(page.stem, {})
             where = f"{page.stem}#{section.name}"
-            slimmed = slim(section.text, with_sources, full_tables, where, page_notes, rows)
+            slimmed = slim(section.text, with_sources, full_tables, where, page_notes, rows, refetch_counter)
             numbered = number_block(section.text, slimmed, page.layer, page.stem, section.name, counter, id_prefix, facts, outline)
             heading_prefix = "####" if outline else "###"
             lines.extend([f"{heading_prefix} {page.stem} · {section.name}{meta}{tag}", "", numbered, ""])

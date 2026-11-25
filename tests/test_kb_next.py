@@ -175,6 +175,13 @@ class KbNextTests(unittest.TestCase):
             self.assertEqual(updated_cfg["stage_authorization"]["approved_by"], "测试员")
             self.assertEqual(updated_cfg["stage_authorization"]["evidence"], "同意，按推荐开跑")
             self.assertTrue(updated_cfg["mineru"]["approved"])
+            self.assertEqual(updated_cfg["mineru"]["approved_item_ids"], ["item-d-doc", "item-spec"])
+            self.assertEqual(updated_cfg["reducto"]["approved_item_ids"], ["item-cat", "item-ppt"])
+
+            # resume-full is rejected on a standard (non-fast) project
+            bad_resume = self.run_cli("resume-full", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员")
+            self.assertNotEqual(bad_resume.returncode, 0)
+            self.assertIn("不是快车道极简版", bad_resume.stderr)
             self.assertTrue(updated_cfg["reducto"]["approved"])
             self.assertIn("item-d-doc", updated_cfg["d_keep"])
             self.assertIn("item-zip", updated_cfg["d_drop"])
@@ -194,13 +201,15 @@ class KbNextTests(unittest.TestCase):
             self.assertIn("item-spec", st2_ocr["ocr_pending"]["mineru_missing"])
             self.assertIn("item-cat", st2_ocr["ocr_pending"]["reducto_missing"])
 
-            # Write OCR outputs + partial page-check progress -> Stage 3 resumes exact count
+            # Write OCR outputs + page-triage.json + refresh docs.jsonl -> Stage 3 resumes exact count
             (build / "mineru-units").mkdir(parents=True, exist_ok=True)
             (build / "reducto-units").mkdir(parents=True, exist_ok=True)
             for iid in ("item-spec", "item-d-doc"):
                 (build / "mineru-units" / f"{iid}.json").write_text("{}", encoding="utf-8")
             for iid in ("item-cat", "item-ppt"):
                 (build / "reducto-units" / f"{iid}.json").write_text("{}", encoding="utf-8")
+            (build / "page-triage.json").write_text("{}", encoding="utf-8")
+            (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
             (build / "page-check").mkdir(parents=True, exist_ok=True)
             (build / "page-check/todo.jsonl").write_text(
                 '{"key": "a|page 1"}\n{"key": "a|page 2"}\n{"key": "a|page 3"}\n', encoding="utf-8"
@@ -208,27 +217,41 @@ class KbNextTests(unittest.TestCase):
             (build / "page-check/results.json").write_text('{"a|page 1": {"added": false}}', encoding="utf-8")
             st3 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st3["stage"], "stage3_page_check")
-            self.assertEqual(st3["page_check"], {"total": 3, "done": 1, "remaining": 2})
+            self.assertEqual(st3["page_check"]["done"], 1)
+            self.assertEqual(st3["page_check"]["remaining"], 2)
 
-            # Complete all page-check items -> Stage 4
+            # Complete all page-check items and refresh docs.jsonl -> Stage 4
             (build / "page-check/results.json").write_text(
                 '{"a|page 1": {}, "a|page 2": {}, "a|page 3": {}}', encoding="utf-8"
             )
+            (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
             st4 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st4["stage"], "stage4_governance")
 
-            # Mark Stage 4 complete -> Stage 5
-            self.assertEqual(self.run_cli("mark-stage4", "--out", str(out), "--internal-html", "a.html", "--customer-html", "b.html").returncode, 0)
+            # mark-stage4 rejects nonexistent HTML paths
+            bad_m4 = self.run_cli("mark-stage4", "--out", str(out), "--internal-html", str(root / "missing.html"))
+            self.assertNotEqual(bad_m4.returncode, 0)
+            self.assertIn("找不到", bad_m4.stderr)
+
+            # Mark Stage 4 complete with real HTML files -> Stage 5
+            html_a, html_b = root / "a.html", root / "b.html"
+            html_a.write_text("<html/>", encoding="utf-8")
+            html_b.write_text("<html/>", encoding="utf-8")
+            self.assertEqual(self.run_cli("mark-stage4", "--out", str(out), "--internal-html", str(html_a), "--customer-html", str(html_b)).returncode, 0)
             st5 = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg), "--vault", str(vault)).stdout)
             self.assertEqual(st5["stage"], "stage5_curate_publish")
 
-            # Complete Stage 5 -> Done
+            # Complete Stage 5 -> Done (only when --vault has receipt; without --vault never reports published=True)
             updated_cfg["build_stage"] = "full"
             cfg.write_text(json.dumps(updated_cfg, ensure_ascii=False), encoding="utf-8")
             (build / "curation/company").mkdir(parents=True, exist_ok=True)
             (build / "curation/topics.json").write_text(json.dumps([{"slug": "company", "blocks": ["b1"]}]), encoding="utf-8")
             (build / "curation/company/page.md").write_text("# 公司\n", encoding="utf-8")
             (build / "校验结果.json").write_text('{"verified": true}', encoding="utf-8")
+            st_no_vault = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
+            self.assertEqual(st_no_vault["stage"], "stage5_curate_publish")
+            self.assertFalse(st_no_vault["curation"]["published"])
+
             (vault / "05_数据与审核/50_运行记录").mkdir(parents=True, exist_ok=True)
             (vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json").write_text('{"published_at": "2026-11-25"}', encoding="utf-8")
             st_done = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg), "--vault", str(vault)).stdout)
@@ -243,17 +266,19 @@ class KbNextTests(unittest.TestCase):
             cfg.write_text(json.dumps({"project_id": "P-001", "company": "甲公司"}, ensure_ascii=False), encoding="utf-8")
 
             self.assertEqual(self.run_cli("plan", "--package", str(pkg), "--out", str(out), "--config", str(cfg)).returncode, 0)
-            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "先出极简版", "--fast", "--allow-undecided-d").stdout)
+            # Even with --fallback-mineru, --fast must defer heavy Reducto catalogs/PPTs first
+            ap = json.loads(self.run_cli("apply-plan", "--out", str(out), "--config", str(cfg), "--approved-by", "测试员", "--evidence", "先出极简版", "--fast", "--fallback-mineru", "--allow-undecided-d").stdout)
             self.assertTrue(ap["fast_mvp"])
             self.assertEqual(ap["cloud_approvals"], ["mineru"])
             self.assertEqual(sorted(ap["deferred_items"]), ["item-cat", "item-ppt"])
 
             # Simulate MinerU + pipeline done -> jumps straight to Stage 5 (skips page-check & Stage 4)
             build = out / "04_知识库构建"
-            (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
             (build / "routes.json").write_text("{}", encoding="utf-8")
+            (build / "page-triage.json").write_text("{}", encoding="utf-8")
             (build / "mineru-units").mkdir(parents=True, exist_ok=True)
             (build / "mineru-units/item-spec.json").write_text("{}", encoding="utf-8")
+            (build / "docs.jsonl").write_text("{}\n", encoding="utf-8")
             st_mvp = json.loads(self.run_cli("status", "--out", str(out), "--package", str(pkg), "--config", str(cfg)).stdout)
             self.assertEqual(st_mvp["stage"], "stage5_curate_publish")
 

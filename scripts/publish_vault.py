@@ -582,7 +582,10 @@ def main() -> int:
     # The writing skills' entry page: every knowledge page, customer and external, with its sections.
     from kb_lookup import write_catalog
     write_catalog(vault)
-    entry = {"published_at": stamp, "version": SKILL_VERSION, "documents": report.get("documents"),
+    build_stage = (load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}).get("build_stage", "full")
+    if build_stage == "sources_only":
+        warnings.append("本次发布仅为来源层（build_stage: sources_only），尚未生成整理页；正式上线前需设为 full 并补写整理页。")
+    entry = {"published_at": stamp, "version": SKILL_VERSION, "build_stage": build_stage, "documents": report.get("documents"),
              "blocks": report.get("blocks_kept"), "withdrawn": withdrawn, "renamed": len(renamed), "files": len(written),
              "archived": len(set(archived)), "state_saved": state["saved"], "pictures_renamed": len(moved),
              "pages_relinked": relinked, "run": str(run)}

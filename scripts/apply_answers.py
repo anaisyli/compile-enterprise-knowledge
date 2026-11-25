@@ -114,7 +114,8 @@ def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, lis
                 unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这个文件夹"})
                 continue
             for item_id in members:
-                config["client_answers"][item_id] = decision
+                # Never let an older screening workbook overwrite a later explicit decision.
+                config["client_answers"].setdefault(item_id, decision)
         elif "#" in number and number.rsplit("#", 1)[0] in assets:
             asked = assets[number.rsplit("#", 1)[0]]
             location = row.get("location", "")
@@ -123,11 +124,11 @@ def apply_screening(path: Path, config: dict[str, Any]) -> tuple[list, list, lis
             copies = [a for a in assets.values() if content and a.get("source_hash") == content] or [asked]
             for asset in copies:
                 if location in WHOLE_FILE or location not in (asset.get("pending_units") or []):
-                    config["client_answers"][asset["item_id"]] = decision
+                    config["client_answers"].setdefault(asset["item_id"], decision)
                 else:
-                    config["client_answers_units"].setdefault(asset["item_id"], {})[location] = decision
+                    config["client_answers_units"].setdefault(asset["item_id"], {}).setdefault(location, decision)
         elif number in points:
-            config["client_answers"][number] = decision
+            config["client_answers"].setdefault(number, decision)
         else:
             unclear.append({"id": number, "answer": answer, "problem": "初筛包里找不到这一项"})
             continue

@@ -1181,6 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--column", default="")
         if name == "cus-export":
             p.add_argument("--items", default="", help="Comma separated CUS IDs; default every 待汇总 question")
+            p.add_argument("--batch", default="", help="Re-export webpage JSON for an existing exported batch without creating a new batch")
             p.add_argument("--webpage-json", action="store_true",
                            help="Also export customer-review-input.v1 draft JSON for customer-confirmation-webpage --mode customer")
         if name == "cus-sent":
@@ -1211,10 +1212,20 @@ def main(argv: list[str] | None = None) -> int:
         result = flag_value(build, args.page, args.section, args.value, args.question, args.row, args.column,
                             Path(args.vault).resolve() if args.vault else None)
     elif args.command == "cus-export":
-        result = cus_export(build, [i.strip() for i in args.items.split(",") if i.strip()] or None)
-        if args.webpage_json and result.get("batch"):
-            chosen = load_state(build)["cus_batches"][result["batch"]]["items"]
-            result["webpage_json"] = str(export_customer_webpage_json(build, result["batch"], chosen))
+        if args.batch:
+            state = load_state(build)
+            if args.batch not in state["cus_batches"]:
+                raise SystemExit(f"没有批次 {args.batch}")
+            chosen = state["cus_batches"][args.batch]["items"]
+            result = {"batch": args.batch, "reexported": len(chosen),
+                      "file": str(build / state["cus_batches"][args.batch].get("file", ""))}
+            if args.webpage_json:
+                result["webpage_json"] = str(export_customer_webpage_json(build, args.batch, chosen))
+        else:
+            result = cus_export(build, [i.strip() for i in args.items.split(",") if i.strip()] or None)
+            if args.webpage_json and result.get("batch"):
+                chosen = load_state(build)["cus_batches"][result["batch"]]["items"]
+                result["webpage_json"] = str(export_customer_webpage_json(build, result["batch"], chosen))
     elif args.command == "migrate":
         result = migrate(build, Path(args.vault).resolve())
     else:

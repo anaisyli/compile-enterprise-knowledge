@@ -445,13 +445,13 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     for entry in effective_files:
         iid = entry["item_id"]
         kind = entry["kind"]
-        method = overrides.get(iid, entry["method"])
-        if fallback_mineru and method == "reducto":
-            method = "mineru"
-        if fast_mvp and method == "reducto":
+        raw_method = overrides.get(iid, entry["method"])
+        # Check --fast deferral BEFORE --fallback-mineru so heavy catalogs/PPTs are never pulled into Phase 1.
+        if fast_mvp and raw_method == "reducto":
             deferred[iid] = {"name": entry["name"], "kind": kind, "method": "reducto", "pages": entry.get("pages")}
             excluded[iid] = "快车道极简版暂缓，二期补全"
             continue
+        method = "mineru" if (fallback_mineru and raw_method == "reducto") else raw_method
         kinds_present.add(kind)
         item_kinds[iid] = kind
         if kind in PAGED_KINDS and method in METHODS:
@@ -465,15 +465,30 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
             existing["method"] = "reducto" if (kind in {"catalog_pdf", "ppt"} and not fallback_mineru) else "mineru"
         decisions[kind] = existing
 
-    # 3. Record cloud OCR approvals, stage_authorization, and build_stage in kb-config.json
+    # 3. Record cloud OCR approvals (with strict approved_item_ids whitelists), stage_authorization, and build_stage
+    decided_d = set(config.get("d_keep") or []) | set(config.get("d_drop") or []) | set(config.get("ask_client") or {})
+    d_still_undecided = [d["item_id"] for d in plan.get("d_undecided", []) if d["item_id"] not in decided_d]
+    eff_mineru = [e for e in effective_files if e["item_id"] not in deferred and (overrides.get(e["item_id"], e["method"]) == "mineru" or (fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"))]
+    eff_reducto = [e for e in effective_files if e["item_id"] not in deferred and not fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"]
+
     today = date.today().isoformat()
     if "mineru" in used_methods:
         mineru_cfg = dict(config.get("mineru") or {})
-        mineru_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
+        prev_ids = set(mineru_cfg.get("approved_item_ids") or [])
+        mineru_cfg.update({
+            "approved": True, "approved_by": approved_by, "approved_at": today,
+            "scope": "阶段1分流计划确认",
+            "approved_item_ids": sorted(prev_ids | {e["item_id"] for e in eff_mineru}),
+        })
         config["mineru"] = mineru_cfg
     if "reducto" in used_methods:
         reducto_cfg = dict(config.get("reducto") or {})
-        reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "阶段1分流计划确认"})
+        prev_ids = set(reducto_cfg.get("approved_item_ids") or [])
+        reducto_cfg.update({
+            "approved": True, "approved_by": approved_by, "approved_at": today,
+            "scope": "阶段1分流计划确认",
+            "approved_item_ids": sorted(prev_ids | {e["item_id"] for e in eff_reducto}),
+        })
         config["reducto"] = reducto_cfg
 
     config["stage_authorization"] = {
@@ -491,11 +506,6 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     else:
         # Standard path runs Stage 2-4 in sources_only so run_pipeline.py does not curate prematurely.
         config["build_stage"] = "sources_only"
-
-    decided_d = set(config.get("d_keep") or []) | set(config.get("d_drop") or []) | set(config.get("ask_client") or {})
-    d_still_undecided = [d["item_id"] for d in plan.get("d_undecided", []) if d["item_id"] not in decided_d]
-    eff_mineru = [e for e in effective_files if e["item_id"] not in deferred and (overrides.get(e["item_id"], e["method"]) == "mineru" or (fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"))]
-    eff_reducto = [e for e in effective_files if e["item_id"] not in deferred and not fallback_mineru and overrides.get(e["item_id"], e["method"]) == "reducto"]
 
     if d_still_undecided and not allow_undecided_d and not dry_run:
         raise SystemExit(
@@ -534,15 +544,28 @@ def apply_stage1_plan(out: Path, config_path: Path, approved_by: str,
     }
 
 
-def resume_full_from_fast(out: Path, config_path: Path, approved_by: str, fallback_mineru: bool = False) -> dict[str, Any]:
+def resume_full_from_fast(out: Path, config_path: Path, approved_by: str,
+                          fallback_mineru: bool = False, vault: Path | None = None) -> dict[str, Any]:
     """Upgrade a fast-MVP vault to full build: restore deferred catalogs/PPTs, re-enable page-check & Stage 4."""
     build = out / BUILD_DIRECTORY
+    if vault and vault.is_dir():
+        from kb_state import restore as restore_state
+        restore_state(out, vault)
+        vault_cfg = build / "kb-config.json"
+        if not config_path.is_file() and vault_cfg.is_file():
+            write_json(config_path, load_json(vault_cfg))
     config = load_config(config_path) if config_path.is_file() else {}
     deferred: dict[str, dict[str, Any]] = dict(config.get("deferred_items") or {})
+    marker = build / STAGE4_MARKER
+    is_fast_marker = marker.is_file() and bool(load_json(marker).get("fast_mvp"))
+    if not deferred and not is_fast_marker:
+        raise SystemExit("当前项目不是快车道极简版（没有 deferred_items 或 fast_mvp 标记），不能运行 resume-full。")
+
     excluded = dict(config.get("excluded_items") or {})
     decisions = load_decisions(build)
     item_kinds: dict[str, str] = {}
     used_methods: set[str] = set()
+    restored_by_method: dict[str, set[str]] = {"mineru": set(), "reducto": set()}
 
     for iid, info in deferred.items():
         excluded.pop(iid, None)
@@ -555,6 +578,8 @@ def resume_full_from_fast(out: Path, config_path: Path, approved_by: str, fallba
         decisions[kind] = existing
         item_kinds[iid] = kind
         used_methods.add(method)
+        if method in restored_by_method:
+            restored_by_method[method].add(iid)
 
     config["excluded_items"] = excluded
     config.pop("deferred_items", None)
@@ -565,18 +590,27 @@ def resume_full_from_fast(out: Path, config_path: Path, approved_by: str, fallba
     today = date.today().isoformat()
     if "reducto" in used_methods:
         reducto_cfg = dict(config.get("reducto") or {})
-        reducto_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "二期补全暂缓文件"})
+        prev_ids = set(reducto_cfg.get("approved_item_ids") or [])
+        reducto_cfg.update({
+            "approved": True, "approved_by": approved_by, "approved_at": today,
+            "scope": "二期补全暂缓文件",
+            "approved_item_ids": sorted(prev_ids | restored_by_method["reducto"]),
+        })
         config["reducto"] = reducto_cfg
     if "mineru" in used_methods:
         mineru_cfg = dict(config.get("mineru") or {})
-        mineru_cfg.update({"approved": True, "approved_by": approved_by, "approved_at": today, "scope": "二期补全暂缓文件"})
+        prev_ids = set(mineru_cfg.get("approved_item_ids") or [])
+        mineru_cfg.update({
+            "approved": True, "approved_by": approved_by, "approved_at": today,
+            "scope": "二期补全暂缓文件",
+            "approved_item_ids": sorted(prev_ids | restored_by_method["mineru"]),
+        })
         config["mineru"] = mineru_cfg
 
     write_json(build / DECISIONS, decisions)
     sync_reducto_primary(build, item_kinds, decisions)
     write_json(config_path, config)
-    marker = build / STAGE4_MARKER
-    if marker.is_file() and load_json(marker).get("fast_mvp"):
+    if is_fast_marker:
         marker.unlink()
 
     return {
@@ -609,12 +643,34 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
             parts.append(f"- 知识库：{vault}")
         return "\n".join(parts)
 
-    # Stage 1: Need plan or confirmation
-    if not confirmed_any and config.get("sample_review", True):
+    # Check if new packages/items were added since stage1-plan.json / routes.json
+    new_items: list[str] = []
+    if packages:
+        known_ids: set[str] = set()
+        if plan_exists:
+            plan_doc = load_json(build / PLAN_JSON)
+            known_ids |= {f["item_id"] for f in plan_doc.get("routed_files", [])}
+            known_ids |= {d["item_id"] for d in plan_doc.get("d_undecided", [])}
+            for bucket in (plan_doc.get("unhandled") or {}).values():
+                if isinstance(bucket, list):
+                    known_ids |= {e["item_id"] for e in bucket if isinstance(e, dict) and e.get("item_id")}
+        if (build / "routes.json").is_file():
+            known_ids |= set(load_json(build / "routes.json").keys())
+        if known_ids:
+            for pkg in packages:
+                mpath = pkg / MANIFEST_NAME
+                if mpath.is_file():
+                    for asset in load_json(mpath).get("assets", []):
+                        if asset.get("item_id") and asset["item_id"] not in known_ids:
+                            new_items.append(asset["item_id"])
+
+    # Stage 1: Need plan or confirmation (or new packages detected)
+    if new_items or (not confirmed_any and config.get("sample_review", True)):
         return {
             "stage": "stage1_plan",
             "stage_name": "阶段 1：预检分流与一次确认",
             "plan_generated": plan_exists,
+            "new_items_detected": len(new_items),
             "instruction": (
                 "先运行 kb_next.py plan（只算页数和自动分流，不提取）；如有未决定的 D 类文件，AI 快速初判建议捞回/丢弃/问客户；"
                 "把分流表、总页数、D 类建议和未处理文件清点一次给用户确认，用户同意后运行 kb_next.py apply-plan。"
@@ -622,44 +678,58 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
             "next_chat_prompt": next_prompt("阶段 2：批量提取"),
         }
 
-    # Stage 2: Need extraction / OCR / pipeline
+    # Stage 2: Need extraction / OCR / pipeline merge
     docs_path = build / "docs.jsonl"
     routes_path = build / "routes.json"
+    triage_path = build / "page-triage.json"
     excluded = set(config.get("excluded_items") or {})
-    mineru_missing = [
+    mineru_files_expected = [
         k.removeprefix(FILE_PREFIX)
         for k, v in decisions.items()
         if k.startswith(FILE_PREFIX) and isinstance(v, dict) and v.get("method") == "mineru"
         and k.removeprefix(FILE_PREFIX) not in excluded
-        and not (build / "mineru-units" / f"{k.removeprefix(FILE_PREFIX)}.json").is_file()
     ]
-    reducto_missing = [
+    reducto_files_expected = [
         k.removeprefix(FILE_PREFIX)
         for k, v in decisions.items()
         if k.startswith(FILE_PREFIX) and isinstance(v, dict) and v.get("method") == "reducto"
         and k.removeprefix(FILE_PREFIX) not in excluded
-        and not (build / "reducto-units" / f"{k.removeprefix(FILE_PREFIX)}.json").is_file()
     ]
-    if not docs_path.is_file() or not routes_path.is_file() or mineru_missing or reducto_missing:
-        has_routes = routes_path.is_file() and (build / "page-triage.json").is_file()
-        step_hint = (
-            "先运行 run_pipeline.py --images all（生成 routes.json 与 page-triage.json），"
-            "再按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run，"
-            "最后重跑一次 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
-            if not has_routes else
-            "routes.json 与 page-triage.json 已就绪；请运行 mineru_ocr.py run / reducto_ocr.py run 补齐未完成 OCR，"
-            "然后重跑 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
-        )
+    mineru_missing = [iid for iid in mineru_files_expected if not (build / "mineru-units" / f"{iid}.json").is_file()]
+    reducto_missing = [iid for iid in reducto_files_expected if not (build / "reducto-units" / f"{iid}.json").is_file()]
+    ocr_mtimes = [
+        p.stat().st_mtime
+        for p in [*(build / "mineru-units" / f"{iid}.json" for iid in mineru_files_expected),
+                  *(build / "reducto-units" / f"{iid}.json" for iid in reducto_files_expected)]
+        if p.is_file()
+    ]
+    needs_ocr_merge = bool(docs_path.is_file() and ocr_mtimes and docs_path.stat().st_mtime + 0.5 < max(ocr_mtimes))
+    has_routes = routes_path.is_file() and triage_path.is_file()
+    if not docs_path.is_file() or not has_routes or mineru_missing or reducto_missing or needs_ocr_merge:
+        if not has_routes:
+            step_hint = (
+                "先运行 run_pipeline.py --images all（生成 routes.json 与 page-triage.json），"
+                "再按已批准的分流方案运行 mineru_ocr.py run / reducto_ocr.py run，"
+                "最后重跑一次 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
+            )
+        elif mineru_missing or reducto_missing:
+            step_hint = (
+                "routes.json 与 page-triage.json 已就绪；请运行 mineru_ocr.py run / reducto_ocr.py run 补齐未完成 OCR，"
+                "然后重跑 run_pipeline.py --images all 合入 OCR 结果并生成 page-check 待办。"
+            )
+        else:
+            step_hint = "OCR 结果已落盘但尚未合入来源层；请重跑 run_pipeline.py --images all 合入 OCR 并刷新 page-check 待办。"
         return {
             "stage": "stage2_extract",
             "stage_name": "阶段 2：批量云端提取与抽块",
             "routes_ready": has_routes,
+            "needs_ocr_merge": needs_ocr_merge,
             "ocr_pending": {"mineru_missing": mineru_missing, "reducto_missing": reducto_missing},
             "instruction": step_hint,
             "next_chat_prompt": next_prompt("阶段 3：看图核对"),
         }
 
-    # Stage 3: Page-check progress (resumable!)
+    # Stage 3: Page-check progress (resumable + verifies source-layer refresh!)
     todo_path = build / "page-check/todo.jsonl"
     results_path = build / "page-check/results.json"
     pc_skip = bool((config.get("page_check") or {}).get("skip"))
@@ -669,16 +739,23 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
         results = load_json(results_path) if results_path.is_file() else {}
         done_count = len(todo_keys & set(results))
         left_count = len(todo_keys - set(results))
-        if left_count > 0:
+        needs_pc_refresh = bool(
+            results_path.is_file() and docs_path.is_file()
+            and results_path.stat().st_mtime > docs_path.stat().st_mtime + 0.5
+        )
+        if left_count > 0 or needs_pc_refresh:
+            inst = (
+                f"当前看图核对进度：{done_count}/{len(todo_keys)} 页已完成，剩余 {left_count} 页。"
+                "请一口气核对完剩余页面（页多时分给子 Agent 并行），但每核对完 20-30 页必须立刻写 answer-*.jsonl 并运行 "
+                "page_check.py collect 落盘，防止中途中断重来！全部完成后重跑 run_pipeline.py，再按阶段 1 商定节奏继续或停下换新对话。"
+                if left_count > 0 else
+                "全部看图核对已 collect 落盘，但来源层尚未刷新；请重跑 run_pipeline.py 刷新来源层，再进入阶段 4。"
+            )
             return {
                 "stage": "stage3_page_check",
                 "stage_name": "阶段 3：看图核对（增量落盘，断点续跑）",
-                "page_check": {"total": len(todo_keys), "done": done_count, "remaining": left_count},
-                "instruction": (
-                    f"当前看图核对进度：{done_count}/{len(todo_keys)} 页已完成，剩余 {left_count} 页。"
-                    "请一口气核对完剩余页面（页多时分给子 Agent 并行），但每核对完 20-30 页必须立刻写 answer-*.jsonl 并运行 "
-                    "page_check.py collect 落盘，防止中途中断重来！全部完成后重跑 run_pipeline.py，再按阶段 1 商定节奏继续或停下换新对话。"
-                ),
+                "page_check": {"total": len(todo_keys), "done": done_count, "remaining": left_count, "needs_refresh": needs_pc_refresh},
+                "instruction": inst,
                 "next_chat_prompt": next_prompt("阶段 3/4：续跑看图核对或进入待办消化"),
             }
 
@@ -714,10 +791,14 @@ def detect_status(out: Path, packages: list[Path], config_path: Path | None, vau
     written_slugs = {p.parent.name for p in (build / "curation").glob("*/page.md")} if (build / "curation").is_dir() else set()
     missing_topics = [t["slug"] for t in needed_topics if t["slug"] not in written_slugs]
     verify_ok = bool((load_json(build / "校验结果.json") if (build / "校验结果.json").is_file() else {}).get("verified"))
-    receipt_ok = bool(vault and (vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json").is_file())
+    receipt_path = vault / "05_数据与审核/50_运行记录/compile-enterprise-knowledge-receipt.json" if vault else None
+    receipt_ok = bool(
+        receipt_path and receipt_path.is_file()
+        and (not (build / "校验结果.json").is_file() or receipt_path.stat().st_mtime + 0.5 >= (build / "校验结果.json").stat().st_mtime)
+    )
     build_full = config.get("build_stage", "full") == "full"
 
-    if not build_full or not topics or missing_topics or not verify_ok or (vault and not receipt_ok):
+    if not build_full or not topics or missing_topics or not verify_ok or not receipt_ok:
         return {
             "stage": "stage5_curate_publish",
             "stage_name": "阶段 5：整理正式知识、独立通读与发布",
@@ -772,6 +853,7 @@ def main() -> int:
     p_resume.add_argument("--out", required=True, help="Run directory")
     p_resume.add_argument("--config", required=True, help="kb-config.json")
     p_resume.add_argument("--approved-by", required=True, help="Person approving phase-2 full build")
+    p_resume.add_argument("--vault", help="Published vault path to restore config/state when run dir was deleted")
     p_resume.add_argument("--fallback-mineru", action="store_true", help="Use MinerU instead of Reducto for restored files")
 
     p_status = sub.add_parser("status", help="Detect exact current stage and remaining progress from disk")
@@ -818,11 +900,15 @@ def main() -> int:
         return 0
 
     if args.command == "resume-full":
-        result = resume_full_from_fast(out, Path(args.config).resolve(), args.approved_by, args.fallback_mineru)
+        vault_path = Path(args.vault).resolve() if args.vault else None
+        result = resume_full_from_fast(out, Path(args.config).resolve(), args.approved_by, args.fallback_mineru, vault=vault_path)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "mark-stage4":
+        for label, raw_p in (("internal_html", args.internal_html), ("customer_html", args.customer_html)):
+            if raw_p and not Path(raw_p).is_file():
+                raise SystemExit(f"找不到 {label} 指向的网页文件：{raw_p}，请先生成后再标记阶段 4 完成。")
         build = out / BUILD_DIRECTORY
         build.mkdir(parents=True, exist_ok=True)
         payload = {"completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
