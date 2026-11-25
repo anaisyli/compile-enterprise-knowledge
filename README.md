@@ -28,16 +28,15 @@
 | **阶段 4：自动消化待办 + 双网页** | Agent 自动消化 90% 的 CUS / MAT / ANM 与待审 D 类，并**同时生成内部待办决策网页 HTML 和客户确认网页 HTML** | 内部网页勾选回填（如有）；把客户网页发给客户 |
 | **阶段 5：整理正式知识与发布** | 按主题逐个写整理页并落盘 + 速查卡 + 独立子 Agent 抽样通读 + 发布进 Obsidian + 输出最终《未处理 / 特殊文件清点》 | **收库上线**，开始写文章 |
 
-**开工建库 Prompt：**
+**开工建库 Prompt（不用填运行目录，AI 会自动在本机本地盘创建临时目录）：**
 ```text
-用 compile-enterprise-knowledge 把 <初筛包路径> 建成知识库，官网是 https://www.example.com ，运行目录放在 D:\KB-Workspace\<项目>_run ，发布到 <知识库路径>。
+用 compile-enterprise-knowledge 把 <初筛包路径> 建成知识库，官网是 https://www.example.com ，发布到 <知识库路径>。
 ```
 
-**每段完成后 / 中途中断后的万能续跑 Prompt（新开一个对话粘贴）：**
+**每段完成后 / 中途中断后的万能续跑 Prompt（直接复制上一轮 AI 给你的续跑句，或新开对话发下面这句）：**
 ```text
 用 compile-enterprise-knowledge 继续推进这个项目：
 - 初筛包：<初筛包路径>
-- 运行目录：D:\KB-Workspace\<项目>_run
 - 知识库：<知识库路径>
 ```
 
