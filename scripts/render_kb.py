@@ -768,14 +768,19 @@ def alias_link(route: dict[str, Any], stem: str, read_only: bool = False,
                     return path_uri(candidate)
             return ""
         if alias.exists() and not is_legacy and not alias.samefile(source):
-            alias.unlink()  # The name now belongs to another file, or the original was replaced.
+            if alias.stat().st_size != source.stat().st_size or sha256_file(alias) != sha256_file(source):
+                alias.unlink()  # The name now belongs to another file, or the original was replaced.
         if not alias.exists():
             alias.parent.mkdir(parents=True, exist_ok=True)
             if is_legacy:
                 # Excel/Word mutates legacy .xls/.doc headers on open; copy so viewing never alters source_hash.
                 shutil.copy2(source, alias)
             else:
-                os.link(source, alias)
+                try:
+                    os.link(source, alias)
+                except OSError:
+                    # SMB shares or restricted mounts may reject hard links; fall back to a copy so 打开原件 still works.
+                    shutil.copy2(source, alias)
         return path_uri(alias)
     except OSError:
         return ""

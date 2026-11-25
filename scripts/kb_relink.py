@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from kb_common import MANIFEST_NAME, load_json, path_uri, write_json
+from kb_common import MANIFEST_NAME, load_json, path_uri, sha256_file, write_json
 from publish_vault import ARCHIVE, PROJECT_INFO, RECEIPT, normalized_hash
 from render_kb import ALIAS_FOLDER, NAME_MAP_CSV
 
@@ -113,13 +113,18 @@ def remake_aliases(package: Path, dry_run: bool) -> tuple[int, list[str]]:
             try:
                 is_legacy = source.suffix.casefold() in {".xls", ".doc", ".ppt"}
                 if alias.exists() and not is_legacy and not alias.samefile(source):
-                    alias.unlink()
+                    if alias.stat().st_size != source.stat().st_size or sha256_file(alias) != sha256_file(source):
+                        alias.unlink()
                 if not alias.exists():
                     alias.parent.mkdir(parents=True, exist_ok=True)
                     if is_legacy:
                         shutil.copy2(source, alias)
                     else:
-                        os.link(source, alias)
+                        try:
+                            os.link(source, alias)
+                        except OSError:
+                            # SMB shares may disallow remote hard links; copy so 打开原件 still works.
+                            shutil.copy2(source, alias)
                 made += 1
             except OSError as exc:
                 problems.append(f"建不了 {alias.name}（{exc.strerror or type(exc).__name__}）")
