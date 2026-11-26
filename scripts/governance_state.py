@@ -926,6 +926,78 @@ def format_webpage_member(text: str, hot: bool = False) -> dict[str, str]:
     return {"label": ("★ " if hot else "") + head.strip(), "detail": body.strip()}
 
 
+def _load_blocks_and_docs(build: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    docs_list = load_jsonl(build / "docs.jsonl") if (build / "docs.jsonl").is_file() else []
+    docs_by_id = {d["doc_id"]: d for d in docs_list if d.get("doc_id")}
+    docs_by_item = {d["item_id"]: d for d in docs_list if d.get("item_id")}
+    docs_by_title = {d["title"]: d for d in docs_list if d.get("title")}
+    blocks_by_doc: dict[str, list[dict[str, Any]]] = {}
+    if (build / "blocks.jsonl").is_file():
+        for b in load_jsonl(build / "blocks.jsonl"):
+            if b.get("doc_id"):
+                blocks_by_doc.setdefault(b["doc_id"], []).append(b)
+    pages_by_item: dict[str, dict[str, Any]] = {}
+    pages_path = build / "website" / "pages.json"
+    if pages_path.is_file():
+        for p in load_json(pages_path):
+            if isinstance(p, dict) and p.get("page_id"):
+                pages_by_item[p["page_id"]] = p
+    return docs_by_item, docs_by_title, blocks_by_doc, pages_by_item
+
+
+def _removal_evidence_for_member(label: str, docs_by_title: dict[str, dict[str, Any]],
+                                 blocks_by_doc: dict[str, list[dict[str, Any]]]) -> dict[str, str]:
+    """Attach representative removed sentence, location, restore benefit, and suggestion for heavy_removal members."""
+    clean_title = label.lstrip("★ ").strip()
+    doc = docs_by_title.get(clean_title)
+    if not doc:
+        return {}
+    removed = [b for b in blocks_by_doc.get(doc["doc_id"], [])
+               if b.get("status") == "removed" and (b.get("text") or "").strip()]
+    if not removed:
+        return {}
+    first = removed[0]
+    snippet = re.sub(r"\s+", " ", (first.get("text") or "").strip())[:160]
+    if len(removed) > 1:
+        second = re.sub(r"\s+", " ", (removed[1].get("text") or "").strip())[:80]
+        if second and second != snippet:
+            snippet = f"{snippet}；另见：{second}"
+    return {
+        "removedText": snippet,
+        "sourceName": doc["title"],
+        "location": first.get("locator") or first.get("group") or "",
+        "restoreBenefit": "若属产品能力或技术参数而非敏感/装饰内容，补回后可补充对应产品或公司事实",
+        "suggestion": "核对原句：属电话/邮箱/价格/装饰图标则保持删除并关闭；属误删产品信息则放行重跑",
+    }
+
+
+def _real_evidence_for_cus(item_id: str, location: str, docs_by_item: dict[str, dict[str, Any]],
+                           blocks_by_doc: dict[str, list[dict[str, Any]]],
+                           pages_by_item: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Pull genuine verbatim excerpt (and website URL/capture date) from blocks.jsonl / website snapshot."""
+    result: dict[str, Any] = {}
+    page = pages_by_item.get(item_id)
+    if page and page.get("url"):
+        result["sourceUrl"] = page["url"]
+        if page.get("fetched_at"):
+            result["capturedAt"] = str(page["fetched_at"])[:10]
+    doc = docs_by_item.get(item_id)
+    if not doc:
+        return result
+    doc_blocks = [b for b in blocks_by_doc.get(doc["doc_id"], [])
+                  if b.get("status") != "removed" and (b.get("text") or "").strip()]
+    if not doc_blocks:
+        return result
+    loc = (location or "").strip()
+    matched = [b for b in doc_blocks if loc and loc not in {"整份文件", "整个文件"}
+               and (b.get("group") == loc or b.get("locator") == loc or loc in (b.get("group") or "") or loc in (b.get("locator") or ""))]
+    chosen = matched or doc_blocks[:2]
+    excerpt = "\n".join(re.sub(r"\s+", " ", (b.get("text") or "").strip()) for b in chosen[:2])[:320].strip()
+    if excerpt:
+        result["excerpt"] = excerpt
+    return result
+
+
 def export_internal_webpage_json(build: Path, output: Path | None = None) -> Path:
     """Export an internal-review-input.v1 JSON directly consumable by customer-confirmation-webpage --mode internal."""
     state = load_state(build)
@@ -934,6 +1006,7 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
     decisions_doc = load_json(build / "review-decisions.json") if (build / "review-decisions.json").is_file() else {}
     cited = cited_places(build)
     project_id = config.get("project_id", "P-000")
+    _, docs_by_title, blocks_by_doc, _ = _load_blocks_and_docs(build)
 
     issues: list[dict[str, Any]] = []
     risk_retained: list[dict[str, Any]] = []
@@ -958,10 +1031,12 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
             if status not in {"risk_retained", "action_needed"}:
                 continue
             # Older builds cached truncated member text, but kept the full evidence in the ledger details.
-            full_text = dict(members_of(record))
+            full_pairs = members_of(record)
+            full_text = dict(full_pairs)
+            raw_members = record.get("members") or [{"key": k, "text": t, "status": "open"} for k, t in full_pairs]
             members = [
                 {**member, "text": full_text.get(member["key"], member["text"])}
-                for member in record.get("members", [])
+                for member in raw_members
             ]
             if status == "risk_retained":
                 risk_retained.append({
@@ -983,6 +1058,17 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 {"value": "to_cus", "label": "转客户确认（进待汇总 CUS）", "detail": "原件存疑或需客户授权时填写客户问法", "targetStatus": "escalated_cus", "correctionField": "cus_question"},
                 {"value": "keep", "label": "暂留待内部处理", "detail": "本轮暂不结案，保留在待办列表", "targetStatus": "action_needed"},
             ]
+            is_removal_check = record["key"] == "heavy_removal" or kind_of(record) in {"heavy_removal", "removal"}
+            formatted_members = []
+            for m in open_members:
+                entry_m: dict[str, Any] = {
+                    "memberId": m["key"],
+                    **format_webpage_member(m["text"], any(p in m["text"] for p in cited)),
+                    "selected": True,
+                }
+                if is_removal_check:
+                    entry_m.update(_removal_evidence_for_member(entry_m["label"], docs_by_title, blocks_by_doc))
+                formatted_members.append(entry_m)
             issue_entry: dict[str, Any] = {
                 "id": record["id"],
                 "rootKey": record["key"],
@@ -994,14 +1080,7 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
                 "evidenceCount": len(open_members) or 1,
                 "owner": record["row"][3] if len(record["row"]) > 3 else "知识库专员",
                 "originalValues": [["剩余证据", f"{len(open_members)} / {record.get('total', len(open_members))}"], ["根因键", record["key"]]],
-                "members": [
-                    {
-                        "memberId": m["key"],
-                        **format_webpage_member(m["text"], any(p in m["text"] for p in cited)),
-                        "selected": True,
-                    }
-                    for m in open_members
-                ],
+                "members": formatted_members,
                 "fields": [{"key": "cus_question", "label": "转客户问法（仅选“转客户确认”时填写）", "placeholder": "写一句客户能直接回答的问题"}],
                 "choices": choices,
             }
@@ -1011,14 +1090,16 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
             issues.append(issue_entry)
 
     cus_items = []
-    draft_groups = sent_groups = 0
+    draft_groups = exported_groups = sent_groups = 0
     for record in sorted(records.get("CUS", []), key=lambda r: r["id"]):
         st = state["items"].get(record["id"], {}).get("status", "draft")
         if st == "closed":
             continue
         if st == "draft":
             draft_groups += 1
-        elif st in {"exported", "sent"}:
+        elif st == "exported":
+            exported_groups += 1
+        elif st == "sent":
             sent_groups += 1
         cus_items.append({
             "id": record["id"],
@@ -1041,6 +1122,7 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
         "riskRetained": risk_retained,
         "cusSummary": {
             "draftGroups": draft_groups,
+            "exportedGroups": exported_groups,
             "sentGroups": sent_groups,
             "totalGroups": len(cus_items),
             "items": cus_items,
@@ -1052,11 +1134,26 @@ def export_internal_webpage_json(build: Path, output: Path | None = None) -> Pat
     return target
 
 
+def _permission_list_group(record_key: str) -> dict[str, str] | None:
+    if record_key == "website_cases":
+        return {"id": "perm-website-cases", "title": "官网案例页授权清单",
+                "description": "请确认以下官网案例页的文字和配图能否纳入知识库与对外使用"}
+    if record_key.startswith("media:"):
+        return {"id": "perm-media", "title": "图片与视频素材授权清单",
+                "description": "请确认以下图片/视频素材能否用于本项目官网与对外内容"}
+    if record_key.startswith("pending:"):
+        return {"id": "perm-docs", "title": "资料文件授权清单",
+                "description": "请确认以下文档资料能否纳入知识库与对外使用"}
+    return None
+
+
 def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str], output: Path | None = None) -> Path:
     """Export a customer-review-input.v1 draft JSON for customer-confirmation-webpage --mode customer."""
+    state = load_state(build)
     records = records_of(build)
     routes = load_json(build / "routes.json") if (build / "routes.json").is_file() else {}
     config = load_json(build / "kb-config.json") if (build / "kb-config.json").is_file() else {}
+    docs_by_item, _, blocks_by_doc, pages_by_item = _load_blocks_and_docs(build)
     project_id = config.get("project_id", "P-000")
     friendly = bool((config.get("client_confirmation") or {}).get("friendly"))
     issues: list[dict[str, Any]] = []
@@ -1064,15 +1161,28 @@ def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str],
     for record in sorted(records.get("CUS", []), key=lambda r: r["id"]):
         if record["id"] not in chosen_set:
             continue
+        # Never export closed items even when re-exporting an older batch.
+        if state["items"].get(record["id"], {}).get("status") == "closed":
+            continue
         is_perm = record["key"].startswith(PERMISSION)
+        list_group = _permission_list_group(record["key"]) if is_perm else None
+        is_cert = (not is_perm) and bool(re.search(r"证书|认证|资质|检测报告|测试型号", f"{record['row'][0]} {record['key']}"))
         for idx, sub in enumerate(record.get("items", []), start=1):
-            route = routes.get(sub.get("item_id", ""), {})
+            item_id = (sub.get("item_id") or "").split(",")[0]
+            route = routes.get(item_id, {})
             src_name = sub.get("name") or route.get("display_name") or record["row"][0]
             src_loc = sub.get("location") or "整份文件"
             raw_rel = (route.get("source_relpath") or route.get("path") or "").replace("\\", "/").lstrip("/")
             source_path = raw_rel if raw_rel and not re.match(r"^[A-Za-z]:", raw_rel) and ".." not in raw_rel.split("/") else None
             answer_id = sub.get("client_id", sub["sub_id"])
             card_id = record["id"] if len(record.get("items", [])) == 1 else f"{record['id']}-{idx}"
+            real_ev = _real_evidence_for_cus(item_id, src_loc, docs_by_item, blocks_by_doc, pages_by_item)
+            ev_entry: dict[str, Any] = {"caption": f"{src_name} · {src_loc}", "sourceName": src_name, "location": src_loc}
+            if real_ev.get("sourceUrl"):
+                ev_entry["sourceUrl"] = real_ev["sourceUrl"]
+                ev_entry["capturedAt"] = real_ev.get("capturedAt") or today()
+            if real_ev.get("excerpt"):
+                ev_entry["excerpt"] = real_ev["excerpt"]
             if is_perm:
                 choices = [
                     {"value": "whole", "label": "可以公开使用", "detail": "整份资料可用于知识库与对外内容", "csvAnswer": "保留"},
@@ -1081,7 +1191,22 @@ def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str],
                     {"value": "pending", "label": "还需内部确认", "detail": "暂不确定，稍后答复", "csvAnswer": ""},
                 ]
                 fields = [{"key": "scope", "label": "允许使用的范围或限制", "placeholder": "请注明可用页码、章节或限制条件"}]
-                evidence = [{"caption": f"{src_name} · {src_loc}", "sourceName": src_name, "location": src_loc}]
+                purpose = "确认该资料/素材是否可用于本项目官网及对外内容"
+                expected_answer = "请选择“可以公开使用”“仅部分可用（注明范围）”或“不使用”"
+                evidence = [ev_entry]
+            elif is_cert:
+                choices = [
+                    {"value": "confirm", "label": "可以用这句话", "detail": "按拟用对外表述发布"},
+                    {"value": "revise", "label": "请按我提供的说法写", "detail": "请填写您希望对外展示的说法或适用型号", "requiresCorrection": True},
+                    {"value": "exclude", "label": "这次先不提", "detail": "本次建站与文章暂不引用该项"},
+                    {"value": "pending", "label": "稍后回复", "detail": "还需内部核实，稍后答复"},
+                ]
+                fields = [{"key": "correct_value", "label": "您希望对外展示的说法", "placeholder": "请写明准确的对外表述或适用型号"}]
+                purpose = "确认资质/检测信息的对外表述与适用范围"
+                expected_answer = "请确认拟用说法是否合适，或直接给出您希望对外展示的表述"
+                if "excerpt" not in ev_entry:
+                    ev_entry["excerpt"] = f"来源文件：{src_name}（{src_loc}），具体原件内容请对照原文件核对。"
+                evidence = [ev_entry]
             else:
                 choices = [
                     {"value": "confirm", "label": "确认以原件为准", "detail": "原件数值或说法正确，可对外引用"},
@@ -1090,8 +1215,11 @@ def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str],
                     {"value": "pending", "label": "还需内部确认", "detail": "暂不确定，稍后答复"},
                 ]
                 fields = [{"key": "correct_value", "label": "正确数值 / 说明", "placeholder": "请写明正确数值、单位或适用型号"}]
-                evidence = [{"caption": f"{src_name} · {src_loc}", "sourceName": src_name, "location": src_loc,
-                             "excerpt": sub["question"]}]
+                purpose = "确认产品/公司参数与事实的对外口径"
+                expected_answer = "请确认以原件为准、填写正确数值/单位，或选择暂不使用"
+                if "excerpt" not in ev_entry:
+                    ev_entry["excerpt"] = f"来源文件：{src_name}（{src_loc}），请对照原件确认对应条目。"
+                evidence = [ev_entry]
             entry: dict[str, Any] = {
                 "id": card_id,
                 "cusId": record["id"],
@@ -1101,6 +1229,8 @@ def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str],
                 "title": record["row"][0],
                 "question": sub["question"],
                 "ledgerQuestion": sub["question"],
+                "purpose": purpose,
+                "expectedAnswer": expected_answer,
                 "originalValues": [],
                 "sourceName": src_name,
                 "sourceLocation": src_loc,
@@ -1108,7 +1238,9 @@ def export_customer_webpage_json(build: Path, batch: str, chosen_ids: list[str],
                 "choices": choices,
                 "evidence": evidence,
             }
-            if source_path:
+            if list_group:
+                entry["listGroup"] = list_group
+            if source_path and not real_ev.get("sourceUrl"):
                 entry["sourcePath"] = source_path
             issues.append(entry)
     payload = {

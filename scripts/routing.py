@@ -146,6 +146,11 @@ def configured_route(asset: dict[str, Any], config: dict[str, Any]) -> dict[str,
     asked = config.get("ask_client") or {}
     if item_id in asked:
         return ask_client_route(asset, asked[item_id])
+    confirmed_media = config.get("confirmed_media") or {}
+    confirmed_ids = set(confirmed_media) if isinstance(confirmed_media, (dict, list)) else set()
+    if item_id in confirmed_ids and media_kind(asset):
+        meta = confirmed_media.get(item_id) if isinstance(confirmed_media, dict) else {}
+        return {"route": "media", "reason": "media_kept", **({"confirmed_media": meta} if isinstance(meta, dict) and meta else {})}
     answers = config.get("client_answers", {})
     override = (config.get("route_overrides") or {}).get(item_id)
     if (isinstance(override, dict) and override.get("route")

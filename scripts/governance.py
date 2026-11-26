@@ -226,10 +226,13 @@ def build(
              "- 回复前：这些图片不进 90_素材，视频不列为可用素材。客户回答一次，对整个文件夹生效。"], items)
     images = sorted(i for i, r in routes.items() if r["route"] == "hold" and r["reason"] == "image_needs_review")
     if images:
-        items = [{"key": i, "item_id": i, "location": "", "question": f"产品图 {show(routes[i]['display_name'])} 能否公开使用？"} for i in images]
-        add("CUS", "images", f"{len(images)} 张产品图能否公开使用", f"{len(images)} 张", "等待客户回复", "内容运营 → 客户",
-            ["- 为什么问：图中可能有人物、球星或 IP 形象。", "- 回复前：图片不进知识库。", ""]
-            + [f"- {show(routes[i]['display_name'])}" for i in images], items)
+        # Whether an image needs OCR/AI reading is an internal processing decision, not a customer permission question.
+        # Images confirmed usable for the project go into kb-config.json's confirmed_media (or no_ocr_items) as available assets.
+        add("MAT", "image_needs_review", f"{len(images)} 张单张图片待识别或登记为可用素材", f"{len(images)} 张",
+            "待知识库专员判断", "知识库专员",
+            ["- 说明：这些单张图片尚未识别文字，也未登记为免识别可用素材（是否需要识别与是否需要客户授权分开判断）。",
+             "- 处理方式：需提取文字/判断尺寸图的走 `ai_read.py` 或 Reducto；已明确可用于本项目建站/配图的写进 `kb-config.json` 的 `confirmed_media`（或 `no_ocr_items`）直接登记为可用素材；仅确有隐私/第三方版权疑虑的才写进 `ask_client` 转客户。",
+             ""] + [f"- {show(routes[i]['display_name'])}（`{i}`）" for i in images])
 
     good_styles, odd_styles = [], []
     for entry in styles:

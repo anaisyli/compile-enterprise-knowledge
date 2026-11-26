@@ -489,6 +489,58 @@ class StateTests(unittest.TestCase):
         gs.undo(self.build, applied["batch_id"])
         self.assertEqual(json.loads((self.build / "review-decisions.json").read_text(encoding="utf-8")).get("risk_retained_terms", []), [])
 
+    def test_confirmed_media_image_needs_review_and_real_webpage_evidence(self) -> None:
+        from routing import configured_route
+        asset = {"item_id": "img1", "decision": "A", "asset_kind": "image", "display_name": "hero.jpg",
+                 "path": "A/hero.jpg", "usable_as_fact": True}
+        self.assertEqual(configured_route(asset, {})["reason"], "image_needs_review")
+        routed = configured_route(asset, {"confirmed_media": {"img1": {"purpose": "官网产品图", "basis": "经办人确认"}}})
+        self.assertEqual((routed["route"], routed["reason"]), ("media", "media_kept"))
+
+        # image_needs_review must go to internal MAT, never fake customer CUS "images".
+        routes = {"img1": {"route": "hold", "reason": "image_needs_review", "display_name": "hero.jpg"}}
+        governance.build("P-999", self.build, routes, {}, [], [], {}, [], {}, (True, ""), {})
+        gov = json.loads((self.build / "governance.json").read_text(encoding="utf-8"))
+        self.assertTrue(any(r["key"] == "image_needs_review" for r in gov["MAT"]))
+        self.assertFalse(any(r["key"] == "images" for r in gov["CUS"]))
+
+        # Customer webpage export pulls real verbatim excerpt from blocks.jsonl, adds listGroup/purpose, and excludes closed CUS.
+        write_json(self.build / "governance.json", findings())
+        (self.build / "docs.jsonl").write_text(
+            json.dumps({"doc_id": "D1", "item_id": "doc1", "title": "客户案例"}, ensure_ascii=False) + "\n"
+            + json.dumps({"doc_id": "D2", "item_id": "doc2", "title": "画册"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (self.build / "blocks.jsonl").write_text(
+            json.dumps({"block_id": "b1", "doc_id": "D1", "group": "第 1 页", "locator": "page 1", "status": "kept", "text": "意大利市政输水项目真实原文摘录。"}, ensure_ascii=False) + "\n"
+            + json.dumps({"block_id": "b2", "doc_id": "D2", "group": "第 2 页", "locator": "page 2", "status": "kept", "text": "画册真实参数原文：DN1400 PN16。"}, ensure_ascii=False) + "\n"
+            + json.dumps({"block_id": "b3", "doc_id": "D2", "group": "第 56 页", "locator": "page 56", "status": "removed", "text": "AGV 搬运和举升说明被误删原句"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        write_json(self.build / "routes.json", {"doc1": {"display_name": "case.docx", "source_relpath": "A/case.docx"},
+                                                "doc2": {"display_name": "brochure.pdf", "source_relpath": "A/brochure.pdf"}})
+        # Close P-999-CUS-006; export must exclude it even if passed in chosen_ids.
+        st = gs.load_state(self.build)
+        st["items"]["P-999-CUS-006"] = {"status": "closed"}
+        gs.save_state(self.build, st)
+        cus_path = gs.export_customer_webpage_json(self.build, "B1", ["P-999-CUS-006", "P-999-CUS-007"])
+        cus_data = json.loads(cus_path.read_text(encoding="utf-8"))
+        self.assertEqual([i["cusId"] for i in cus_data["issues"]], ["P-999-CUS-007"])
+        self.assertEqual(cus_data["issues"][0]["listGroup"]["id"], "perm-docs")
+        self.assertIn("意大利市政输水项目真实原文摘录", cus_data["issues"][0]["evidence"][0]["excerpt"])
+
+        # Internal webpage export enriches heavy_removal with removedText and separates exportedGroups from sentGroups.
+        gov_hr = findings()
+        gov_hr["MAT"].append(record("P-999-MAT-099", "heavy_removal", "规则删得多的资料", ["- [[画册]]：删掉 10 / 20 段（50%）"]))
+        write_json(self.build / "governance.json", gov_hr)
+        st["items"]["P-999-CUS-007"] = {"status": "exported", "batch": "B1"}
+        gs.save_state(self.build, st)
+        int_data = json.loads(gs.export_internal_webpage_json(self.build).read_text(encoding="utf-8"))
+        hr = next(i for i in int_data["issues"] if i["id"] == "P-999-MAT-099")
+        self.assertIn("AGV 搬运和举升说明被误删原句", hr["members"][0]["removedText"])
+        self.assertEqual(int_data["cusSummary"]["exportedGroups"], 1)
+        self.assertEqual(int_data["cusSummary"]["sentGroups"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
