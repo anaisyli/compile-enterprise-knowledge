@@ -57,9 +57,9 @@ CERTIFICATE = re.compile(r"(?i)certif|证书|认证|资质|许可证|\blicense\b
                          r"\bSGS\b|\bGRS\b|test report|检测报告")
 FACTORY = re.compile(r"(?i)factory|workshop|warehouse|production line|工厂|车间|厂房|生产线|仓库")
 MEANINGLESS_ALT = re.compile(r"(?i)^(?:img|image|picture|photo|pic|dsc|banner|logo|icon)?[\s_\-]*\d*$|\.(?:jpe?g|png|webp|gif)$")
-FOLDERS = ("资料包素材", "产品", "文档提取图", "官网图片", "证书", "工厂与设备", "页面图", "报价单参考图", "产品表图片", "其他",
-           "旧版未归类")
-EXTRACTED, WEBSITE_FOLDER, PAGES = "文档提取图", "官网图片", "页面图"
+FOLDERS = ("尺寸图", "产品", "文档提取图", "官网图片", "证书", "工厂与设备", "页面图", "报价单参考图", "产品表图片",
+           "资料包素材", "其他", "旧版未归类")
+EXTRACTED, WEBSITE_FOLDER, PAGES, DRAWINGS_FOLDER = "文档提取图", "官网图片", "页面图", "尺寸图"
 # Pictures screening kept by folder sit under their original folders, the last few levels of them:
 # enough to tell one product's 白底图 from another's without paths too long for Windows.
 MEDIA_ROOT = "资料包素材"
@@ -389,7 +389,7 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
         label = "" if namer.forbidden and namer.forbidden.search(stem) else safe_name(stem)[:LABEL_MAX]
         prefix = folders[-1] if folders else ""
         use, alt = PUBLIC, ""
-        folder = "/".join([kind or MEDIA_ROOT, *folders])
+        folder = "/".join([kind or (DRAWINGS_FOLDER if entry.get("drawing") else MEDIA_ROOT), *folders])
         fields: dict[str, Any] = {"product": product_key(place["product"]) if place and place.get("product") else None}
         if entry.get("status") == "dimension_drawing":
             model = safe_name(entry.get("drawing_model") or "型号待确认", "型号待确认")
@@ -452,7 +452,7 @@ def drawing_folder(model: str, placed: list[str] | None, match: Callable[..., di
         product = match(model)
         if product and product.get("kind") in {"product", "solution"}:
             placed = product_folders({"product": product}, forbidden)
-    return "/".join([MEDIA_ROOT, *placed, "尺寸图"] if placed else ["产品", model, "尺寸图"])
+    return "/".join([DRAWINGS_FOLDER, *placed] if placed else [DRAWINGS_FOLDER, model])
 
 
 def product_key(product: dict[str, Any] | None) -> tuple[str, str] | None:

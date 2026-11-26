@@ -152,7 +152,7 @@ class PictureTests(unittest.TestCase):
             "dimension_drawing": True, "drawing_model": "YFD71XA", "drawing_name": "外形及安装尺寸图"}}), encoding="utf-8")
         named = self.name_all()
         entry = named["img-cccccccccccccccc.jpg"]
-        self.assertEqual(entry["file"], "产品/YFD71XA/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
+        self.assertEqual(entry["file"], "尺寸图/YFD71XA/YFD71XA-尺寸图-cccccccc.jpg")
         self.assertEqual(entry["use"], CHECK)
 
     def test_page_drawing_files_with_the_product_its_model_matches(self) -> None:
@@ -162,7 +162,7 @@ class PictureTests(unittest.TestCase):
         products = [{"name": "YFD71XA 蝶阀", "kind": "product", "category": "阀门", "aliases": ["YFD71XA"]}]
         named = self.name_all(match=Matcher(products))
         self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"],
-                         "资料包素材/阀门/YFD71XA 蝶阀/尺寸图/YFD71XA-尺寸图-cccccccc.jpg")
+                         "尺寸图/阀门/YFD71XA 蝶阀/YFD71XA-尺寸图-cccccccc.jpg")
 
     def test_page_drawing_never_files_under_a_company_group_or_waits_for_a_model(self) -> None:
         (self.build / "page-check").mkdir(parents=True)
@@ -172,10 +172,10 @@ class PictureTests(unittest.TestCase):
         (self.build / "assets" / "img-9999999999999999.jpg").write_bytes(b"x")
         self.status_info["c"]["page_pictures"]["4"] = ["img-9999999999999999.jpg"]
         named = self.name_all(match=Matcher(COMPANY_GROUPS))
-        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "产品/工厂/尺寸图/工厂-尺寸图-cccccccc.jpg")
+        self.assertEqual(named["img-cccccccccccccccc.jpg"]["file"], "尺寸图/工厂/工厂-尺寸图-cccccccc.jpg")
         self.assertNotIn("资料包素材", named["img-cccccccccccccccc.jpg"]["file"])
         self.assertEqual(named["img-9999999999999999.jpg"]["file"],
-                         "产品/2026格子系列/尺寸图/2026格子系列-尺寸图-99999999.jpg")
+                         "尺寸图/2026格子系列/2026格子系列-尺寸图-99999999.jpg")
 
     def test_single_image_dimension_drawing_files_under_its_model(self) -> None:
         media = [{"item_id": "m1", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
@@ -184,7 +184,7 @@ class PictureTests(unittest.TestCase):
         (self.build / "assets" / "img-1111111111111111.png").write_bytes(b"x")
         named = self.name_all()
         self.assertEqual(named["img-1111111111111111.png"]["file"],
-                         "产品/型号待确认/尺寸图/型号待确认-尺寸图-11111111.png")
+                         "尺寸图/型号待确认/型号待确认-尺寸图-11111111.png")
 
     def test_single_image_dimension_drawing_files_with_the_product_its_model_matches(self) -> None:
         media = [{"item_id": "m2", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
@@ -194,7 +194,7 @@ class PictureTests(unittest.TestCase):
         products = [{"name": "YFD71XA 蝶阀", "kind": "product", "category": "阀门", "aliases": ["YFD71XA"]}]
         named = self.name_all(match=Matcher(products))
         self.assertEqual(named["img-2222222222222222.png"]["file"],
-                         "资料包素材/阀门/YFD71XA 蝶阀/尺寸图/YFD71XA-尺寸图-22222222.png")
+                         "尺寸图/阀门/YFD71XA 蝶阀/YFD71XA-尺寸图-22222222.png")
 
     def test_a_published_single_image_drawing_moves_folder_but_keeps_its_name(self) -> None:
         media = [{"item_id": "m1", "kind": "image", "picture_kind": "尺寸图", "status": "dimension_drawing",
@@ -205,7 +205,7 @@ class PictureTests(unittest.TestCase):
             {"img-3333333333333333.png": {"file": "资料包素材/产品/型号待确认/尺寸图/X-33333333.png",
                                           "named_by": FROM_SOURCE}}), encoding="utf-8")
         named = self.name_all()
-        self.assertEqual(named["img-3333333333333333.png"]["file"], "产品/型号待确认/尺寸图/X-33333333.png")
+        self.assertEqual(named["img-3333333333333333.png"]["file"], "尺寸图/型号待确认/X-33333333.png")
 
     def drawing_pdf(self, item_id: str, digest: str, pages: int, relpath: str) -> list:
         return [{"item_id": item_id, "kind": "image", "picture_kind": "尺寸图", "status": "media_kept",
@@ -226,9 +226,9 @@ class PictureTests(unittest.TestCase):
         for number in (1, 2):
             picture_id = f"img-0123456789abcdef-p{number}.png"
             self.assertEqual(named[picture_id]["file"],
-                             f"资料包素材/产品/YFD71XA/尺寸图/尺寸图-外形尺寸图-第{number}页-{short_hash(picture_id, 8)}.png")
+                             f"尺寸图/产品/YFD71XA/尺寸图/尺寸图-外形尺寸图-第{number}页-{short_hash(picture_id, 8)}.png")
         single = f"img-{'a' * 16}-p1.png"
-        self.assertEqual(named[single]["file"], f"资料包素材/产品/YFD71XA/尺寸图/尺寸图-单页图-{single[4:12]}.png")
+        self.assertEqual(named[single]["file"], f"尺寸图/产品/YFD71XA/尺寸图/尺寸图-单页图-{single[4:12]}.png")
 
     def test_a_saved_drawing_page_keeps_its_file(self) -> None:
         entries = self.drawing_pdf("dwg1", "0123456789abcdef", 2, "产品/YFD71XA/尺寸图/外形尺寸图.pdf")
@@ -247,8 +247,8 @@ class PictureTests(unittest.TestCase):
         (self.build / "assets" / "img-ffffffffffffffff.png").write_bytes(b"x")
         self.status_info["c"]["page_images"] = {"3": "img-ffffffffffffffff.png"}
         named = self.name_all()
-        self.assertIn("/尺寸图/", named["img-ffffffffffffffff.png"]["file"])
-        self.assertNotIn("/尺寸图/", named["img-cccccccccccccccc.jpg"]["file"])
+        self.assertTrue(named["img-ffffffffffffffff.png"]["file"].startswith("尺寸图/"))
+        self.assertFalse(named["img-cccccccccccccccc.jpg"]["file"].startswith("尺寸图/"))
 
     def test_explicit_drawing_classification_moves_old_asset_category_but_keeps_basename(self) -> None:
         item = {"id": "img-cccccccccccccccc.jpg", "folder": "产品/YFD71XA/尺寸图", "dimension_drawing": True,
@@ -318,7 +318,7 @@ class PictureTests(unittest.TestCase):
         pic_id = self.status_info["c"]["page_images"]["image 1"]
         self.assertTrue((self.build / "assets" / pic_id).is_file())
         named = self.name_all()
-        self.assertIn("/尺寸图/", named[pic_id]["file"])
+        self.assertTrue(named[pic_id]["file"].startswith("尺寸图/"))
         self.assertEqual(pictures.page_group(self.status_info["c"], "image 1"), "图片 1")
         page_md = render_doc(
             {**self.docs["C"], "tier": "T2", "module": "20_产品与规格", "source_sha256": "h"},
