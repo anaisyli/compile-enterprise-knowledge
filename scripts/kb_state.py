@@ -158,8 +158,20 @@ def merge_pages(source: Path, target: Path) -> bool:
     return True
 
 
+BINARY_CACHE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".html"}
+
+
 def same(left: Path, right: Path) -> bool:
-    return left.is_file() and right.is_file() and left.read_bytes() == right.read_bytes()
+    if not (left.is_file() and right.is_file()):
+        return False
+    left_stat, right_stat = left.stat(), right.stat()
+    if left_stat.st_size != right_stat.st_size:
+        return False
+    # Over SMB, reading thousands of unchanged PNG/JPG/HTML cache files byte-by-byte stalls restore.
+    # For immutable media/HTML caches, matching size + mtime (within 2s SMB granularity) is sufficient.
+    if left.suffix.casefold() in BINARY_CACHE_SUFFIXES and abs(left_stat.st_mtime - right_stat.st_mtime) <= 2.0:
+        return True
+    return left.read_bytes() == right.read_bytes()
 
 
 def json_object(path: Path) -> dict[str, Any] | None:
@@ -395,6 +407,22 @@ def save(run: Path, vault: Path) -> dict[str, Any]:
     return {"saved": copied, "kept_newer_in_vault": kept, "removed": removed}
 
 
+def _stage_of(path: Path, build: Path) -> str:
+    try:
+        rel = path.relative_to(build).as_posix()
+    except ValueError:
+        return "其他"
+    if rel.startswith("package-text/"):
+        return "冻结提取稿"
+    if rel.startswith(("assets/", "reviewed-page-images/", "mineru-drafts/", "page-check/pages/")):
+        return "图片与页图缓存"
+    if rel.startswith("curation/"):
+        return "整理页与账本"
+    if rel.startswith(("mineru-units/", "reducto-units/", "website/")):
+        return "OCR与官网缓存"
+    return "配置与状态"
+
+
 def restore(run: Path, vault: Path) -> dict[str, Any]:
     migrate_legacy(vault)
     build = run / BUILD_DIRECTORY
@@ -402,7 +430,20 @@ def restore(run: Path, vault: Path) -> dict[str, Any]:
     run_config_before = json_object(build / "kb-config.json") or {}
     kept: list[str] = []
     removed: list[str] = []
-    copied = sum(copy_newer(v, b, kept, removed) for b, v in pairs(build, vault))
+    all_pairs = pairs(build, vault)
+    show_progress = len(all_pairs) >= 50
+    by_stage: dict[str, list[tuple[Path, Path]]] = {}
+    for b, v in all_pairs:
+        by_stage.setdefault(_stage_of(b, build), []).append((b, v))
+    copied = 0
+    for stage in ("配置与状态", "冻结提取稿", "OCR与官网缓存", "整理页与账本", "图片与页图缓存", "其他"):
+        items = by_stage.get(stage)
+        if not items:
+            continue
+        stage_copied = sum(copy_newer(v, b, kept, removed) for b, v in items)
+        copied += stage_copied
+        if show_progress:
+            print(f"[kb_state] 恢复 {stage}：检查 {len(items)} 项，更新 {stage_copied} 项", flush=True)
     copied += merge_pages(vault / WEBSITE / "pages.json", build / "website" / "pages.json")
     copied += merge_extract_status(vault / STATE / "package-text" / "extract-status.json", build / "package-text" / "extract-status.json")
     todo_path = build / "page-check/todo.jsonl"

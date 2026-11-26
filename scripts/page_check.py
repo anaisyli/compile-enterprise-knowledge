@@ -147,6 +147,22 @@ def preview_path(folder: Path, item_id: str, source_hash: str, unit: str, number
     return folder / f"{item_id}-{source_key}-{kind}{number}{extension}"
 
 
+def is_legacy_review(entry: dict[str, Any]) -> bool:
+    """An older vault's page-check record created before source_hash / review_digest existed."""
+    return not entry.get("source_hash") or not entry.get("review_digest")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    tmp.replace(path)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
 def invalidate_reviews(build: Path, results: dict[str, Any], stale: set[str]) -> None:
     for key in stale:
         entry = results.pop(key, {})
@@ -160,8 +176,8 @@ def invalidate_reviews(build: Path, results: dict[str, Any], stale: set[str]) ->
         removed = {f"{unit} {page} check", f"{unit} {page} drawing"}
         record["units"] = [u for u in record.get("units", [])
                            if not (u.get("engine") == "ai" and u.get("locator") in removed)]
-        write_json(path, record)
-    write_json(build / RESULTS, results)
+        atomic_write_json(path, record)
+    atomic_write_json(build / RESULTS, results)
 
 
 def code_pattern(prefixes: list[str]) -> re.Pattern[str]:
@@ -287,10 +303,16 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     pictures = folder / "pages"
     pictures.mkdir(parents=True, exist_ok=True)
     done = load_json(build / RESULTS) if (build / RESULTS).is_file() else {}
-    stale_sources = {key for key, result in done.items()
-                     if result.get("item_id") not in routes
-                     or not routes[result["item_id"]].get("source_hash")
-                     or result.get("source_hash") != routes[result["item_id"]].get("source_hash")}
+    # Only invalidate records whose recorded source_hash genuinely differs from the current file
+    # (or whose item is no longer in routes). Older vaults without source_hash/review_digest are
+    # preserved instead of silently wiping historical visual checks and AI-checked units.
+    stale_sources = {
+        key for key, result in done.items()
+        if result.get("item_id") not in routes
+        or (result.get("source_hash")
+            and routes[result["item_id"]].get("source_hash")
+            and result.get("source_hash") != routes[result["item_id"]].get("source_hash"))
+    }
     if stale_sources:
         invalidate_reviews(build, done, stale_sources)
     sampling_path = folder / "sampling.json"
@@ -469,25 +491,90 @@ def plan(build: Path, packages: list[str], config: dict[str, Any], text_dirs: li
     if requested - included:
         raise ValueError(f"Explicit pages unavailable: {sorted(requested - included)}")
     # A page looked at before MinerU's draft came is looked at again with it; so is one Reducto now disagrees on.
-    stale = {entry["key"] for entry in todo if entry["key"] in done
-             and done[entry["key"]].get("review_digest") != entry["review_digest"]}
+    # Legacy records without a review_digest are preserved until explicitly migrated via `page_check.py migrate`.
+    stale = {
+        entry["key"] for entry in todo
+        if entry["key"] in done
+        and done[entry["key"]].get("review_digest")
+        and done[entry["key"]].get("review_digest") != entry["review_digest"]
+    }
     if stale:
         invalidate_reviews(build, done, stale)
         return plan(build, packages, config, text_dirs, include_pages)
     todo = [entry for entry in todo if entry["key"] not in done]
-    with (folder / "todo.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
-        for entry in todo:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    write_text(folder / "README.md", RULES)
-    write_json(sampling_path, sampling)
-    write_json(build / TRIAGE, {"grades": {g: f"{label}：{rule}" for g, (label, rule) in GRADES.items()}, "files": triage})
+    atomic_write_text(folder / "todo.jsonl", "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in todo))
+    atomic_write_text(folder / "README.md", RULES)
+    atomic_write_json(sampling_path, sampling)
+    atomic_write_json(build / TRIAGE, {"grades": {g: f"{label}：{rule}" for g, (label, rule) in GRADES.items()}, "files": triage})
     totals = {g: sum(f["counts"][g] for f in triage.values()) for g in GRADES}
+    legacy_preserved = sum(is_legacy_review(entry) for entry in done.values())
     report = {"ok": True, "to_check": len(todo),
-              "checked": sum(bool(entry.get("review_digest")) for entry in done.values()),
+              "checked": len(done),
+              "legacy_preserved": legacy_preserved,
               "files": len({t["item_id"] for t in todo}), "skipped": skipped,
               "deferred": deferred, "grades": totals}
-    write_json(folder / "plan.json", report)
+    atomic_write_json(folder / "plan.json", report)
     return report
+
+
+def migrate(build: Path, packages: list[str], text_dirs: list[Path], *, dry_run: bool = False) -> dict[str, Any]:
+    """Explicitly backfill source_hash and review_digest on legacy page-check/results.json records.
+
+    Verifies the original package file hash before binding a legacy record; any record that cannot
+    be verified is kept untouched and reported under `unmigrated` (never silently deleted).
+    """
+    results_path = build / RESULTS
+    if not results_path.is_file():
+        return {"ok": True, "total": 0, "migrated": 0, "already_current": 0, "unmigrated": [], "dry_run": dry_run}
+    routes = load_json(build / "routes.json")
+    files = package_files(packages)
+    results = load_json(results_path)
+    pictures = build / FOLDER / "pages"
+    migrated, already_current = 0, 0
+    unmigrated: list[dict[str, str]] = []
+    verified_hashes: dict[str, bool] = {}
+    for key, record in sorted(results.items()):
+        if not is_legacy_review(record):
+            already_current += 1
+            continue
+        item_id, unit, number = record.get("item_id"), record.get("unit"), record.get("page")
+        route = routes.get(item_id or "")
+        asset = files.get(item_id or "")
+        if not item_id or not route or not asset:
+            unmigrated.append({"key": key, "reason": "当前路由或初筛包中找不到对应原件"})
+            continue
+        expected = route.get("source_hash") or asset.get("source_hash") or ""
+        if not expected:
+            unmigrated.append({"key": key, "reason": "缺少原件 source_hash"})
+            continue
+        if item_id not in verified_hashes:
+            source = asset["file"]
+            verified_hashes[item_id] = bool(Path(long_path(source)).is_file() and sha256_file(source) == expected)
+        if not verified_hashes[item_id]:
+            unmigrated.append({"key": key, "reason": "初筛包原件缺失或哈希与当前路由不一致"})
+            continue
+        if unit not in {"page", "slide", "image"} or not isinstance(number, int) or number < 1:
+            unmigrated.append({"key": key, "reason": "记录缺少有效的 unit/page 信息"})
+            continue
+        units = load_units(unit_dirs(build, text_dirs), item_id)
+        text = page_text([u for u in units if not u.get("checked")], unit, number)
+        kind = "i" if unit == "image" else "p"
+        candidates = sorted(pictures.glob(f"{item_id}-{expected[:16]}-{kind}{number}.*")) if pictures.is_dir() else []
+        image_path = str(candidates[0]) if candidates else str(record.get("image") or "")
+        snapshot = {
+            "key": key, "item_id": item_id, "unit": unit, "page": number,
+            "image": image_path, "text": text, "draft": record.get("draft") or draft_sources(text),
+            "source_hash": expected,
+        }
+        record["source_hash"] = expected
+        if image_path:
+            record["image"] = image_path
+        record["review_digest"] = review_digest(snapshot, expected)
+        migrated += 1
+    if migrated and not dry_run:
+        atomic_write_json(results_path, results)
+    return {"ok": True, "total": len(results), "migrated": migrated, "already_current": already_current,
+            "unmigrated": unmigrated, "dry_run": dry_run}
 
 
 def clean_note(text: str) -> str:
@@ -650,14 +737,15 @@ def collect(build: Path, *, revise_checked: bool = False, answer_files: list[Pat
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check extracted text against the pages themselves.")
-    parser.add_argument("command", choices=["plan", "collect"])
+    parser.add_argument("command", choices=["plan", "collect", "migrate"])
     parser.add_argument("--out", required=True, help="Run directory")
-    parser.add_argument("--package", action="append", default=[], help="Preparation package; repeat (plan)")
-    parser.add_argument("--text-dir", action="append", default=[], help="Extracted text units; repeat (plan)")
+    parser.add_argument("--package", action="append", default=[], help="Preparation package; repeat (plan/migrate)")
+    parser.add_argument("--text-dir", action="append", default=[], help="Extracted text units; repeat (plan/migrate)")
     parser.add_argument("--config", help="kb-config.json")
     parser.add_argument("--revise-checked", action="store_true", help="Explicitly recheck answers for already accepted pages (collect)")
     parser.add_argument("--answer-file", action="append", help="Only collect this answer file; repeat for several files")
     parser.add_argument("--include-page", action="append", help="Explicit extra visual-check key item|page N (plan); validates original hash and page bounds")
+    parser.add_argument("--dry-run", action="store_true", help="Preview legacy review migration without writing (migrate)")
     args = parser.parse_args()
     if not run_lock(Path(args.out).resolve(), f"page_check.py {args.command}"):
         return 3
@@ -669,6 +757,11 @@ def main() -> int:
         report = plan(build, args.package, load_config(Path(args.config) if args.config else None), dirs, args.include_page)
         # Old full-page transcripts on drawing pages, to split by choosing lines (split_reviews.py).
         report["to_split"] = split_reviews.plan(build) if has_legacy_reviewed_pages(build) else 0
+    elif args.command == "migrate":
+        if not args.package:
+            parser.error("migrate 要指定 --package")
+        dirs = [Path(d).resolve() for d in args.text_dir] or [build / "package-text"]
+        report = migrate(build, args.package, dirs, dry_run=args.dry_run)
     else:
         report = collect(build, revise_checked=args.revise_checked,
                          answer_files=[Path(p).resolve() for p in args.answer_file] if args.answer_file else None,
@@ -682,7 +775,7 @@ def main() -> int:
         else:
             report["split"] = {"split": 0, "drawing_only": 0, "unsplittable": 0, "rejected": []}
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    if args.command == "plan":
+    if args.command in {"plan", "migrate"}:
         return 0  # Without PyMuPDF the pipeline goes on; verify says the check was not possible.
     return 0 if not report.get("rejected") else 1
 

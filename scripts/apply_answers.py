@@ -225,7 +225,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--release-awaiting-overrides", action="store_true",
                         help="For an explicitly confirmed build CSV, remove its obsolete awaiting-client route overrides")
     parser.add_argument("--previous-config", help="Optional config backup from before these CUS answers, to recover exact folder membership after resolution")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Preview config changes, unmatched IDs, and denied-item cache cleanup without writing")
     return parser.parse_args()
+
+
+def cleanup_denied_caches(build: Path, denied_items: set[str], *, dry_run: bool = False) -> dict[str, Any]:
+    """Find (and unless dry_run, remove) derived OCR/text/page-check caches for explicitly denied items."""
+    if not denied_items:
+        return {"items": [], "removed_files": [], "removed_page_checks": 0}
+    removed_files: list[str] = []
+    removed_page_checks = 0
+    for item_id in sorted(denied_items):
+        for rel in (f"mineru-units/{item_id}.json", f"reducto-units/{item_id}.json", f"package-text/{item_id}.json"):
+            path = build / rel
+            if path.is_file():
+                removed_files.append(rel)
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+        for folder_rel in ("page-check/pages", "reviewed-page-images"):
+            folder = build / folder_rel
+            if folder.is_dir():
+                for path in sorted(folder.glob(f"{item_id}*")):
+                    if path.is_file():
+                        removed_files.append(f"{folder_rel}/{path.name}")
+                        if not dry_run:
+                            path.unlink(missing_ok=True)
+    results_path = build / "page-check" / "results.json"
+    if results_path.is_file():
+        results = load_json(results_path)
+        drop_keys = [k for k, v in results.items() if isinstance(v, dict) and v.get("item_id") in denied_items]
+        removed_page_checks = len(drop_keys)
+        if drop_keys and not dry_run:
+            for key in drop_keys:
+                results.pop(key, None)
+            write_json(results_path, results)
+    return {"items": sorted(denied_items), "removed_files": removed_files, "removed_page_checks": removed_page_checks}
 
 
 def main() -> int:
@@ -354,24 +389,61 @@ def main() -> int:
         applied.append({"id": record["id"], "decision": decision})
 
     # Answered questions wait for a person to verify (已答待核验); unanswered ones stay with their batch.
-    if records:
-        from governance_state import mark_answered
-        mark_answered(build, [r["id"] for r in applied] + [n["id"] for n in notes])
-    # Read again on every build: only a real change touches the config, and a remark is kept once.
-    changed = applied and config != load_json(config_path)
-    if changed:
-        backup = config_path.with_name(f"{config_path.stem}.{datetime.now():%Y%m%d-%H%M%S}.bak.json")
-        shutil.copy2(config_path, backup)
-        write_json(config_path, config)
-    if notes:
-        kept = load_jsonl(build / "client-notes.jsonl")
-        seen = {(n.get("id"), n.get("answer"), n.get("note")) for n in kept}
-        fresh = [n for n in notes if (n.get("id"), n.get("answer"), n.get("note")) not in seen]
-        if fresh:
-            write_jsonl(build / "client-notes.jsonl", kept + fresh)
-    print(json.dumps({"applied": len(applied), "config_changed": bool(changed), "notes_for_people": len(notes), "unclear": unclear,
-                      "preserved_answers": skipped,
-                      "next": "重跑 run_pipeline.py，再发布" if changed else "没有新的回答"}, ensure_ascii=False, indent=2))
+    original_config = load_json(config_path)
+    changed = bool(applied) and config != original_config
+    whole_item_changed = config.get("client_answers") != original_config.get("client_answers") or (
+        config.get("route_overrides") != original_config.get("route_overrides")
+    )
+    unit_changed = config.get("client_answers_units") != original_config.get("client_answers_units")
+    denied_items = {
+        item_id for item_id, dec in (config.get("client_answers") or {}).items()
+        if dec == "drop" and original_config.get("client_answers", {}).get(item_id) != "drop"
+    }
+    # Also include items explicitly answered "drop" in this batch even if already set, so residual caches get cleaned.
+    for row_applied in applied:
+        if row_applied.get("decision") == "drop":
+            rec = records.get(row_applied["id"])
+            if rec and rec.get("item_id") and not rec.get("location"):
+                denied_items.update(i for i in rec["item_id"].split(",") if i)
+    cache_cleanup = cleanup_denied_caches(build, denied_items, dry_run=args.dry_run)
+    unmatched = [u for u in unclear if "找不到" in (u.get("problem") or "")]
+    if whole_item_changed or cache_cleanup["removed_files"] or cache_cleanup["removed_page_checks"]:
+        recommended_action = "full_pipeline"
+        next_step = "涉及许可/入库去向变更，请重跑 run_pipeline.py，再发布"
+    elif unit_changed or changed:
+        recommended_action = "from_guard"
+        next_step = "仅涉及片段级答复，可用 run_pipeline.py --from guard 轻量刷新，再发布"
+    else:
+        recommended_action = "none"
+        next_step = "没有新的配置变化，无需重跑"
+    if args.dry_run:
+        next_step = f"预演模式未写入任何文件；确认无误后去掉 --dry-run 正式回填（预计后续动作：{recommended_action}）"
+    else:
+        if records:
+            from governance_state import mark_answered
+            mark_answered(build, [r["id"] for r in applied] + [n["id"] for n in notes])
+        if changed:
+            backup = config_path.with_name(f"{config_path.stem}.{datetime.now():%Y%m%d-%H%M%S}.bak.json")
+            shutil.copy2(config_path, backup)
+            write_json(config_path, config)
+        if notes:
+            kept = load_jsonl(build / "client-notes.jsonl")
+            seen = {(n.get("id"), n.get("answer"), n.get("note")) for n in kept}
+            fresh = [n for n in notes if (n.get("id"), n.get("answer"), n.get("note")) not in seen]
+            if fresh:
+                write_jsonl(build / "client-notes.jsonl", kept + fresh)
+    print(json.dumps({
+        "dry_run": bool(args.dry_run),
+        "applied": len(applied),
+        "config_changed": bool(changed),
+        "recommended_action": recommended_action,
+        "notes_for_people": len(notes),
+        "unclear": unclear,
+        "unmatched_ids": unmatched,
+        "preserved_answers": skipped,
+        "denied_cache_cleanup": cache_cleanup,
+        "next": next_step,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
