@@ -191,6 +191,15 @@ class FastStateCompareTests(unittest.TestCase):
             b.write_bytes(b"1234567")
             self.assertFalse(kb_state.same(a, b))
 
+    def test_run_pipeline_fails_fast_when_explicit_config_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            done = run_script("run_pipeline.py", "--out", str(root / "run"), "--vault", str(root / "vault"),
+                              "--config", str(root / "missing-config.json"))
+            self.assertEqual(done.returncode, 2)
+            self.assertIn("找不到指定的 --config 文件", done.stdout)
+            self.assertIn("请省略 --config", done.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

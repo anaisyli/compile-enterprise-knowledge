@@ -144,6 +144,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.config and not Path(args.config).resolve().is_file():
+        hint = "；带 --vault 想直接使用知识库里保存的配置，请省略 --config" if args.vault else ""
+        print(f"找不到指定的 --config 文件：{args.config}{hint}")
+        return 2
     if not run_lock(Path(args.out).resolve(), "run_pipeline.py"):
         return 3
     out = Path(args.out).resolve()
