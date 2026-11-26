@@ -995,6 +995,8 @@ def main() -> int:
     # A page picture shows the whole page, so pages where sensitive content was removed do not get one.
     unsafe = {(b["doc_id"], b["group"]) for b in blocks if is_sensitive_removal(b)}
     package_read_only = bool(config.get("package_read_only"))
+    if package_read_only:
+        print("⚠ 当前配置开启了 package_read_only: true，本地文档不会新建“打开原件”链接；如非刻意要求初筛包只读，请删掉该项。", file=sys.stderr)
     alias_roots = config.get("original_alias_roots", [])
     originals = make_aliases(routes, docs, order, package_read_only, alias_roots)
     twins = twin_links(routes, docs, order, package_read_only, alias_roots)
