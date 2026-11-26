@@ -294,9 +294,12 @@ class MinerUTests(Base):
         self.assertEqual(self.pipeline().returncode, 0)
         route = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))["p1"]
         self.assertEqual((route["route"], route["reason"], route["picture_kind"]), ("media", "dimension_drawing", "尺寸图"))
-        picture = next(iter(json.loads((self.build / "pictures.json").read_text(encoding="utf-8")).values()))
-        self.assertEqual(picture["file"], "产品/型号待确认/尺寸图/型号待确认-尺寸图-pppppppp.png")
-        self.assertEqual(picture["use"], "待核对")
+        # Standalone image dimension drawings stay in the package (not copied into 90_素材) and are indexed in 00_素材清单.csv.
+        self.assertEqual(json.loads((self.build / "pictures.json").read_text(encoding="utf-8")), {})
+        with (self.build / "vault/03_正式知识/90_素材/00_素材清单.csv").open(encoding="utf-8-sig", newline="") as handle:
+            listed = {row["编号"]: row for row in csv.DictReader(handle)}
+        self.assertEqual(listed["p1"]["类型"], "尺寸图")
+        self.assertIn("型号待确认", listed["p1"]["备注"])
         ledger = next((self.build / "vault").rglob("01_源资料处理台账.md")).read_text(encoding="utf-8")
         self.assertIn("尺寸图型号待确认", ledger)
 

@@ -699,6 +699,9 @@ def retained_record(entry: dict[str, Any], forbidden: re.Pattern[str] | None = N
     suffix = Path(relpath).suffix.casefold()
     if entry.get("status") == "drawing_unrendered":
         kind, note = "图纸", "没能转成图片"
+    elif entry.get("status") == "dimension_drawing":
+        model = entry.get("drawing_model") or "型号待确认"
+        kind, note = "尺寸图", f"尺寸图（{model}），留在初筛包原位，尺寸见原图"
     elif entry.get("kind") in {"video", "audio"}:
         kind, note = KIND_LABELS[entry["kind"]], "内容待转写，转写前不出知识点"
     elif suffix == ".psd":
