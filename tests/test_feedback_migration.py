@@ -201,5 +201,44 @@ class FastStateCompareTests(unittest.TestCase):
             self.assertIn("请省略 --config", done.stdout)
 
 
+class WebsiteAndThumbnailTests(unittest.TestCase):
+    def test_page_parser_captures_direct_prose_inside_div_and_skips_noise_pages(self) -> None:
+        import fetch_website
+        parser = fetch_website.PageParser()
+        parser.feed(
+            '<div class="enterprise_l">'
+            '<p class="txt_big">PROFILE</p>'
+            '<div class="fnt_16 e_txt_1">甲公司最早成立于2003年，专注智能装备。<br/><br/>产品出口28个国家。</div>'
+            '</div>'
+            '<nav><div>顶部导航不该进正文</div></nav>'
+        )
+        parser.flush()
+        joined = "\n".join(text for _, text in parser.blocks)
+        self.assertIn("甲公司最早成立于2003年", joined)
+        self.assertIn("产品出口28个国家", joined)
+        self.assertNotIn("顶部导航不该进正文", joined)
+
+        self.assertTrue(fetch_website.NOISE_PATH.search("/statement/statement.html"))
+        self.assertTrue(fetch_website.NOISE_PATH.search("/privacy-policy/"))
+        self.assertTrue(fetch_website.NOISE_PATH.search("/terms-of-service.html"))
+        self.assertTrue(fetch_website.NOISE_PATH.search("/search.html"))
+        self.assertIsNone(fetch_website.NOISE_PATH.search("/about/about.html"))
+        self.assertIsNone(fetch_website.NOISE_PATH.search("/products/research-center.html"))
+
+    def test_cleaned_page_keeps_internal_thumbnail_with_notice(self) -> None:
+        import render_kb
+        doc = {"doc_id": "D1", "title": "测试画册", "tier": "T1", "module": "20_产品介绍",
+               "item_id": "i1", "source_sha256": "a" * 64}
+        blocks = [{"block_id": "b1", "doc_id": "D1", "kind": "text", "group": "第 1 张幻灯片",
+                   "locator": "slide 1", "text": "产品介绍正文", "flags": [], "status": "kept"}]
+        md = render_kb.render_doc(
+            doc, blocks, "有效", [], {}, {},
+            pictures={"第 1 张幻灯片": "页面图/测试画册/第1张幻灯片-aaaa1111.png"},
+            removed_groups={"第 1 张幻灯片"},
+        )
+        self.assertIn("![[页面图/测试画册/第1张幻灯片-aaaa1111.png|360]]", md)
+        self.assertIn("仅供内部辨认版面，不可对外使用", md)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,8 +54,12 @@ MODULE_PATHS = [
     ("industry", re.compile(r"(?i)^(?:news|blog|articles?|20\d{2})$")),
 ]
 EMPTY_SHELL_CHARS = 80
-# Page-builder fragments, feeds, and archive listings repeat other pages' content.
-NOISE_PATH = re.compile(r"(?i)elementskit|wp-json|/feed|/tag/|/author/|/page/\d|/wp-content/|\?|xmlrpc")
+# Page-builder fragments, feeds, archive listings, and boilerplate legal/privacy/search pages.
+NOISE_PATH = re.compile(
+    r"(?i)elementskit|wp-json|/feed|/tag/|/author/|/page/\d|/wp-content/|\?|xmlrpc"
+    r"|(?:^|[/_\-])(?:privacy(?:[-_]?policy)?|statement|legal|disclaimer|terms(?:[-_]?of[-_]?(?:use|service))?|cookies?(?:[-_]?policy)?|sitemap|search)(?:$|[/_\-.])"
+    r"|隐私|法律声明|免责声明|隐私声明|服务条款|全局搜索"
+)
 # Product and company photos for the material folder; icons and sprites are too small to matter.
 PICTURE_EXTENSIONS = re.compile(r"(?i)\.(?:jpe?g|png|webp)$")
 PICTURE_MIN_BYTES = 15_000
@@ -125,16 +129,20 @@ class PageParser(HTMLParser):
             return
         if tag == "title":
             self.in_title = True
+        if tag == "br" and self.current is not None and not self.skip:
+            self.current.append("\n" if self.tag == "pre" else " ")
         if tag in BLOCK_TAGS and not self.skip:
             self.flush()
             self.current, self.tag = [], tag
         elif tag in INLINE_BLOCK_TAGS and self.current is None and not self.skip:
             self.current, self.tag = [], tag
-        elif (tag == "div" and self.current is None and not self.skip
-              and VALUE_DIV_CLASS.search(values.get("class") or "")):
-            # Number cards and standalone div titles were previously dropped because only
-            # paragraph/heading tags opened a text block. Preserve their real text in place.
-            self.current, self.tag = [], "div"
+        elif tag == "div" and not self.skip:
+            if self.current is not None and self.tag == "div":
+                self.flush()
+            if self.current is None and VALUE_DIV_CLASS.search(values.get("class") or ""):
+                # Number cards and standalone div titles were previously dropped because only
+                # paragraph/heading tags opened a text block. Preserve their real text in place.
+                self.current, self.tag = [], "div"
         if tag not in VOID_TAGS and not self.skip:
             for attr in COUNTER_ATTRS:
                 raw_val = (values.get(attr) or "").strip()
@@ -185,6 +193,9 @@ class PageParser(HTMLParser):
             self.table_parts.append(escape(re.sub(r"\s+", " ", data)))
         elif self.current is not None and not self.skip:
             self.current.append(data)
+        elif not self.skip and data.strip():
+            # Prose written directly inside a <div> (e.g. <div class="e_txt_1">...</div>) without <p>.
+            self.current, self.tag = [data], "div"
 
     def flush(self) -> None:
         if self.current is not None:

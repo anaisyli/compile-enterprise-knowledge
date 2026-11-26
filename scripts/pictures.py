@@ -298,23 +298,24 @@ def candidates(build: Path, docs: dict[str, dict[str, Any]], by_doc: dict[str, l
 
         for page, name in info.get("page_images", {}).items():
             group = page_group(info, page)
-            if (doc_id, group) not in unsafe:
-                drawing = dimension_result(page)
-                if drawing:
-                    raw_model = drawing.get("drawing_model") or "型号待确认"
-                    if raw_model == "型号待确认":
-                        raw_model = infer_model_from_title(doc.get("title", "")) or "型号待确认"
-                    model = safe_name(raw_model, "型号待确认")
-                    folder = drawing_folder(model, placed, match, namer.forbidden)
-                    add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
-                        alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True,
-                        product=model_product(model, match) or doc_product(doc_id))
-                else:
-                    # 页面图/<来源文档>/第N页: the name is the place, nothing guessed from the page.
-                    folder = doc_folder(doc, PAGES)
-                    add(name, doc_id, group, folder=folder, prefix="", label=page_label(group),
-                        alt=f"{doc['title']} {group}原图", use=INTERNAL if folder.startswith(PAGES) else CHECK,
-                        location=group, product=doc_product(doc_id))
+            is_unsafe = (doc_id, group) in unsafe
+            drawing = dimension_result(page) if not is_unsafe else {}
+            if drawing:
+                raw_model = drawing.get("drawing_model") or "型号待确认"
+                if raw_model == "型号待确认":
+                    raw_model = infer_model_from_title(doc.get("title", "")) or "型号待确认"
+                model = safe_name(raw_model, "型号待确认")
+                folder = drawing_folder(model, placed, match, namer.forbidden)
+                add(name, doc_id, group, folder=folder, prefix=model, label="尺寸图",
+                    alt="尺寸见原图", use=CHECK, english_source="", location=group, dimension_drawing=True,
+                    product=model_product(model, match) or doc_product(doc_id))
+            else:
+                # 页面图/<来源文档>/第N页: kept even when text was cleaned so reviewers can recognize the page layout (always INTERNAL when cleaned).
+                folder = doc_folder(doc, PAGES)
+                add(name, doc_id, group, folder=folder, prefix="", label=page_label(group),
+                    alt=f"{doc['title']} {group}原图",
+                    use=INTERNAL if (is_unsafe or folder.startswith(PAGES)) else CHECK,
+                    location=group, product=doc_product(doc_id))
         catalog = doc["catalog"] if "catalog" in doc else doc.get("folder") == "产品画册"
         line = doc["title"].split("-", 1)[-1] if catalog else ""
         for page, names in info.get("page_pictures", {}).items():

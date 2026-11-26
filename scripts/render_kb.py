@@ -385,8 +385,10 @@ def render_doc(doc: dict[str, Any], blocks: list[dict[str, Any]], status: str, c
             if current in pictures:
                 rendered_picture_groups.add(current)
                 parts.extend([f"![[{shown(pictures[current])}|{PAGE_PICTURE_WIDTH}]]", ""])
+                if current in removed_groups:
+                    parts.extend(["> （本页部分文字已按规则清理，上方缩略图仅供内部辨认版面，不可对外使用；清理详情见《内容清理记录》。）", ""])
             elif current in removed_groups:
-                parts.extend(["> （本页因清理了敏感内容，不附未脱敏的整页原图；清理详情见《内容清理记录》。）", ""])
+                parts.extend(["> （本页有按规则清理的内容；清理详情见《内容清理记录》。）", ""])
             has_transcript = any(b.get('transcription_review') for b in blocks if b['group'] == current)
             for note in page_notes.get(current, []):
                 # A checked transcript supersedes old OCR-error notes; product/series
@@ -1050,7 +1052,7 @@ def main() -> int:
             card.append(f"> - 指定解析平台：{platform}；" + ("已取得平台提取稿；有非空整页结果的页，正文整页使用平台识别结果，不并入同页 PDF 原生文字层。" if done else "尚未取得匹配本版原件的平台提取稿。"))
         info = status_info.get(doc["item_id"], {})
         pictures = {page_group(info, page): name for page, name in info.get("page_images", {}).items()
-                    if (doc_id, page_group(info, page)) not in unsafe and name in PICTURE_FILES}
+                    if name in PICTURE_FILES}
         doc_removed_groups = {group for d_id, group in unsafe if d_id == doc_id and group in {page_group(info, p) for p in info.get("page_images", {})}}
         write_text(clean / doc_path(doc), render_doc(doc, members, status, card, gov["anm_ids"], gov["cus_items"], pictures,
                                                      checks.get(doc["item_id"], {}), doc_removed_groups))
