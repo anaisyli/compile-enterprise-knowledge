@@ -212,6 +212,7 @@ class FastStateCompareTests(unittest.TestCase):
             self.assertTrue(kb_state.same(a, b))
             b.write_bytes(b"1234567")
             self.assertFalse(kb_state.same(a, b))
+            self.assertIn("governance.json", kb_state.FILES)
 
     def test_run_pipeline_fails_fast_when_explicit_config_missing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
