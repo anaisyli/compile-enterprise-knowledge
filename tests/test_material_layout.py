@@ -76,12 +76,12 @@ class LayoutTests(unittest.TestCase):
 
     def test_the_index_lists_pictures_by_product_and_what_matched_none(self) -> None:
         entries = {
-            "img-1": {"file": "资料包素材/广告机/DS50系列/白底图/DS50系列-1-11111111.jpg", "product": ("广告机", "DS50系列")},
-            "img-2": {"file": "文档提取图/DS50 说明书/第3页-22222222.jpg", "product": ("广告机", "DS50系列")},
-            "img-3": {"file": "官网图片/About Us/官网-About Us-33333333.jpg", "product": None},
+            "img-1": {"file": "资料包素材/广告机/DS50系列/白底图/DS50系列-1-11111111.jpg", "product": ("广告机", "DS50系列"), "use": "可用于官网"},
+            "img-2": {"file": "文档提取图/DS50 说明书/第3页-22222222.jpg", "product": ("广告机", "DS50系列"), "use": "内部"},
+            "img-3": {"file": "官网图片/About Us/官网-About Us-33333333.jpg", "product": None, "use": "可用于官网"},
         }
         lines = "\n".join(product_section(entries))
-        self.assertIn("### 广告机 / DS50系列（2 张）", lines)
+        self.assertIn("| 广告机 / DS50系列 | 2 | 1 | 0 | 1 |", lines)
         self.assertIn("### 未对应产品（1 张）", lines)
         self.assertIn("- 官网图片/About Us：1 张", lines)
 

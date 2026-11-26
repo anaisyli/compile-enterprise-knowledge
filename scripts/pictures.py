@@ -543,9 +543,21 @@ def assign(found: list[dict[str, Any]], saved: dict[str, Any], answers: dict[str
     return entries
 
 
-def product_section(entries: dict[str, dict[str, Any]]) -> list[str]:
-    """按产品: every picture under the product it belongs to, however it got there — package folders,
-    the page's only company code or its document's product, a drawing's model, a website category."""
+def product_title(product: tuple[str, str] | list[str] | None) -> str:
+    if not product:
+        return ""
+    category, name = product[0], product[1]
+    return name if category == name else f"{category} / {name}"
+
+
+def media_product_title(item_id: str, places: dict[str, Any] | None) -> str:
+    place = (places or {}).get(item_id)
+    return product_title(product_key(place["product"]) if place and place.get("product") else None)
+
+
+def product_section(entries: dict[str, dict[str, Any]],
+                    escape: Callable[[str], str] = lambda s: str(s).replace("|", "\\|")) -> list[str]:
+    """按产品: compact per-product counts (no per-file expansion); full per-file rows live in 00_素材清单.csv."""
     by_product: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     unplaced: list[dict[str, Any]] = []
     for entry in entries.values():
@@ -553,11 +565,21 @@ def product_section(entries: dict[str, dict[str, Any]]) -> list[str]:
         (by_product[tuple(product)] if product else unplaced).append(entry)
     if not by_product and not unplaced:
         return []
-    lines = ["## 按产品", "", "同一张图只列在一个产品下。对不上任何产品的列在最后的“未对应产品”。", ""]
-    for (category, name), rows in sorted(by_product.items()):
-        title = name if category == name else f"{category} / {name}"
-        lines += [f"### {title}（{len(rows)} 张）", ""]
-        lines += [f"- [[{Path(e['file']).name}]]" for e in sorted(rows, key=lambda e: e["file"])]
+    lines = ["## 按产品", "",
+             "同一张图只统计在一个产品下；按产品查具体文件请用 [[00_素材清单.csv]] 筛选“产品”列。", ""]
+    if by_product:
+        lines += ["| 产品 | 总张数 | 可用于官网 | 待核对 | 内部 | 主要目录 |",
+                  "| --- | ---: | ---: | ---: | ---: | --- |"]
+        for key, rows in sorted(by_product.items()):
+            counts = Counter(e.get("use") for e in rows)
+            folders = Counter(Path(e["file"]).parent.as_posix() for e in rows)
+            top = [f"{folder}（{n}）" for folder, n in folders.most_common(3)]
+            if len(folders) > 3:
+                top.append(f"等 {len(folders)} 个目录")
+            lines.append(
+                f"| {escape(product_title(key))} | {len(rows)} | {counts.get(PUBLIC, 0)} | "
+                f"{counts.get(CHECK, 0)} | {counts.get(INTERNAL, 0)} | {escape('；'.join(top))} |"
+            )
         lines.append("")
     if unplaced:
         lines += [f"### 未对应产品（{len(unplaced)} 张）", "",
@@ -568,63 +590,95 @@ def product_section(entries: dict[str, dict[str, Any]]) -> list[str]:
     return lines
 
 
+LIST_CSV_COLUMNS = ["文件", "产品", "说明（alt）", "能否用于官网", "英文文件名建议", "名字来自", "出处", "位置", "编号",
+                    "类型", "大小", "原位置", "确认状态", "备注"]
+
+
+def retained_csv_row(record: dict[str, Any], product: str = "") -> dict[str, str]:
+    use = PUBLIC if record["status"] == CONFIRMED_MEDIA else record["status"]
+    return {
+        "文件": record["name"],
+        "产品": product,
+        "说明（alt）": "",
+        "能否用于官网": use,
+        "英文文件名建议": "",
+        "名字来自": "原文件名",
+        "出处": "初筛包原文件（没有复制进知识库）",
+        "位置": "",
+        "编号": record["entry"]["item_id"],
+        "类型": record["kind"],
+        "大小": record["size"],
+        "原位置": record["folder"],
+        "确认状态": record["status"],
+        "备注": record["note"],
+    }
+
+
 def write_index(build: Path, entries: dict[str, dict[str, Any]], docs: dict[str, dict[str, Any]], escape: Callable[[str], str],
-                forbidden: re.Pattern[str] | None = None) -> None:
-    """One page for people, one CSV for the website team; no previews, thousands of pictures make Obsidian crawl."""
+                forbidden: re.Pattern[str] | None = None, places: dict[str, Any] | None = None) -> None:
+    """Compact folder-level navigation page for people, plus full per-file CSV for the website team & writing skills."""
     counts = defaultdict(int)
     for entry in entries.values():
         counts[entry["use"]] += 1
+    retained = retained_media(build, entries, forbidden)
+    usable_retained = sum(1 for r in retained if r["status"] == CONFIRMED_MEDIA)
+    waiting_retained = len(retained) - usable_retained
+    picture_summary = "，".join(f"{use} {counts[use]}" for use in (PUBLIC, CHECK, INTERNAL) if counts[use]) or "0"
+    retained_summary = f"初筛包原位保留素材 {len(retained)} 个（已确认可用 {usable_retained}，还没处理 {waiting_retained}）。" if retained else ""
     lines = ["# 素材索引", "",
-             "图片发布后一直保留，不随资料变化删除。文件放在哪、叫什么，按图片的来处生成，名字一旦定下不再变；"
-             "图上是什么写在“说明”一列。买家款号和客户名不进名字。点文件名看图。", "",
-             f"共 {len(entries)} 张：" + "，".join(f"{use} {counts[use]}" for use in (PUBLIC, CHECK, INTERNAL) if counts[use]) + "。", "",
-             f"- **{PUBLIC}**：来自官网或公司画册，原文没有 ⚠，建站可以直接用；“说明”一列可以当 alt 文字。",
+             "本页只做目录级总览，方便在 Obsidian 里快速定位文件夹；**逐张文件明细、alt 说明、英文文件名建议和按产品筛选，请直接打开 [[00_素材清单.csv]]**。", "",
+             f"`90_素材` 库内提取图共 {len(entries)} 张（{picture_summary}）。{retained_summary}", "",
+             f"- **{PUBLIC}**：来自官网或公司画册，原文没有 ⚠，建站和文章配图可以直接用；CSV 里的“说明（alt）”可当 alt 文字。",
              f"- **{CHECK}**：原文有 ⚠ 或说明是 AI 看图写的，用前看一眼原图和原文。",
              f"- **{INTERNAL}**：报价单、产品表里的图（多是买家询价时发来的款式）和整页原图，不要上官网。",
-             f"- **{MEDIA_ROOT}**：初筛按文件夹整批保留的图片（渲染图、白底图等），照搬初筛包里的目录：重复的层只留一层，"
-             "纯数字的目录层去掉，带序号的只去掉序号，路径太长时只留最深的几层。视频、音频、较大的图片和设计稿留在初筛包，列在最后一节。",
-             f"- **{EXTRACTED}**：资料里印的照片，按来源文档放，名字是“第N页”，页上只有一个公司款号时前面加款号。",
-             f"- **{WEBSITE_FOLDER}**：官网页面上的图，按页面放。**{PAGES}**：资料的整页原图，按来源文档放。",
-             "- **证书**、**工厂与设备**：只看资料标题或文件夹名，写明是证书、工厂的才放这里。",
-             "- 说明还只有“第N页”的，可以让 AI 看图补一句说明（pictures.py export / collect），不改文件名。",
-             "- 按产品查图看下面“按产品”一节。",
-             f"- 建站用的清单（含英文文件名）：[[00_素材清单.csv]]。", ""]
-    lines += product_section(entries)
+             f"- **`90_素材` 库内提取图**：仅存放处理过程中提取/转出的图片（{EXTRACTED}、{WEBSITE_FOLDER}、{PAGES}、证书、工厂与设备、图纸转图），发布后只增不删。",
+             "- **初筛包原位素材**：初筛包原有的独立图片、视频、音频和设计稿一律留在初筛包原位（不重复复制进 `90_素材`），按文件夹汇总在最后一节，点“打开文件夹”直达原件。",
+             "- 说明还只有“第N页”的，可以让 AI 看图补一句说明（`pictures.py export / collect`），不改文件名。", ""]
+    lines += product_section(entries, escape)
     by_folder: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries.values():
         by_folder[Path(entry["file"]).parent.as_posix()].append(entry)
-    order = {name: i for i, name in enumerate(FOLDERS)}
-    for folder in sorted(by_folder, key=lambda f: (order.get(f.split("/")[0], len(FOLDERS)), f)):
-        rows = sorted(by_folder[folder], key=lambda e: e["file"])
-        lines += [f"## {folder}（{len(rows)} 张）", "", "| 图片 | 说明 | 能否用于官网 | 名字来自 | 出现在 | 位置 |", "| --- | --- | --- | --- | --- | --- |"]
-        for entry in rows:
-            doc = docs.get(entry["doc_id"])
-            link = (f"[[{Path(doc['file_name']).stem}#{entry['group']}|{doc['title']}]]" if doc else "资料包原文件夹") \
-                + (f" 等 {entry['more'] + 1} 处" if entry["more"] else "")
-            lines.append(f"| [[{Path(entry['file']).name}]] | {escape(entry['alt'])} | {entry['use']} | {entry['named_by']} | {link} "
-                         f"| {escape(entry['location'])} |")
+    if by_folder:
+        order = {name: i for i, name in enumerate(FOLDERS)}
+        lines += ["## 90_素材目录概览", "",
+                  "按子目录汇总；具体文件名、说明和原文位置见 [[00_素材清单.csv]]。", "",
+                  "| 文件夹 | 张数 | 可用于官网 | 待核对 | 内部 | 来源 |",
+                  "| --- | ---: | ---: | ---: | ---: | --- |"]
+        for folder in sorted(by_folder, key=lambda f: (order.get(f.split("/")[0], len(FOLDERS)), f)):
+            rows = by_folder[folder]
+            use_counts = Counter(e.get("use") for e in rows)
+            sources: list[str] = []
+            seen_sources: set[str] = set()
+            for entry in sorted(rows, key=lambda e: e["file"]):
+                doc = docs.get(entry.get("doc_id") or "")
+                label = f"[[{Path(doc['file_name']).stem}|{doc['title']}]]" if doc else "资料包原文件夹"
+                if label not in seen_sources:
+                    seen_sources.add(label)
+                    sources.append(label)
+            source_text = "、".join(sources[:2]) + (f" 等 {len(sources)} 处" if len(sources) > 2 else "")
+            lines.append(
+                f"| {escape(folder)} | {len(rows)} | {use_counts.get(PUBLIC, 0)} | "
+                f"{use_counts.get(CHECK, 0)} | {use_counts.get(INTERNAL, 0)} | {source_text} |"
+            )
         lines.append("")
-    retained = retained_media(build, entries, forbidden)
     lines += retained_section(retained, escape)
     write_text(build / "vault" / INDEX, "\n".join(lines).rstrip() + "\n")
     target = build / "vault" / LIST_CSV
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["文件", "说明（alt）", "能否用于官网", "英文文件名建议", "名字来自", "出处", "位置", "编号",
-                         "类型", "大小", "原位置", "确认状态", "备注"])
+        writer.writerow(LIST_CSV_COLUMNS)
         for entry in sorted(entries.values(), key=lambda e: e["file"]):
             source = docs[entry["doc_id"]]["title"] if entry["doc_id"] in docs else "资料包原文件夹"
             asset = build / "assets" / entry["id"]
             origin = Path(entry.get("source_relpath") or "").parent.as_posix() if entry.get("source_relpath") else ""
-            writer.writerow([entry["file"], entry["alt"], entry["use"], entry["english"], entry["named_by"],
-                             source, entry["location"], entry["id"], "图片", file_size(asset.stat().st_size) if asset.is_file() else "",
-                             origin, entry["use"], ""])
-        # Originals left in the package are material too: the website team needs to know they exist.
+            writer.writerow([entry["file"], product_title(entry.get("product")), entry["alt"], entry["use"], entry["english"],
+                             entry["named_by"], source, entry["location"], entry["id"], "图片",
+                             file_size(asset.stat().st_size) if asset.is_file() else "", origin, entry["use"], ""])
+        # Originals left in the package are material too: the website team & writing skills need to know they exist.
         for record in retained:
-            use = PUBLIC if record["status"] == CONFIRMED_MEDIA else record["status"]
-            writer.writerow([record["name"], "", use, "", "原文件名", "初筛包原文件（没有复制进知识库）", "", record["entry"]["item_id"],
-                             record["kind"], record["size"], record["folder"], record["status"], record["note"]])
+            row = retained_csv_row(record, media_product_title(record["entry"]["item_id"], places))
+            writer.writerow([row[col] for col in LIST_CSV_COLUMNS])
 
 
 CONFIRMED_MEDIA, AWAITING_MEDIA, UNRENDERED_MEDIA = "已确认可用", "待客户确认", "待转图"
@@ -676,36 +730,38 @@ def retained_media(build: Path, entries: dict[str, dict[str, Any]], forbidden: r
     return sorted(records, key=lambda r: (r["status"] != CONFIRMED_MEDIA, r["folder"], r["name"]))
 
 
+def _retained_folder_table(records: list[dict[str, Any]], escape: Callable[[str], str]) -> list[str]:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in records:
+        groups[(r["folder"], r["status"], r["folder_uri"])].append(r)
+    lines = ["| 原位置 | 内容 | 大小 | 确认状态 | 打开 |", "| --- | --- | ---: | --- | --- |"]
+    for (folder, status, uri), members in sorted(groups.items()):
+        kinds: dict[str, int] = defaultdict(int)
+        for r in members:
+            kinds[r["kind"]] += 1
+        what = "、".join(f"{k} {n} 个" for k, n in sorted(kinds.items()))
+        size = file_size(sum(r["bytes"] for r in members))
+        lines.append(f"| {escape(folder)} | {what} | {size} | {status} | {f'[打开文件夹]({uri})' if uri else '见对照表'} |")
+    return lines
+
+
 def retained_section(records: list[dict[str, Any]], escape: Callable[[str], str], heading: str = "##") -> list[str]:
-    """Usable originals one row each; what still waits (the client, a rendering) one row per folder,
-    because the client answers per folder and such folders can hold hundreds of photos."""
+    """Both usable and waiting originals are grouped one row per folder so thousands of package
+    pictures never bloat 00_素材索引.md; per-file details live in 00_素材清单.csv."""
     if not records:
         return []
     usable = [r for r in records if r["status"] == CONFIRMED_MEDIA]
     waiting = [r for r in records if r["status"] != CONFIRMED_MEDIA]
     lines = [f"{heading} 留在初筛包里的素材", "",
-             "视频、音频、较大的图片和设计稿不复制进知识库，原件留在初筛包。初筛按文件夹保留、不用等客户确认的，都算已确认可用。", ""]
+             "初筛包原有的独立图片、视频、音频和设计稿不复制进知识库，原件留在初筛包；本节按原文件夹汇总，逐个文件明细见 [[00_素材清单.csv]]。", ""]
     if usable:
-        lines += [f"{heading}# 已确认可用（{len(usable)} 个）", "",
-                  "| " + " | ".join(RETAINED_COLUMNS) + " | 打开 |", "|" + " --- |" * (len(RETAINED_COLUMNS) + 1)]
-        for r in usable:
-            links = " · ".join(filter(None, [f"[原件]({r['open']})" if r["open"] else "", f"[文件夹]({r['folder_uri']})" if r["folder_uri"] else ""]))
-            lines.append(f"| {escape(r['name'])} | {r['kind']} | {r['size']} | {escape(r['folder'])} | {r['status']} | {r['note']} | {links or '见对照表'} |")
+        lines += [f"{heading}# 已确认可用（{len(usable)} 个）", ""]
+        lines += _retained_folder_table(usable, escape)
         lines.append("")
     if waiting:
-        groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-        for r in waiting:
-            groups[(r["folder"], r["status"], r["folder_uri"])].append(r)
         lines += [f"{heading}# 还没处理（{len(waiting)} 个）", "",
-                  "待客户确认的，客户回复“保留”后重跑就算可用，图片会进上面的素材文件夹；没能转成图片的图纸，原件照常可以打开。", "",
-                  "| 原位置 | 内容 | 大小 | 确认状态 | 打开 |", "| --- | --- | ---: | --- | --- |"]
-        for (folder, status, uri), members in sorted(groups.items()):
-            kinds: dict[str, int] = defaultdict(int)
-            for r in members:
-                kinds[r["kind"]] += 1
-            what = "、".join(f"{k} {n} 个" for k, n in kinds.items())
-            size = file_size(sum(r["bytes"] for r in members))
-            lines.append(f"| {escape(folder)} | {what} | {size} | {status} | {f'[打开文件夹]({uri})' if uri else '见对照表'} |")
+                  "待客户确认的，客户回复“保留”后重跑即转为已确认可用；没能转成图片的图纸，原件照常可以打开。", ""]
+        lines += _retained_folder_table(waiting, escape)
         lines.append("")
     return lines
 

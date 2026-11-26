@@ -345,12 +345,14 @@ class PictureTests(unittest.TestCase):
         self.assertEqual(named["img-dddddddddddddddd.jpg"]["use"], PUBLIC)
         write_index(self.build, named, self.docs, lambda s: s)
         page = (self.build / "vault" / pictures.INDEX).read_text(encoding="utf-8")
-        self.assertIn("## 官网图片/Elephant Wall Tapestry（2 张）", page)
+        self.assertIn("## 90_素材目录概览", page)
+        self.assertIn("| 官网图片/Elephant Wall Tapestry | 2 | 2 | 0 | 0 |", page)
         self.assertIn("## 按产品", page)
         self.assertNotIn("![[", page)
         with (self.build / "vault" / pictures.LIST_CSV).open(encoding="utf-8-sig") as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 5)
+        self.assertIn("产品", rows[0])
         self.assertIn("可用于官网", {r["能否用于官网"] for r in rows})
 
     def test_a_name_stays_and_only_a_numbered_one_gives_way(self) -> None:

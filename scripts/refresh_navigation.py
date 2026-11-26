@@ -16,7 +16,7 @@ from build_progress import (PIPELINE_CHECKPOINT, VERIFY_REPORT, batch_id, extrac
                             output_digests, package_digests, package_input_digests, routing_inputs)
 from governance import CLOSED_STAGES, SOLVED_STAGE, LEDGERS, cleanup_record, merge_ledger, parse_ledger, render_ledger, strip_fingerprints
 from kb_common import BUILD_DIRECTORY, CLEAN_DIRECTORY, load_config, load_json, load_jsonl, run_lock, write_json, write_jsonl, write_text
-from pictures import INDEX, LIST_CSV, PUBLIC, CONFIRMED_MEDIA, retained_media, retained_section
+from pictures import INDEX, LIST_CSV, retained_csv_row, retained_media, retained_section
 
 REGISTER = "02_源资料/源资料与可检索性台账.md"
 PLAN = "02_源资料/处理计划与样例.md"
@@ -140,12 +140,13 @@ def material_texts(build: Path, index: str, table: str) -> tuple[str, str]:
     head = index.partition("## 留在初筛包里的素材")[0].rstrip()
     index = head + "\n\n" + "\n".join(retained_section(records, lambda s: str(s).replace("|", "\\|"))).rstrip() + "\n"
     reader = csv.DictReader(io.StringIO(table))
+    fieldnames = reader.fieldnames or []
     rows = [r for r in reader if r["编号"] in entries]
     for r in records:
-        rows.append(dict(zip(reader.fieldnames, [r["name"], "", PUBLIC if r["status"] == CONFIRMED_MEDIA else r["status"], "", "原文件名",
-                    "初筛包原文件（没有复制进知识库）", "", r["entry"]["item_id"], r["kind"], r["size"], r["folder"], r["status"], r["note"]])))
+        row = retained_csv_row(r)
+        rows.append({col: row.get(col, "") for col in fieldnames})
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=reader.fieldnames)
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     writer.writerows(rows)
     return index, output.getvalue()

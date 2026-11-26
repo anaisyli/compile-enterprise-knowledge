@@ -1069,7 +1069,7 @@ def main() -> int:
     if not package_read_only:
         write_name_maps(routes, docs, published, statuses, same_content)
     write_json(build / "samples-waiting.json", write_plan_page(build, routes, docs, published, statuses, originals, config, status_info))
-    write_picture_index(build, pictures_named, docs, escape_cell, forbidden)
+    write_picture_index(build, pictures_named, docs, escape_cell, forbidden, places)
     write_exports(build, visible, docs, styles, statuses)
     write_jsonl(build / "docs.jsonl", docs.values())
     write_json(build / "published.json", published)

@@ -372,5 +372,14 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
             if not pages:
                 media.append({**entry, "kind": "document", "status": "drawing_unrendered"})
             continue
+        if route["reason"] == "dimension_drawing" and asset.get("path") and source.is_file():
+            suffix = source.suffix.casefold()
+            size = source.stat().st_size
+            entry["bytes"] = size
+            if suffix in IMAGE_TYPES and size <= max_bytes:
+                name = f"img-{(asset.get('source_hash') or '')[:16]}{suffix}"
+                if not (assets / name).is_file():
+                    shutil.copy2(long_path(source), long_path(assets / name))
+                entry["id"] = name
         media.append(entry)
     return media

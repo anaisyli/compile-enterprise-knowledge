@@ -87,14 +87,16 @@ class MediaFolderTests(unittest.TestCase):
 
         index = (self.build / "vault/03_正式知识/90_素材/00_素材索引.md").read_text(encoding="utf-8")
         self.assertIn("## 留在初筛包里的素材", index)
-        self.assertIn("| 宣传片.mp4 | 视频 | 0 KB | 建站资料/产品/X100/渲染视频 | 已确认可用 | 内容待转写，转写前不出知识点 |", index)
-        self.assertIn("| 正视图.png | 图片 | 0 KB | 建站资料/产品/X100/渲染图 | 已确认可用 | 留在初筛包原位，见原位置 |", index)
+        self.assertIn("| 建站资料/产品/X100/渲染视频 | 视频 1 个 | 0 KB | 已确认可用 |", index)
+        self.assertIn("| 建站资料/产品/X100/渲染图 | 图片 2 个 | 0 KB | 已确认可用 |", index)
         self.assertIn("| 建站资料/产品/X100/实拍图 | 图片 2 个 | 0 KB | 待客户确认 |", index)
+        self.assertNotIn("| 正视图.png |", index)
         with (self.build / "vault/03_正式知识/90_素材/00_素材清单.csv").open(encoding="utf-8-sig", newline="") as handle:
             listed = {row["编号"]: row for row in csv.DictReader(handle)}
         self.assertEqual((listed["r1"]["类型"], listed["r1"]["确认状态"], listed["r1"]["能否用于官网"]), ("图片", "已确认可用", "可用于官网"))
         self.assertEqual((listed["v1"]["类型"], listed["v1"]["确认状态"], listed["v1"]["能否用于官网"]), ("视频", "已确认可用", "可用于官网"))
         self.assertEqual(listed["p1"]["确认状态"], "待客户确认")
+        self.assertIn("产品", listed["r1"])
 
         with (self.build / "客户确认表.csv").open(encoding="utf-8-sig", newline="") as handle:
             rows = [row for row in csv.DictReader(handle) if "实拍图" in row["原文件名"]]
