@@ -31,6 +31,8 @@ KEEP = {"保留", "可以", "可用", "同意", "是", "keep", "yes", "y", "ok"}
 DROP = {"不用", "不可以", "删除", "不同意", "否", "drop", "no", "n"}
 JSON_KEEP_DECISIONS = {"keep", "yes", "whole", "approve", "allow"}
 JSON_DROP_DECISIONS = {"drop", "no", "exclude", "reject", "deny"}
+JSON_OMIT_DECISIONS = {"omit", "skip", "unavailable", "no_source", "not_used"}
+JSON_PENDING_DECISIONS = {"pending", "defer", "tbd", "hold"}
 ANSWER_COLUMN = "回答（保留 / 不用 / 文字）"
 QUESTION_COLUMN = "要确认的问题"
 SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -208,11 +210,14 @@ def read_feedback_json(path: Path) -> list[dict[str, Any]]:
                 rows.append({"编号": tid, ANSWER_COLUMN: answer, "_json_note": extra_note, "_json_raw": answer_text,
                              "_from_json": True,
                              "_binary_permission": whole_item_permission,
+                             "_json_decision": low,
+                             "_json_decision_label": (entry.get("decisionLabel") or "").strip(),
+                             "_json_values": {k: v.strip() for k, v in values.items() if isinstance(v, str) and v.strip()},
                              "_cus_id": entry.get("cusId") or "",
                              "_json_question": entry.get("question") or "",
                              "_source_name": entry.get("sourceName") or "",
                              "_source_location": entry.get("sourceLocation") or "",
-                             "_force_note": (low in {"partial", "pending", "exception", "revise"}
+                             "_force_note": (low in {"partial", "pending", "exception", "revise"} | JSON_OMIT_DECISIONS | JSON_PENDING_DECISIONS
                                              or has_values or bool(applicability)) and not whole_item_permission})
     return rows
 
@@ -315,12 +320,19 @@ def main() -> int:
             with answers_path.open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
         applied, notes, unclear = [], [], []
+    resolved_auto: list[dict[str, Any]] = []
+    omitted_or_unavailable: list[dict[str, Any]] = []
+    facts_for_curation: list[dict[str, Any]] = []
+    customer_pending: list[dict[str, Any]] = []
+    seen_record_ids: set[str] = set()
     for row in rows:
         answer = (row.get(ANSWER_COLUMN) or row.get("回答") or "").strip()
         answer_id = row.get("编号", "")
         record = records.get(answer_id)
         if not answer:
             continue
+        if record:
+            seen_record_ids.add(record["id"])
         if not record:
             if row.get("_from_json"):
                 cus_id = row.get("_cus_id", "")
@@ -355,11 +367,28 @@ def main() -> int:
         if (not record.get("item_id")
                 or (record.get("answer_type") == "text" and not binary_permission)
                 or row.get("_force_note")):
-            # Which fabric, which year, or partial scope from webpage JSON: a person decides, the build does not.
+            # Which fabric, which year, or partial scope from webpage JSON: a person/AI applies to curated pages.
             notes.append({"id": record["id"], "question": record["question"], "answer": answer,
                           **({"note": row["_json_note"]} if row.get("_json_note") else {}),
                           **({"from": "客户确认网页 JSON"} if row.get("_from_json") else {}),
                           "at": datetime.now().isoformat(timespec="seconds")})
+            low_dec = row.get("_json_decision") or ""
+            label_and_ans = f"{row.get('_json_decision_label', '')} {answer}"
+            summary_item = {
+                "id": record["id"],
+                "cus_id": row.get("_cus_id") or record["id"].rsplit(".", 1)[0],
+                "question": record.get("question") or row.get("_json_question") or "",
+                "decision": row.get("_json_decision_label") or low_dec or answer[:40],
+                **({"values": row["_json_values"]} if row.get("_json_values") else {}),
+                **({"note": row["_json_note"]} if row.get("_json_note") else {}),
+                **({"source": row["_source_name"]} if row.get("_source_name") else {}),
+            }
+            if low_dec in JSON_PENDING_DECISIONS or any(k in label_and_ans for k in ("还需内部确认", "待定", "暂不确定")):
+                customer_pending.append(summary_item)
+            elif low_dec in JSON_OMIT_DECISIONS or any(k in label_and_ans for k in ("暂不采用", "无法提供", "不采用")):
+                omitted_or_unavailable.append(summary_item)
+            else:
+                facts_for_curation.append(summary_item)
             continue
         if decision is None:
             unclear.append({"id": record["id"], "answer": answer})
@@ -387,6 +416,14 @@ def main() -> int:
                 if item_id in (config.get("ask_client") or {}):
                     del config["ask_client"][item_id]
         applied.append({"id": record["id"], "decision": decision})
+        resolved_auto.append({
+            "id": record["id"],
+            "cus_id": row.get("_cus_id") or record["id"].rsplit(".", 1)[0],
+            "decision": "允许" if decision == "keep" else "拒绝（清理缓存）",
+            "question": record.get("question") or row.get("_json_question") or "",
+            **({"source": row["_source_name"]} if row.get("_source_name") else {}),
+            **({"note": row["_json_note"]} if row.get("_json_note") else {}),
+        })
 
     # Answered questions wait for a person to verify (已答待核验); unanswered ones stay with their batch.
     original_config = load_json(config_path)
@@ -407,17 +444,45 @@ def main() -> int:
                 denied_items.update(i for i in rec["item_id"].split(",") if i)
     cache_cleanup = cleanup_denied_caches(build, denied_items, dry_run=args.dry_run)
     unmatched = [u for u in unclear if "找不到" in (u.get("problem") or "")]
+    # Deduplicate governance queue items by canonical sub_id to report unanswered CUS items cleanly.
+    unique_queue = {rec["id"]: rec for rec in records.values() if rec.get("id")}
+    unanswered_in_queue = [
+        {"id": sub_id, "cus_id": sub_id.rsplit(".", 1)[0], "question": rec.get("question") or ""}
+        for sub_id, rec in sorted(unique_queue.items())
+        if sub_id not in seen_record_ids
+    ]
+    resolution_summary = {
+        "counts": {
+            "resolved_auto": len(resolved_auto),
+            "omitted_or_unavailable": len(omitted_or_unavailable),
+            "facts_for_curation": len(facts_for_curation),
+            "customer_pending": len(customer_pending),
+            "unanswered_in_queue": len(unanswered_in_queue),
+            "unmatched_ids": len(unmatched),
+        },
+        "resolved_auto": resolved_auto,
+        "omitted_or_unavailable": omitted_or_unavailable,
+        "facts_for_curation": facts_for_curation,
+        "still_unresolved": {
+            "customer_pending": customer_pending,
+            "unanswered_in_queue": unanswered_in_queue,
+            "unmatched_ids": unmatched,
+        },
+    }
     if whole_item_changed or cache_cleanup["removed_files"] or cache_cleanup["removed_page_checks"]:
         recommended_action = "full_pipeline"
-        next_step = "涉及许可/入库去向变更，请重跑 run_pipeline.py，再发布"
+        next_step = "涉及许可/入库去向变更，请重跑 run_pipeline.py，再按 resolution_summary 落实整理页修订与护栏后发布"
     elif unit_changed or changed:
         recommended_action = "from_guard"
-        next_step = "仅涉及片段级答复，可用 run_pipeline.py --from guard 轻量刷新，再发布"
+        next_step = "仅涉及片段级答复，可用 run_pipeline.py --from guard 轻量刷新，再落实整理页修订后发布"
+    elif facts_for_curation or omitted_or_unavailable:
+        recommended_action = "curate_and_guard"
+        next_step = "无文件去向变更；请按 resolution_summary 落实整理页新口径与不采用项护栏，关闭对应 CUS 后 --from curate 发布"
     else:
         recommended_action = "none"
-        next_step = "没有新的配置变化，无需重跑"
+        next_step = "没有新的配置或整理层变更，无需重跑"
     if args.dry_run:
-        next_step = f"预演模式未写入任何文件；确认无误后去掉 --dry-run 正式回填（预计后续动作：{recommended_action}）"
+        next_step = f"预演模式未写入任何文件；请先向用户汇报 resolution_summary（4 桶解决状态），确认后去掉 --dry-run 正式回填（预计后续动作：{recommended_action}）"
     else:
         if records:
             from governance_state import mark_answered
@@ -442,6 +507,7 @@ def main() -> int:
         "unmatched_ids": unmatched,
         "preserved_answers": skipped,
         "denied_cache_cleanup": cache_cleanup,
+        "resolution_summary": resolution_summary,
         "next": next_step,
     }, ensure_ascii=False, indent=2))
     return 0

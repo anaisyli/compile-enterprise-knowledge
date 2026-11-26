@@ -131,10 +131,18 @@ class ApplyAnswersPreflightAndCleanupTests(unittest.TestCase):
         (self.build / "governance.json").write_text(json.dumps({
             "CUS": [{
                 "id": "P-099-CUS-001",
-                "items": [{
-                    "sub_id": "P-099-CUS-001.1", "client_id": "ans-deny-1",
-                    "item_id": "doc_deny", "location": "", "question": "能否纳入知识库？", "answer_type": "binary",
-                }],
+                "items": [
+                    {"sub_id": "P-099-CUS-001.1", "client_id": "ans-deny-1",
+                     "item_id": "doc_deny", "location": "", "question": "能否纳入知识库？", "answer_type": "binary"},
+                    {"sub_id": "P-099-CUS-001.2", "client_id": "ans-omit-2",
+                     "item_id": "doc_a", "location": "第 3 页", "question": "压力表是否采用？", "answer_type": "text"},
+                    {"sub_id": "P-099-CUS-001.3", "client_id": "ans-fact-3",
+                     "item_id": "doc_a", "location": "第 1 页", "question": "正式型号是什么？", "answer_type": "text"},
+                    {"sub_id": "P-099-CUS-001.4", "client_id": "ans-pend-4",
+                     "item_id": "doc_a", "location": "第 5 页", "question": "质保期几年？", "answer_type": "text"},
+                    {"sub_id": "P-099-CUS-001.5", "client_id": "ans-miss-5",
+                     "item_id": "doc_a", "location": "第 6 页", "question": "未作答的问题", "answer_type": "text"},
+                ],
             }]
         }, ensure_ascii=False), encoding="utf-8")
         (self.build / "mineru-units/doc_deny.json").write_text('{"units":[]}', encoding="utf-8")
@@ -148,6 +156,9 @@ class ApplyAnswersPreflightAndCleanupTests(unittest.TestCase):
         self.feedback.write_text(json.dumps({
             "answers": [
                 {"answerId": "ans-deny-1", "cusId": "CUS-001", "decision": "deny", "sourceLocation": "", "question": "能否纳入知识库？"},
+                {"answerId": "ans-omit-2", "cusId": "CUS-001", "decision": "omit", "decisionLabel": "此处暂不采用", "answerText": "此处暂不采用", "sourceLocation": "第 3 页", "question": "压力表是否采用？"},
+                {"answerId": "ans-fact-3", "cusId": "CUS-001", "decision": "same", "decisionLabel": "同一产品，统一型号", "values": {"model": "YFD71XH"}, "answerText": "统一用 YFD71XH", "sourceLocation": "第 1 页", "question": "正式型号是什么？"},
+                {"answerId": "ans-pend-4", "cusId": "CUS-001", "decision": "pending", "decisionLabel": "还需内部确认", "answerText": "还需内部确认", "sourceLocation": "第 5 页", "question": "质保期几年？"},
                 {"answerId": "ans-old-999", "cusId": "CUS-999", "decision": "allow", "sourceLocation": "", "question": "旧问题"},
             ]
         }, ensure_ascii=False), encoding="utf-8")
@@ -162,6 +173,17 @@ class ApplyAnswersPreflightAndCleanupTests(unittest.TestCase):
         self.assertEqual(len(preview["unmatched_ids"]), 1)
         self.assertEqual(preview["denied_cache_cleanup"]["items"], ["doc_deny"])
         self.assertEqual(preview["denied_cache_cleanup"]["removed_page_checks"], 1)
+        counts = preview["resolution_summary"]["counts"]
+        self.assertEqual(counts, {
+            "resolved_auto": 1,
+            "omitted_or_unavailable": 1,
+            "facts_for_curation": 1,
+            "customer_pending": 1,
+            "unanswered_in_queue": 1,
+            "unmatched_ids": 1,
+        })
+        self.assertEqual(preview["resolution_summary"]["facts_for_curation"][0]["values"], {"model": "YFD71XH"})
+        self.assertEqual(preview["resolution_summary"]["still_unresolved"]["unanswered_in_queue"][0]["id"], "P-099-CUS-001.5")
         # Nothing touched on disk during --dry-run.
         self.assertTrue((self.build / "mineru-units/doc_deny.json").is_file())
         self.assertEqual(json.loads(self.config_path.read_text(encoding="utf-8"))["client_answers"], {})
