@@ -336,7 +336,12 @@ def drawing_pictures(source: Path, assets: Path, source_hash: str) -> list[str]:
 
 
 def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Path, max_bytes: int) -> list[dict[str, Any]]:
-    """Pictures and videos screening kept by folder."""
+    """Pictures and videos screening kept by folder.
+
+    Standalone images, videos, audio, and design files stay in the preparation package and are
+    indexed in 00_素材索引.md / 00_素材清单.csv instead of being copied into 90_素材; only rendered
+    PDF drawings (and extracted document/website images) are stored inside 90_素材.
+    """
     assets = build / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     media = []
@@ -358,7 +363,6 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
             "drawing_model": route.get("drawing_model"),
             "drawing_model_confirmed": route.get("drawing_model_confirmed"),
         }
-        suffix = extension_of(asset.get("display_name") or "")
         source = package_of[item_id] / (asset.get("path") or "")
         if route["reason"] == "drawing":
             pages = drawing_pictures(source, assets, asset.get("source_hash", "")) if asset.get("path") else []
@@ -368,17 +372,5 @@ def collect_media(routes: dict[str, Any], package_of: dict[str, Path], build: Pa
             if not pages:
                 media.append({**entry, "kind": "document", "status": "drawing_unrendered"})
             continue
-        if (entry["kind"] == "image" and route["reason"] in {"media_kept", "dimension_drawing"} and suffix in IMAGE_TYPES
-                and entry["bytes"] <= max_bytes and asset.get("path")
-                and Path(asset.get("display_name") or "").suffix):
-            name = f"img-{asset['source_hash'][:16]}{suffix}"
-            target = assets / name
-            if not target.exists():
-                try:
-                    shutil.copyfile(long_path(source), long_path(target))
-                except OSError:
-                    name = ""
-            if name:
-                entry["id"] = name
         media.append(entry)
     return media

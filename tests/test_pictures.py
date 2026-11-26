@@ -84,8 +84,9 @@ class PictureTests(unittest.TestCase):
         record = pictures.retained_record(design)
         self.assertEqual((record["name"], record["kind"], record["size"], record["folder"], record["status"]),
                          ("主图.psd", "设计稿", "3.0 MB", "产品/X1", "已确认可用"))
-        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/大图.jpg"})["note"], "大文件，见原位置")
-        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/.jpg", "bytes": 46428})["note"], "图片已保留，原件见原位置")
+        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/主图.jpg"})["note"], "留在初筛包原位，见原位置")
+        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/大图.jpg", "bytes": 6 * 1024 * 1024})["note"], "大文件，见原位置")
+        self.assertEqual(pictures.retained_record({**design, "relpath": "产品/.jpg", "bytes": 46428})["note"], "留在初筛包原位，见原位置")
         video = pictures.retained_record({**design, "kind": "video", "relpath": "产品/宣传片.mp4"})
         self.assertEqual((video["kind"], video["status"]), ("视频", "已确认可用"))
         self.assertIn("待转写", video["note"])

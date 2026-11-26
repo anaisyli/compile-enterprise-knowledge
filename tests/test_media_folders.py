@@ -81,17 +81,18 @@ class MediaFolderTests(unittest.TestCase):
         routes = json.loads((self.build / "routes.json").read_text(encoding="utf-8"))
         self.assertEqual({i: routes[i]["reason"] for i in ("r1", "p1", "v1")},
                          {"r1": "media_kept", "p1": "media_awaiting_client", "v1": "media_kept"})
+        # Standalone package images stay in the package (not copied into 90_素材) and are indexed in 00_素材索引 / 00_素材清单.csv.
         files = sorted(entry["file"] for entry in self.pictures().values())
-        self.assertEqual(len(files), 2)
-        # Filed where the client filed it, as the package has it.
-        self.assertTrue(all(f.startswith("资料包素材/建站资料/产品/X100/渲染图/渲染图-") for f in files), files)
+        self.assertEqual(files, [])
 
         index = (self.build / "vault/03_正式知识/90_素材/00_素材索引.md").read_text(encoding="utf-8")
         self.assertIn("## 留在初筛包里的素材", index)
         self.assertIn("| 宣传片.mp4 | 视频 | 0 KB | 建站资料/产品/X100/渲染视频 | 已确认可用 | 内容待转写，转写前不出知识点 |", index)
+        self.assertIn("| 正视图.png | 图片 | 0 KB | 建站资料/产品/X100/渲染图 | 已确认可用 | 留在初筛包原位，见原位置 |", index)
         self.assertIn("| 建站资料/产品/X100/实拍图 | 图片 2 个 | 0 KB | 待客户确认 |", index)
         with (self.build / "vault/03_正式知识/90_素材/00_素材清单.csv").open(encoding="utf-8-sig", newline="") as handle:
             listed = {row["编号"]: row for row in csv.DictReader(handle)}
+        self.assertEqual((listed["r1"]["类型"], listed["r1"]["确认状态"], listed["r1"]["能否用于官网"]), ("图片", "已确认可用", "可用于官网"))
         self.assertEqual((listed["v1"]["类型"], listed["v1"]["确认状态"], listed["v1"]["能否用于官网"]), ("视频", "已确认可用", "可用于官网"))
         self.assertEqual(listed["p1"]["确认状态"], "待客户确认")
 
@@ -102,7 +103,6 @@ class MediaFolderTests(unittest.TestCase):
         self.assertIn("2 个文件", rows[0]["原文件名"])
 
         name_map = (self.package / "审计记录/知识库文件对照.md").read_text(encoding="utf-8")
-        self.assertIn("进素材库：90_素材/资料包素材/建站资料/产品/X100/渲染图/", name_map)
         self.assertIn("视频或音频，已确认可用，原件留在初筛包", name_map)
 
         verified = self.run_script("verify_kb.py", "--package", str(self.package), "--text-dir", str(self.text),
@@ -120,8 +120,11 @@ class MediaFolderTests(unittest.TestCase):
         self.assertEqual(applied.returncode, 0, applied.stderr)
         self.pipeline()
         files = sorted(entry["file"] for entry in self.pictures().values())
-        self.assertEqual(len(files), 4)
-        self.assertEqual(sum("资料包素材/建站资料/产品/X100/实拍图/" in f for f in files), 2)  # The client's own folder name stays.
+        self.assertEqual(files, [])
+        with (self.build / "vault/03_正式知识/90_素材/00_素材清单.csv").open(encoding="utf-8-sig", newline="") as handle:
+            listed_after = {row["编号"]: row for row in csv.DictReader(handle)}
+        self.assertEqual((listed_after["p1"]["确认状态"], listed_after["p1"]["能否用于官网"]), ("已确认可用", "可用于官网"))
+        self.assertEqual((listed_after["p2"]["确认状态"], listed_after["p2"]["能否用于官网"]), ("已确认可用", "可用于官网"))
 
 
 if __name__ == "__main__":

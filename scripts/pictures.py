@@ -651,8 +651,9 @@ def retained_record(entry: dict[str, Any], forbidden: re.Pattern[str] | None = N
         kind, note = "设计稿", "设计稿已保留，原件见原位置"
     elif suffix in {".dwg", ".dxf", ".step", ".stp", ".iges", ".igs"}:
         kind, note = "图纸", "图纸已保留，原件见原位置"
-    elif entry.get("kind") == "image" and Path(relpath).name.casefold() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-        kind, note = "图片", "图片已保留，原件见原位置"
+    elif entry.get("kind") == "image" and (suffix in SHOWN_IMAGES or Path(relpath).name.casefold() in SHOWN_IMAGES):
+        kind = "图片"
+        note = "大文件，见原位置" if (entry.get("bytes") or 0) > 5 * 1024 * 1024 else "留在初筛包原位，见原位置"
     elif entry.get("kind") == "image" and suffix not in SHOWN_IMAGES:
         kind, note = "图片", f"{suffix or '这种格式'} 知识库里显示不了"
     elif entry.get("kind") == "image":
