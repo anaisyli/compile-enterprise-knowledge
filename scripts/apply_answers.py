@@ -208,6 +208,10 @@ def read_feedback_json(path: Path) -> list[dict[str, Any]]:
                 rows.append({"编号": tid, ANSWER_COLUMN: answer, "_json_note": extra_note, "_json_raw": answer_text,
                              "_from_json": True,
                              "_binary_permission": whole_item_permission,
+                             "_cus_id": entry.get("cusId") or "",
+                             "_json_question": entry.get("question") or "",
+                             "_source_name": entry.get("sourceName") or "",
+                             "_source_location": entry.get("sourceLocation") or "",
                              "_force_note": (low in {"partial", "pending", "exception", "revise"}
                                              or has_values or bool(applicability)) and not whole_item_permission})
     return rows
@@ -235,6 +239,7 @@ def main() -> int:
     config.setdefault("client_answers", {})
     config.setdefault("client_answers_units", {})
     records: dict[str, dict[str, Any]] = {}
+    existing_client_notes = load_jsonl(build / "client-notes.jsonl")
     skipped = []
     if answers_path.suffix.casefold() == ".xlsx":
         if args.release_awaiting_overrides:
@@ -277,8 +282,38 @@ def main() -> int:
         applied, notes, unclear = [], [], []
     for row in rows:
         answer = (row.get(ANSWER_COLUMN) or row.get("回答") or "").strip()
-        record = records.get(row.get("编号", ""))
-        if not answer or not record:
+        answer_id = row.get("编号", "")
+        record = records.get(answer_id)
+        if not answer:
+            continue
+        if not record:
+            if row.get("_from_json"):
+                cus_id = row.get("_cus_id", "")
+                prior_confirmation = any(
+                    cus_id and (value.get("cus_id") == cus_id or value.get("cus_id", "").startswith(cus_id + "."))
+                    and value.get("decision") == normalized(answer)
+                    and config.get("client_answers", {}).get(item_id) == normalized(answer)
+                    for item_id, value in (config.get("client_answer_confirmations") or {}).items()
+                )
+                prior_note = any(
+                    note.get("question") == row.get("_json_question") and note.get("answer") == answer
+                    and note.get("from") != "客户确认网页 JSON（旧编号待映射）"
+                    for note in existing_client_notes
+                )
+                if not prior_confirmation and not prior_note:
+                    unclear.append({"id": answer_id, "answer": answer,
+                                    "problem": "当前待处理清单中找不到此 answerId，答复未应用"})
+                    if cus_id:
+                        source = "、".join(part for part in (row.get("_source_name"), row.get("_source_location")) if part)
+                        note_text = "；".join(part for part in (f"旧CUS编号：{cus_id}",
+                                                                  f"来源：{source}" if source else "",
+                                                                  row.get("_json_note", "")) if part)
+                        notes.append({"id": f"{cus_id}-{answer_id}",
+                                      "question": row.get("_json_question") or answer_id,
+                                      "answer": answer,
+                                      "note": note_text,
+                                      "from": "客户确认网页 JSON（旧编号待映射）",
+                                      "at": datetime.now().isoformat(timespec="seconds")})
             continue
         decision = normalized(answer)
         binary_permission = bool(row.get("_binary_permission"))
